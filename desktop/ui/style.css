@@ -1182,3 +1182,6 @@ body.directory-picker-open { overflow: hidden; }
 .run-pulls { margin: .25rem 0 0; padding-left: 1.1rem; }
 .run-actions { flex-wrap: wrap; }
 .run-send-text { width: 100%; min-height: 8rem; }
+.run-restart-note { width: 100%; min-height: 10rem; }
+.run-handover-text { margin: .4rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.run-pause .actions { margin-top: .4rem; }

@@ -31,7 +31,9 @@
 //! and how many items of each category it saw (`seen_by_category`). It runs only on the
 //! account owner's coordinator (never on a computer signed in to one, nor for a shared portal
 //! account), needs no running Teams service, and does nothing while no ready state is
-//! configured.
+//! configured. A paused project (`record::Pause`, every project when the pause names none) is
+//! neither read nor recorded, so its items are seen as new at the first poll after the pause
+//! ends.
 use super::engine::{self, Azure};
 use super::*;
 use crate::workflows::director::{ReadyStates, Settings};
@@ -44,6 +46,9 @@ pub(in crate::app) const MAX_ITEMS: usize = 100;
 pub(in crate::app) const MAX_STARTS: usize = 25;
 /// How often the task looks at whether a poll is due.
 const TICK_SECONDS: u64 = 30;
+/// What a paused project reports.
+const PAUSED: &str =
+    "Paused: the watcher starts no run for this project until the workflow runs are unpaused.";
 /// What a project with several workflows that start by themselves and no director reports.
 const WAITING: &str = "Waiting for a director: several workflows of this project start by themselves, they differ in machine or agent, and neither the project nor the account has a workflow director to choose among them.";
 
@@ -250,6 +255,8 @@ pub(in crate::app) fn view(state: &DesktopState) -> Value {
         .map(|m| waiting_for_director(&settings, &m.workflows))
         .unwrap_or_default();
     let last = state.workflows.watcher.last();
+    let pauses = state.workflows.db.pauses().unwrap_or_default();
+    let paused_projects: Vec<&str> = pauses.iter().filter_map(|p| p.project.as_deref()).collect();
     let (word, reason) = if !engine::may_run(state) {
         (
             "unavailable",
@@ -262,6 +269,13 @@ pub(in crate::app) fn view(state: &DesktopState) -> Value {
             "idle",
             Some("No ready state is configured; choose one for a project in Settings › Workflows."),
         )
+    } else if pauses.iter().any(|p| p.project.is_none()) {
+        (
+            "paused",
+            Some(
+                "Paused: the watcher starts no run until the workflow runs are unpaused (workflow_runs_unpause).",
+            ),
+        )
     } else if !waiting.is_empty() {
         ("waiting_for_director", Some(WAITING))
     } else {
@@ -271,6 +285,7 @@ pub(in crate::app) fn view(state: &DesktopState) -> Value {
         "state": word,
         "reason": reason,
         "waiting_projects": waiting,
+        "paused_projects": paused_projects,
         "interval_minutes": settings.watch_interval_minutes,
         "last_poll": last,
         "next_poll_at": last
@@ -351,6 +366,8 @@ pub(in crate::app) async fn poll(host: &Arc<Host>, azure: &Azure, now: i64) -> V
         return unread;
     };
     let settings = map.workflow_settings.clone();
+    // Without the pauses read, nothing is started.
+    let pauses = state.workflows.db.pauses().ok();
     let mut projects = Vec::new();
     let mut budget = MAX_STARTS;
     for ready in settings
@@ -358,6 +375,16 @@ pub(in crate::app) async fn poll(host: &Arc<Host>, azure: &Azure, now: i64) -> V
         .iter()
         .filter(|r| !r.states.is_empty())
     {
+        if pauses
+            .as_ref()
+            .is_none_or(|p| super::record::paused(p, &ready.project))
+        {
+            projects.push(
+                json!({"organization": ready.organization, "project": ready.project,
+                "states": ready.states, "complete": false, "paused": true, "skipped": PAUSED}),
+            );
+            continue;
+        }
         projects.push(project(host, azure, &map, ready, &mut budget, now).await);
     }
     let partial = projects.iter().any(|p| p["complete"] != true);

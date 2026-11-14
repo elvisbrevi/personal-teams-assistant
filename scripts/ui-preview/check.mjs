@@ -2669,6 +2669,57 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_run_cancel'));
   await page.waitForFunction(() => document.querySelector('#run-detail-content .run-head .badge')?.textContent === 'Cancelada');
   check(`runs ${label}: cancel ends the run`, (await calls()).some(c => c.method === 'workflow_run_cancel' && c.confirmed) && await page.locator('.run-actions button', { hasText: 'Cancelar ejecución' }).count() === 0);
+  // Restart with a handover note: the note starts from the record, nothing happens before the second press, and the new
+  // run links the one it continues and shows the note.
+  await page.click('#run-detail-back');
+  await page.waitForSelector('#run-rows [data-run]');
+  await page.click('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e03"]');
+  await page.waitForSelector('#run-restart-open');
+  await page.click('#run-restart-open');
+  await page.waitForSelector('#run-restart-note');
+  const draft = await page.inputValue('#run-restart-note');
+  check(`runs ${label}: the handover note starts from the run's branches and pull requests`, /^Hecho en la ejecución anterior/.test(draft) && /Rama feature\/6001-receipt-download/.test(draft) && /Pull request !41/.test(draft) && /Falta por hacer:/.test(draft), draft);
+  await page.fill('#run-restart-note', `${draft}abrir el pull request de 6002`);
+  check(`runs ${label}: the note shows how many characters it has`, /de 4000 caracteres/.test(await page.locator('#run-restart-count').textContent() ?? ''));
+  const restartScan = await scan(page);
+  check(`runs ${label}: the restart form passes WCAG 2.2 AA`, restartScan.length === 0, JSON.stringify(restartScan));
+  await page.screenshot({ path: `${out}/${label}-workflow-run-restart.png`, fullPage: true });
+  await page.locator('#run-restart button', { hasText: 'Reiniciar' }).first().click();
+  check(`runs ${label}: restart waits for a second press`, !(await calls()).some(c => c.method === 'workflow_run_restart'));
+  await page.locator('#run-restart button', { hasText: 'Confirmar reinicio' }).click();
+  await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_run_restart'));
+  await page.waitForSelector('#run-continues');
+  const restarted = (await calls()).find(c => c.method === 'workflow_run_restart');
+  check(`runs ${label}: the restart sends the note and opens the new run, which links the old one and shows the note`,
+    restarted?.confirmed && restarted.run === '3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e03' && /abrir el pull request de 6002$/.test(restarted.note ?? '')
+    && await page.isVisible('#run-handover') && /Continúa la ejecución/.test(await detailText()), JSON.stringify(restarted));
+  await page.click('#run-continues');
+  await page.waitForSelector('#run-restarted-as');
+  check(`runs ${label}: the old run is cancelled and links the run that restarted it`, /Cancelada/.test(await page.locator('#run-detail-content .run-head .badge').first().textContent() ?? '') && await page.locator('#run-restart-open').count() === 0);
+  // Pause: the choice for the live sessions has no default, nothing happens before the second press, the pause shows
+  // on the list and on each run it holds, and unpause ends it.
+  await page.click('#run-detail-back');
+  await page.waitForSelector('#run-rows [data-run]');
+  await page.click('#runs-pause-open');
+  await page.waitForSelector('#runs-pause-panel');
+  check(`runs ${label}: pausing waits for the choice of what happens to the sessions`, await page.isDisabled('#runs-pause-confirm'));
+  await page.locator('#runs-pause-panel label', { hasText: 'Dejarlas terminar' }).locator('input').check();
+  const pauseScan = await scan(page);
+  check(`runs ${label}: the pause form passes WCAG 2.2 AA`, pauseScan.length === 0, JSON.stringify(pauseScan));
+  await page.click('#runs-pause-confirm');
+  check(`runs ${label}: pause waits for a second press`, !(await calls()).some(c => c.method === 'workflow_runs_pause'));
+  await page.click('#runs-pause-confirm');
+  await page.waitForSelector('#runs-pauses .run-pause');
+  const paused = (await calls()).find(c => c.method === 'workflow_runs_pause');
+  check(`runs ${label}: the pause covers every project and lets the sessions finish`, paused?.confirmed && paused.sessions === 'finish' && !paused.project, JSON.stringify(paused));
+  check(`runs ${label}: the list says the runs are paused and marks each held run`, /Todas las ejecuciones de workflow están en pausa/.test(await page.locator('#runs-pauses').innerText())
+    && await page.locator('#run-rows .badge', { hasText: 'En pausa' }).count() >= 1);
+  const pausedScan = await scan(page);
+  check(`runs ${label}: the paused list passes WCAG 2.2 AA`, pausedScan.length === 0, JSON.stringify(pausedScan));
+  await page.locator('#runs-pauses button', { hasText: 'Quitar la pausa' }).click();
+  await page.locator('#runs-pauses button', { hasText: 'Confirmar quitar la pausa' }).click();
+  await page.waitForFunction(() => !document.querySelector('#runs-pauses .run-pause'));
+  check(`runs ${label}: unpause ends the pause`, (await calls()).some(c => c.method === 'workflow_runs_unpause' && c.confirmed) && await page.locator('#run-rows .badge', { hasText: 'En pausa' }).count() === 0);
   // The gate from Home: the waiting run's row opens its detail, Review plan shows the children, a second press creates them.
   await page.evaluate(() => showTab('overview'));
   await page.waitForSelector('#workflow-attention [data-run]');

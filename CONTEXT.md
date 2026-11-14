@@ -194,8 +194,12 @@ The model-backed selector and summarizer of a project's items: it chooses which 
 _Avoid_: coordinator, orchestrator, dispatcher
 
 **Workflow run**:
-One execution of a workflow for one work item, kept on the coordinator, advancing through stages (planning, the plan-review gate, child creation, coding, pull requests, blocks, done) by the existing implementation operations, never past the user's review of the plan. An item has at most one active run; a run that stops (needs attention, interrupted, failed) waits for the user to resume it, and a resume never repeats a write or a started coding run.
+One execution of a workflow for one work item, kept on the coordinator, advancing through stages (planning, the plan-review gate, child creation, coding, pull requests, blocks, done) by the existing implementation operations, never past the user's review of the plan. An item has at most one active run; a run that stops (needs attention, interrupted, failed) waits for the user to resume it, and a resume never repeats a write or a started coding run. A restart ends a run and starts a new one of the same workflow for the same item, which records the run it continues; a pause holds every run, or one project's, so nothing new starts until it ends.
 _Avoid_: implementation run (one of its parts), job
+
+**Handover note**:
+The user's text given to a restarted run's coding runs: what the previous run did, not to be repeated, and what is left. Stored with the new run and posted nowhere by the engine; the agent may write it elsewhere only where its workflow allows.
+_Avoid_: comment, handoff comment
 
 **Ready state**:
 A workflow state of a project's process, among those of its requirement, bug and task types, that the user chose in the workflow settings as «ready to develop»: an assigned item that reaches it can start its workflow. Chosen from the states the process has, never typed.

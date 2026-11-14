@@ -503,6 +503,9 @@ pub(super) const PORTAL_METHODS: &[&str] = &[
     "workflow_run_resume",
     "workflow_run_cancel",
     "workflow_run_assign",
+    "workflow_run_restart",
+    "workflow_runs_pause",
+    "workflow_runs_unpause",
     "workflow_summary",
     "workflow_summary_send",
     // Read-only: the account's own chats, for choosing a workflow notification's chat.

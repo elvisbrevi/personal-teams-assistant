@@ -351,8 +351,11 @@
   ] : [];
   const runSummary = run => ({ id: run.id, workflow: run.workflow, item: { id: run.item.id, title: run.item.title, url: run.item.url, kind: run.item.kind, category: run.item.category, project: run.item.project }, state: run.state, stage: run.stopped_in ?? run.state, attention: run.attention,
     waits_on_user: ['plan_review', 'unassigned', 'needs_attention', 'interrupted', 'failed'].includes(run.state), children: run.children.length, pull_requests: run.children.flatMap(c => c.pull_requests.map(p => ({ url: p.url, status: p.status }))), created_at: run.created_at, updated_at: run.updated_at, finished_at: run.finished_at,
-    waiting_for_slot: Boolean(run.queue_position), queue_position: run.queue_position ?? null });
-  const runView = run => { const view = { ...structuredClone(run), stage: run.stopped_in ?? run.state, waits_on_user: runSummary(run).waits_on_user }; delete view.fresh; return view; };
+    waiting_for_slot: Boolean(run.queue_position), queue_position: run.queue_position ?? null, paused: pausedRun(run), continues: run.continues ?? null, restarted_as: run.restarted_as ?? null });
+  const runView = run => { const view = { ...structuredClone(run), stage: run.stopped_in ?? run.state, waits_on_user: runSummary(run).waits_on_user, paused: pausedRun(run) }; delete view.fresh; return view; };
+  // The pauses in force (`workflow_runs_pause`): every project's, or one project's by name.
+  let workflowPauses = [];
+  const pausedRun = run => !['done', 'cancelled'].includes(run.state) && workflowPauses.some(p => !p.project || p.project.toLowerCase() === run.item.project.toLowerCase());
   const findRun = id => { const run = workflowRuns.find(r => r.id === id); if (!run) throw new Error(`[invalid_input] Workflow run ${id} is not recorded.`); return run; };
   // The plan-review run's planning run, as implementation_runs lists it on its machine, with the plan the person reviews;
   // the coding runs of the other runs, so their agent sessions can be opened.
@@ -377,7 +380,38 @@
     workflow_runs: args => {
       window.__ptaWorkflowCalls.push({ method: 'workflow_runs', ...structuredClone(args) });
       const runs = workflowRuns.filter(r => (!args.state || r.state === args.state) && (!args.workflow || r.workflow === args.workflow));
-      return { runs: runs.slice(0, args.limit ?? 20).map(runSummary), partial: runs.length > (args.limit ?? 20) };
+      return { runs: runs.slice(0, args.limit ?? 20).map(runSummary), partial: runs.length > (args.limit ?? 20), paused: structuredClone(workflowPauses) };
+    },
+    workflow_runs_pause: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_runs_pause', ...structuredClone(args) });
+      if (!args.confirmed) throw new Error('[invalid_input] Confirm the pause with the user, then call again with confirmed: true.');
+      if (!['stop', 'finish'].includes(args.sessions)) throw new Error('[invalid_input] Choose what happens to the sessions running now.');
+      const pause = { ...(args.project ? { project: args.project } : {}), sessions: args.sessions, paused_at: secs(Date.now()) };
+      workflowPauses = [...workflowPauses.filter(p => (p.project ?? '').toLowerCase() !== (args.project ?? '').toLowerCase()), pause];
+      return { pause, paused: structuredClone(workflowPauses), interrupted: [], sessions_stopped: [], warning: null };
+    },
+    workflow_runs_unpause: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_runs_unpause', ...structuredClone(args) });
+      if (!args.confirmed) throw new Error('[invalid_input] Confirm the unpause with the user, then call again with confirmed: true.');
+      const before = workflowPauses.length;
+      workflowPauses = args.project ? workflowPauses.filter(p => (p.project ?? '').toLowerCase() !== args.project.toLowerCase()) : [];
+      if (workflowPauses.length === before) throw new Error('[conflict] No workflow run is paused.');
+      return { unpaused: true, paused: structuredClone(workflowPauses) };
+    },
+    workflow_run_restart: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_run_restart', ...structuredClone(args) });
+      if (!args.confirmed) throw new Error('[invalid_input] Confirm the restart with the user, then call again with confirmed: true.');
+      const old = findRun(args.run);
+      if ((args.note ?? '').length > 4000) throw new Error('[invalid_input] The handover note holds at most 4000 characters.');
+      const id = crypto.randomUUID();
+      const now = secs(Date.now());
+      old.state = 'cancelled'; old.attention = null; old.finished_at = now; old.updated_at = now; old.restarted_as = id;
+      const task = old.item.category === 'task';
+      const next = { ...structuredClone(old), id, state: task ? 'coding' : 'planning', stopped_in: null, timeline: [stage('classifying', 0, 0, 'restarted'), { stage: task ? 'coding' : 'planning', started_at: now, finished_at: null, outcome: null }],
+        classification: { workflow: old.workflow, outcome: 'restarted' }, planning: null, ledger: null, block_outcomes: [], summaries: [], summary_sends: [], attention: null, error: null, restarted_as: null, continues: old.id, handover: args.note?.trim() || null,
+        children: task ? [{ ...structuredClone(old.children[0]), coding: null, started_at: null, finished_at: null, branch: null, pull_requests: [], outcome: null }] : [], created_at: now, updated_at: now, finished_at: null };
+      workflowRuns.unshift(next);
+      return { run: runView(next), restarted: true, previous: old.id, implementation_cancelled: null, sessions_stopped: [], warning: null, paused: pausedRun(next) };
     },
     workflow_run_status: args => {
       const run = findRun(args.run);
