@@ -987,3 +987,54 @@ fn opencode_marks_hide_behind_no_other_part_and_an_unreadable_part_fails_its_ses
     assert!(listing.sessions.is_empty());
     assert_eq!(listing.unavailable[0].reason, "unreadable");
 }
+
+#[test]
+fn words_that_end_like_a_secret_name_are_kept_and_password_flags_are_exact() {
+    let scrubber = Scrubber::new();
+    for kept in [
+        "Hice dos cosas: actualicé el lector y corregí las pruebas.",
+        "Quedan pendientes las empresas: Acme y Globex.",
+        "Las causas: un índice desactualizado y un error de permisos.",
+        "The OAuth: PKCE flow stays as is.",
+        "Use the -preview flag and patch -p1 to apply.",
+        "Serve it with -p 8080 and mkdir -p build first.",
+    ] {
+        assert_eq!(scrubber.scrub(kept), kept, "{kept}");
+    }
+    for dropped in [
+        "PGPASSWORD=Hunter2 psql",
+        "DBPASS=Hunter2 ./run",
+        "mysql -u root -pHunter2",
+        "docker login -u name -p Hunter2",
+        "sshpass -p Hunter2 ssh host",
+        "pw: Hunter2",
+    ] {
+        assert_eq!(
+            scrubber.scrub(&format!("Before.\n{dropped}\nAfter.")),
+            "Before. After.",
+            "{dropped}"
+        );
+    }
+}
+
+#[test]
+fn windows_and_home_variable_paths_lose_every_directory() {
+    let scrubber = Scrubber::new();
+    for (text, kept) in [
+        (
+            r"C:\Users\name\OneDrive - Acme Corp\Documents\plan.docx",
+            "plan.docx",
+        ),
+        ("D:/Work/Client X/Phase 2/report.xlsx", "report.xlsx"),
+        ("$HOME/clients/acme/plan.md", "plan.md"),
+        ("${HOME}/clients/acme/plan.md", "plan.md"),
+        (r"%USERPROFILE%\clients\acme\plan.md", "plan.md"),
+        ("~/clients/acme/plan.md", "plan.md"),
+        (
+            "updated /home/u/a.rs and src/b.rs",
+            "updated a.rs and src/b.rs",
+        ),
+    ] {
+        assert_eq!(scrubber.scrub(text), kept, "{text}");
+    }
+}

@@ -325,6 +325,7 @@ pub struct Scrubber {
     opaque: regex::Regex,
     url: regex::Regex,
     quoted_path: regex::Regex,
+    windows_path: regex::Regex,
     home_path: regex::Regex,
     path: regex::Regex,
     pending: regex::Regex,
@@ -343,16 +344,17 @@ impl Scrubber {
             r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@",
             // A key whose name says it is secret, quoted or not, before its value:
             // `DB_PASSWORD=…`, `"db_password": …`, `secret: …`, `AccountKey=…`, `apiKey:`.
-            // `PGPASSWORD=…` too: the secret word may end a longer name.
-            r#"(?i)(?:password|passwd|passphrase|pwd|secret|token|api_?key|apikey|accountkey|account_key|access_?key|private_?key|sharedaccesskey|sharedaccesssignature|client_?secret|auth|authorization|credentials?|sas|signature|connection_?string|contraseña|contrasena|clave|credencial(?:es)?)(?:[_.-][a-z0-9]+)*["']?\s*[:=]"#,
-            // Short key names: `pass: …`, `key: …`.
-            r#"(?i)(?:^|[^a-z0-9])(?:pass|key)["']?\s*[:=]"#,
+            // The secret word starts the name or one of its parts (not `cosas:`, `OAuth:`).
+            r#"(?i)(?:^|[^a-z0-9])(?:[a-z0-9]+[_.-])*(?:password|passwd|passphrase|pwd|secret|token|api_?key|apikey|accountkey|account_key|access_?key|private_?key|sharedaccesskey|sharedaccesssignature|client_?secret|auth|authorization|credentials?|sas|signature|connection_?string|contraseña|contrasena|clave|credencial(?:es)?)(?:[_.-][a-z0-9]+)*["']?\s*[:=]"#,
+            // Environment names that end in one: `PGPASSWORD=…`, `DBPASS=…`, `GHTOKEN:`.
+            r#"\b[A-Z][A-Z0-9_]*(?:PASSWORD|PASSWD|PASS|PWD|TOKEN|SECRET|KEY|SAS|AUTH|CREDENTIALS?)[A-Z0-9_]*["']?\s*[:=]"#,
+            // Short key names: `pass: …`, `key: …`, `pw: …`.
+            r#"(?i)(?:^|[^a-z0-9])(?:pass|key|pw)["']?\s*[:=]"#,
             // Connection strings.
             r"(?i)\b(?:server|data source|host|endpoint)\s*=[^;\n]*;",
             // Flags that take one: `--password X`, `-p:…`, `--api-key X`.
             r"(?i)(?:^|\s)--?(?:password|passwd|pass|pwd|token|secret|api-?key|key|auth|client-secret|access-key|sas)\b",
-            // A password glued to its flag (`mysql -pHunter2`) or a user with one (`curl -u a:b`).
-            r"(?:^|\s)-p[^\s-]\S*",
+            // A user with its password (`curl -u a:b`); `-p` is judged by `password_flag`.
             r"(?i)(?:^|\s)(?:-u|--user)[\s=]+\S+:\S+",
             // Prose about one, in English or Spanish: `the password is …`, `la clave: …`.
             r"(?i)\b(?:passwords?|passwd|passphrases?|contraseñas?|contrasenas?|claves?|secrets?|secretos?|tokens?|credentials?|credenciales?|api ?keys?|private ?keys?|llaves? privadas?|access ?keys?)\b",
@@ -375,11 +377,18 @@ impl Scrubber {
                 r#"(?P<open>["'`“‘])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|/)[^"'`“”‘’\n]*)(?P<close>["'`”’])"#,
             )
             .expect("valid quoted path pattern"),
-            // A path from a drive, a share, a home or a usual system root, wherever it starts
-            // (`at/home/…`, `-I/home/…`, `**/home/…**`); a directory name holds a space only
-            // before a capitalized word (`First Last`, `Application Support`).
+            // A drive, share or `%USERPROFILE%` path runs to its last separator on the line, so
+            // directory names with spaces (`OneDrive - Acme Corp`, `Phase 2`) go too.
+            windows_path: regex::Regex::new(
+                r#"(?P<pre>^|[^A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\[^\s\\/]+[\\/]|%[A-Za-z_]+%[\\/])(?:[^\n]*[\\/])?(?P<last>[^\s\\/"'`“”‘’<>|:*?]*)"#,
+            )
+            .expect("valid Windows path pattern"),
+            // A path from a home or a usual system root (`~`, `$HOME`, `${HOME}`, `/home`,
+            // `/Users`, `/var`…), wherever it starts (`at/home/…`, `-I/home/…`, `**/home/…**`);
+            // a directory name holds a space only before a capitalized word (`Application
+            // Support`), so the prose after a path stays.
             home_path: regex::Regex::new(
-                r#"(?:(?P<pre>^|[^A-Za-z0-9])[A-Za-z]:[\\/]|\\\\[^\s\\/]+[\\/]|~[\\/]|/(?:home|Users|root|var|opt|srv|tmp|etc|mnt|media|private|Volumes|usr|Library|workspaces?|data|run|nix|snap|app|code)[\\/])(?:[^\s\\/"'`“”‘’<>|:*?]+(?: [A-Z][^\s\\/"'`“”‘’<>|:*?]*)*[\\/])*(?P<last>[^\s\\/"'`“”‘’<>|:*?]*)"#,
+                r#"(?:~|\$HOME|\$\{HOME\}|/(?:home|Users|root|var|opt|srv|tmp|etc|mnt|media|private|Volumes|usr|Library|workspaces?|data|run|nix|snap|app|code))/(?:[^\s\\/"'`“”‘’<>|:*?]+(?: [A-Z][^\s\\/"'`“”‘’<>|:*?]*)*/)*(?P<last>[^\s\\/"'`“”‘’<>|:*?]*)"#,
             )
             .expect("valid home path pattern"),
             // Any other absolute path, where a word does not run into it (not `src/a/b`).
@@ -401,6 +410,7 @@ impl Scrubber {
     pub fn secret(&self, line: &str) -> bool {
         !self.redactor.clean(line)
             || self.secret.iter().any(|p| p.is_match(line))
+            || password_flag(line)
             || self.opaque.find_iter(line).any(|m| opaque(m.as_str()))
     }
     /// The lines of `text` worth keeping: no fenced code, no injected blocks, no line that looks
@@ -465,7 +475,8 @@ impl Scrubber {
             let text = self.quoted_path.replace_all(text, |c: &regex::Captures| {
                 format!("{}{}{}", &c["open"], last(&c["path"]), &c["close"])
             });
-            let text = self.home_path.replace_all(&text, "${pre}${last}");
+            let text = self.windows_path.replace_all(&text, "${pre}${last}");
+            let text = self.home_path.replace_all(&text, "${last}");
             self.path.replace_all(&text, "${pre}${last}").into_owned()
         };
         let mut out = String::new();
@@ -493,6 +504,28 @@ impl Scrubber {
             .collect();
         bounded(&sentences.join(". "), PART_CHARS)
     }
+}
+/// A password given with `-p`, glued (`mysql -pHunter2`) or after a space (`docker login -p X`,
+/// `sshpass -p X`): not a patch level (`patch -p1`), a port (`-p 8080`), a word flag
+/// (`-preview`) or `mkdir -p`.
+fn password_flag(line: &str) -> bool {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    words.iter().enumerate().any(|(i, word)| {
+        let Some(glued) = word.strip_prefix("-p") else {
+            return false;
+        };
+        if word.starts_with("--") || (i > 0 && words[i - 1] == "mkdir") {
+            return false;
+        }
+        if glued.is_empty() {
+            return words
+                .get(i + 1)
+                .is_some_and(|v| !v.starts_with('-') && !v.chars().all(|c| c.is_ascii_digit()));
+        }
+        // A glued value that reads as a word (`-preview`, `-print`) or a number is not one.
+        !glued.chars().all(|c| c.is_ascii_digit())
+            && !glued.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+    })
 }
 /// A long run of letters and digits that reads as a token, key, signature or hash, not a long
 /// word or a path of words.
