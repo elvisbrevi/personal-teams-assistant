@@ -5,7 +5,7 @@
 //! old or does not answer is reported unavailable, never as having no sessions.
 
 use super::*;
-use crate::sessions::{Listing, Started, Summary, Unavailable};
+use crate::sessions::{Listing, Started, Unavailable};
 
 /// The reader the message pipeline uses, installed when the host starts.
 pub(in crate::app) struct FleetReader(std::sync::Weak<Host>);
@@ -238,6 +238,7 @@ pub(super) async fn local(host: &Arc<Host>, args: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sessions::Summary;
 
     fn run(session: &str) -> Run {
         let mut run: Run = serde_json::from_value(json!({"launch":{"id":"run-1","request":{"machine":"m-desk","item":{"provider":"azure","id":7,"project":"Payments","source":"azure","task":true},"context":"Synthetic task","directories":["/work"],"provider":"codex","model":"test-model","effort":"high"},"detail":{"item":{"id":7,"title":"Retry payments","url":"https://dev.azure.com/org/proj/_workitems/edit/7","project":"Payments","state":"Active","kind":"Task","created_at":null,"dates":[]},"fields":[],"comments":[],"relations":[],"history":[],"partial":false,"warnings":[]},"language":"en","planning":false},"state":"running","created_at":"2026-11-12T09:00:00Z","finished_at":null,"output":"Opened the branch; the pipeline is still running.","plan":null,"session_id":"x","started_at":"2026-11-12T09:01:00Z"}))
