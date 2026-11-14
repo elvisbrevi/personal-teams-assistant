@@ -419,8 +419,8 @@ How a workflow takes an item from its ready state to its release, and where the 
    repository's checkout, the agent and instructions, its blocks, `auto_start`), the ready states of
    the project, and a director only when the project's workflows differ in machine or agent (by
    default the director runs where the workflow runs, with its agent).
-2. **An item becomes ready.** The coordinator's watcher sees an assigned HU, bug or listed task in a
-   ready state and starts one run, and the project's director checks which workflow fits it (also
+2. **An item becomes ready.** The coordinator's watcher sees an assigned HU, bug or task (any
+   task type) in a ready state and starts one run, and the project's director checks which workflow fits it (also
    when only one starts by itself; one that does not fit waits `unassigned`); or the person starts
    one from Implement or with `pta workflows run ID`.
 3. **The run plans** with the workflow's machine, checkouts, agent, instructions and instruction
@@ -457,7 +457,7 @@ Requires host and CLI `workflow_director_support: true`.
   `unavailable` where it never runs, the interval and `last_poll`; see [automatic starts](#automatic-starts-and-the-implement-choice)).
   With `--project NAME` (and `--organization URL` or
   `--source ID` when needed) it adds `process_states`: the states that project's process has
-  for its requirement, bug and listed task types. Choose ready states only from that list.
+  for its requirement, bug and task types. Choose ready states only from that list.
 - **Change them:** `pta workflows settings --set KEY VALUE [--set KEY VALUE…]` (MCP
   `workflow_settings_update` with only the fields to change). Keys: `watch_interval_minutes`
   (1-60), `concurrency` (1-4), `pull_request_wait_days` (1-60); `director.machine` (a
@@ -611,7 +611,8 @@ it.
 
 - **Automatic starts.** On the account owner's coordinator (never a computer signed in to it, a
   worker or a shared portal account) a watcher looks every `watch_interval_minutes` (default 5) at
-  the HUs, bugs and listed tasks assigned to the user in the **ready states** of each project
+  every HU, bug and task assigned to the user in the **ready states** of each project, whatever
+  its type (a plain Task as much as a development bug a guide lists with the bugs)
   (`pta workflows settings --set ready_states.PROJECT "STATE,STATE"`; read-only, the To-Do read
   with the read credential, at most 100 items per project per poll, and at most 25 new runs per
   poll). It is idle until a ready state is configured and needs no running Teams service. With
@@ -626,8 +627,9 @@ it.
   workflow, a disabled workflow and an item the director finds no workflow for start no coding:
   the last waits `unassigned` for `pta workflows assign RUN WORKFLOW --confirmed`. An item starts at most one run per ready state
   (a seen ledger); one that leaves the state and comes back is seen again. Whether it ran and what
-  the last check found: `pta workflows settings` (`watcher`; kept in memory, so a restart empties
-  it). **The gate stands:** an automatic run only plans; it stops at `plan_review` (shown on Home
+  the last check found: `pta workflows settings` (`watcher`, whose `last_poll` counts the items
+  seen by category in `seen_by_category`: `requirement`, `bug` and `task`, the process category of
+  the type, so a development bug counts as `task`; kept in memory, so a restart empties it). **The gate stands:** an automatic run only plans; it stops at `plan_review` (shown on Home
   and in `status`'s `workflow_attention` with the item's link) and nothing is created in Azure
   DevOps until the user reviews the plan and confirms the children with `implementation_create`.
 - **Implement with a workflow.** `implementation_start` (MCP) takes `workflow`: `none` (default;

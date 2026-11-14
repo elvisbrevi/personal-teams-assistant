@@ -253,6 +253,10 @@ function renderWatcher(watcher) {
       lines.push(poll.started
         ? tn(poll.started, 'Last check at {time}: 1 run started.', 'Last check at {time}: {n} runs started.', { time: when(poll.at) })
         : t('Last check at {time}: nothing new.', { time: when(poll.at) }));
+      const seen = poll.seen_by_category;
+      if (seen && (seen.requirement || seen.bug || seen.task)) {
+        lines.push(t('Items seen in that check: HUs {hu}, bugs {bug}, tasks {task}.', { hu: seen.requirement ?? 0, bug: seen.bug ?? 0, task: seen.task ?? 0 }));
+      }
       if (poll.partial) lines.push(t('Part of what it reads was not covered in that check; it continues at the next one.'));
       for (const project of poll.projects ?? []) {
         if (project.skipped && !project.waiting_for_director) lines.push(`${project.project}: ${tx(project.skipped)}`);
