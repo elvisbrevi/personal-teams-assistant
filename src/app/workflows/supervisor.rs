@@ -2271,6 +2271,7 @@ const UNCERTAIN: &str = "Its result is unknown: check Teams (or the run) before 
 const CUT: &str =
     "The host stopped while it was carried out; check what it did before doing it again.";
 
+#[allow(clippy::too_many_arguments)]
 /// Move one action of a look from one of `from` to `to`, under the run's lock: the compare and
 /// the write are one step, so two confirmations at once never both carry it out. Refused, with
 /// the state it is in, when it is not in `from`.
