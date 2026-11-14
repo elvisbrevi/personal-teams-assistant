@@ -142,6 +142,77 @@ fn shown(workflow: &Workflow) -> Value {
     value
 }
 
+/// The blocks a workflow lists that the map holds, in its order.
+fn listed(workflow: &Workflow, blocks: &[Block]) -> Vec<Block> {
+    workflow
+        .blocks
+        .iter()
+        .filter_map(|id| blocks.iter().find(|b| &b.id == id).cloned())
+        .collect()
+}
+
+/// How much of each limit a workflow uses: its instructions' characters, its blocks, and the
+/// characters of the largest context a run of it can be given (`fixed` of them are not its
+/// instructions or instruction blocks: the fixed sentences, its checkouts, the item and the
+/// longest handover note).
+pub(super) fn usage(workflow: &Workflow, blocks: &[Block]) -> Value {
+    let listed = listed(workflow, blocks);
+    let context = engine::largest_context(workflow, &listed);
+    let fixed = context.saturating_sub(engine::instructions_part(workflow, &listed));
+    json!({
+        "instructions": {"used": workflow.instructions.chars().count(), "limit": core::MAX_INSTRUCTIONS},
+        "blocks": {"used": workflow.blocks.len(), "limit": core::MAX_WORKFLOW_BLOCKS},
+        "context": {"used": context, "limit": core::MAX_CONTEXT, "fixed": fixed},
+    })
+}
+
+/// Refuses a workflow whose largest run context would not fit, with the numbers: a run is
+/// given its instructions and instruction blocks whole or not at all.
+fn fits(workflow: &Workflow, blocks: &[Block]) -> Result<(), String> {
+    let listed = listed(workflow, blocks);
+    let used = engine::largest_context(workflow, &listed);
+    if used <= core::MAX_CONTEXT {
+        return Ok(());
+    }
+    let part = engine::instructions_part(workflow, &listed);
+    Err(invalid(format!(
+        "A run of workflow {} could be given {used} characters of context, more than the {} a run takes (and a context is never cut): {part} of them are its instructions and instruction blocks, the other {} the fixed sentences, its checkouts, the item and the longest handover note. Shorten its instructions or instruction blocks by at least {} characters.",
+        workflow.id,
+        core::MAX_CONTEXT,
+        used - part,
+        used - core::MAX_CONTEXT
+    )))
+}
+
+/// What a workflow larger than older hosts accept means for the account's other computers.
+async fn older_hosts(host: &Arc<Host>, workflow: &Workflow) -> Option<String> {
+    let characters = workflow.instructions.chars().count();
+    if characters <= core::OLDER_MAX_INSTRUCTIONS
+        && workflow.blocks.len() <= core::OLDER_MAX_WORKFLOW_BLOCKS
+    {
+        return None;
+    }
+    let older = implementation::machines_until(host, core::OLDER_LIMITS_UNTIL)
+        .await
+        .unwrap_or_default();
+    let machines = if older.is_empty() {
+        "None of the account's machines reports one.".to_owned()
+    } else {
+        format!(
+            "These of the account's machines report one, or no version: {}.",
+            older.join(", ")
+        )
+    };
+    Some(format!(
+        "Workflow {} has {} blocks and {characters} characters of instructions, more than hosts of release {} or older accept ({} blocks, {} characters): a computer of this account that runs one cannot take the account's configuration while this workflow is in it (it keeps the copy it has and reports the coordinator's configuration as invalid; its implementation runs work as before) until it is updated (pta update, or pta update --machine NAME from here). {machines}",
+        workflow.id,
+        workflow.blocks.len(),
+        core::OLDER_LIMITS_UNTIL,
+        core::OLDER_MAX_WORKFLOW_BLOCKS,
+        core::OLDER_MAX_INSTRUCTIONS,
+    ))
+}
+
 /// What a person confirms before a workflow whose coding agents may do more than the fixed
 /// rules allow is saved; none when it allows nothing.
 pub(super) fn describe_workflow(workflow: &Workflow) -> Option<String> {
@@ -201,7 +272,12 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
             ensure_no_arguments(args)?;
             let map = state.settings.map().map_err(fail)?;
             let workflows: Vec<Value> = map.workflows.iter().map(shown).collect();
-            Ok(json!({"workflows":workflows,"editable":editable(state)?}))
+            let used: BTreeMap<&str, Value> = map
+                .workflows
+                .iter()
+                .map(|w| (w.id.as_str(), usage(w, &map.workflow_blocks)))
+                .collect();
+            Ok(json!({"workflows":workflows,"usage":used,"editable":editable(state)?}))
         }
         "workflow_show" => {
             let a: IdArgs = parse(args)?;
@@ -216,7 +292,12 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
                 .iter()
                 .filter_map(|id| map.workflow_blocks.iter().find(|b| &b.id == id))
                 .collect();
-            Ok(json!({"workflow":shown(workflow),"blocks":blocks,"editable":editable(state)?}))
+            Ok(json!({
+                "workflow": shown(workflow),
+                "blocks": blocks,
+                "usage": usage(workflow, &map.workflow_blocks),
+                "editable": editable(state)?,
+            }))
         }
         "workflow_blocks_list" => {
             ensure_no_arguments(args)?;
@@ -366,14 +447,19 @@ async fn save(host: &Arc<Host>, args: SaveArgs) -> Result<Value, String> {
             let mut candidate = state.settings.map().map_err(fail)?;
             upsert(&mut candidate.workflows, workflow.clone(), |w| &w.id);
             core::validate(&candidate.workflows, &candidate.workflow_blocks).map_err(invalid)?;
-            let warnings = verify(host, &mut workflow).await?;
+            fits(&workflow, &candidate.workflow_blocks)?;
+            let mut warnings = verify(host, &mut workflow).await?;
             let saved = workflow.clone();
-            change(host, |map| {
+            // Again with the directories as the machine spells them and the blocks as they are now.
+            let used = change(host, |map| {
+                fits(&workflow, &map.workflow_blocks)?;
+                let used = usage(&workflow, &map.workflow_blocks);
                 upsert(&mut map.workflows, workflow, |w| &w.id);
-                Ok(())
+                Ok(used)
             })
             .await?;
-            Ok(json!({"workflow":shown(&saved),"saved":true,"warnings":warnings}))
+            warnings.extend(older_hosts(host, &saved).await);
+            Ok(json!({"workflow":shown(&saved),"saved":true,"usage":used,"warnings":warnings}))
         }
         _ => Err(invalid(
             "Give the workflow to save, or its id and enabled to enable or disable it.",
@@ -601,6 +687,14 @@ async fn save_block(host: &Arc<Host>, args: BlockSaveArgs) -> Result<Value, Stri
     let saved = block.clone();
     change(host, |map| {
         upsert(&mut map.workflow_blocks, block, |b| &b.id);
+        // A longer text is part of every workflow that lists the block.
+        for workflow in map
+            .workflows
+            .iter()
+            .filter(|w| w.blocks.contains(&saved.id))
+        {
+            fits(workflow, &map.workflow_blocks)?;
+        }
         Ok(())
     })
     .await?;

@@ -1157,6 +1157,8 @@ body.directory-picker-open { overflow: hidden; }
 .workflow-add label { flex: 1 1 14rem; margin: 0; }
 .counter { display: block; text-align: right; color: var(--muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
 .counter.over { color: var(--error); }
+.workflow-usage { font-variant-numeric: tabular-nums; }
+.workflow-usage.over { color: var(--error); }
 .placeholder-list { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 .75rem; }
 .block-confirm { display: grid; gap: .5rem; }
 .block-confirm pre { margin: 0; padding: .6rem .75rem; border: 1.5px solid var(--rule); border-radius: 12px; background: var(--surface); white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
