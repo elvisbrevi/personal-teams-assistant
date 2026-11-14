@@ -185,6 +185,7 @@ async fn show(host: &Arc<Host>, args: ShowArgs) -> Result<Value, String> {
         "bounds": bounds(),
         "editable": editable(state)?,
         "watcher": super::watcher::view(state),
+        "paused": super::runs::pauses_view(state).map_err(fail)?,
     });
     if let Some(project) = &args.project {
         reply["process_states"] = tools::todo::process_states(

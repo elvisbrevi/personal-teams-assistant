@@ -14,6 +14,10 @@
 //! first out: a run takes one only when no run created before it waits for one (`record::line`),
 //! whichever run's task asks first, so a run that gave a slot back keeps its place. Classifying
 //! takes no slot: the director's sessions run beside the coding runs, one at a time.
+//!
+//! While a pause (`record::Pause`) covers a run's project, the engine starts nothing for it (no
+//! slot, director session, planning or coding run or acting block) and still observes what
+//! already runs, so a session left to finish ends in the record as it would otherwise.
 use super::acting;
 use super::record::{self, Child, Implementation, Item, Run, State as Phase, Store};
 use super::*;
@@ -29,6 +33,8 @@ pub(in crate::app) const PULL_REQUEST_POLL_SECONDS: i64 = 300;
 const STEPS: usize = 16;
 /// A coding session reports the branch it pushed on a line of its report that starts so.
 const BRANCH: &str = "Branch:";
+/// The heading the user's handover note goes under in a restarted run's coding context.
+pub(in crate::app) const HANDOVER: &str = "Handover from the previous run";
 const CONTEXT: usize = 32_000;
 
 /// The engine's state on the profile: the runs' store and what advances now.
@@ -239,8 +245,12 @@ pub(in crate::app) async fn tick(
     // A failed run is not advanced, but its `failed` blocks may be due (the host stopped before
     // they ran, or a launcher was busy): they stay in the sweep until each has an outcome.
     let mut tasks = Vec::new();
+    let pauses = state.db.pauses()?;
     for run in state.db.list(&[Phase::Failed], None, -1)? {
-        if acting::has_due(&run) && state.inflight.lock().unwrap().insert(run.id.clone()) {
+        if acting::has_due(&run)
+            && !record::paused(&pauses, &run.item.project)
+            && state.inflight.lock().unwrap().insert(run.id.clone())
+        {
             let guard = Inflight(host.clone(), run.id.clone());
             let (host, id) = (host.clone(), run.id.clone());
             tasks.push(tokio::spawn(async move {
@@ -357,6 +367,56 @@ pub(in crate::app) async fn stop_sessions(
     (stopped, warnings)
 }
 
+/// What ending a run's sessions did: the active implementation run cancelled on its machine,
+/// the other sessions stopped, and what could not be reached.
+pub(in crate::app) struct Ended {
+    pub cancelled: Option<String>,
+    pub stopped: Vec<String>,
+    pub warning: Option<String>,
+}
+/// Cancel the run's active implementation run when it is still in flight, and stop every other
+/// session it started that is still alive (`stop_sessions`); the file changes stay. When its
+/// machine cannot be asked, the run may be running there (even one whose launch was not
+/// confirmed yet): the cancellation is tried, and when it does not reach the machine the warning
+/// says where to cancel it.
+pub(in crate::app) async fn end_sessions(host: &Arc<Host>, run: &Run) -> Ended {
+    let active = run.active_implementation().cloned();
+    let (mut cancelled, mut warning, mut asked) = (None, None, None);
+    if let Some(active) = &active {
+        let present = match implementation::observe(host, &active.machine, &active.id).await {
+            Ok(Some(observed)) => {
+                matches!(observed["state"].as_str(), Some("running" | "planning"))
+            }
+            Ok(None) => false,
+            Err(_) => true,
+        };
+        if present {
+            asked = Some(active.id.as_str());
+            match implementation::cancel_run(host, &active.machine, &active.id).await {
+                Ok(()) => cancelled = Some(active.id.clone()),
+                Err(_) => {
+                    warning = Some(format!(
+                        "Implementation run {} may still be running on machine {}, which could not be reached; once it is reachable, cancel it there with implementation_cancel (machine {}, id {}).",
+                        active.id, active.machine, active.machine, active.id
+                    ))
+                }
+            }
+        }
+    }
+    // Every other session the run started and that is still alive stops too: a coding session
+    // kept after its run, or one the user opened again.
+    let (stopped, unreached) = stop_sessions(host, run, asked).await;
+    let warning = warning
+        .into_iter()
+        .chain(unreached)
+        .reduce(|all, next| format!("{all} {next}"));
+    Ended {
+        cancelled,
+        stopped,
+        warning,
+    }
+}
+
 /// Record the observed state of the run's active implementation run.
 /// Why an implementation run another machine returned did not end with its answer, as it
 /// reported it (`Failure::of_record`).
@@ -396,7 +456,8 @@ async fn admit(host: &Arc<Host>, run: &mut Run, now: i64) -> Result<bool> {
     let driven: Vec<Phase> = Phase::ALL.into_iter().filter(|s| s.driven()).collect();
     let mut runs = state.db.list(&driven, None, -1)?;
     runs.reverse();
-    if !record::may_take_slot(&runs, &run.id, concurrency, now) {
+    let pauses = state.db.pauses()?;
+    if !record::may_take_slot(&runs, &run.id, concurrency, now, &pauses) {
         return Ok(false);
     }
     run.admitted = true;
@@ -419,6 +480,11 @@ async fn advance(host: &Arc<Host>, azure: &Azure, id: &str, now: i64, poll: i64)
         if run.retry_at.is_some_and(|at| now < at) {
             return Ok(());
         }
+        // Paused: nothing starts, not even a slot taken; what runs is still observed.
+        let paused = record::paused(&state.db.pauses()?, &run.item.project);
+        if paused && (run.waits_for_slot() || run.state == Phase::Classifying) {
+            return Ok(());
+        }
         if run.waits_for_slot() && !admit(host, &mut run, now).await? {
             return Ok(());
         }
@@ -434,15 +500,16 @@ async fn advance(host: &Arc<Host>, azure: &Azure, id: &str, now: i64, poll: i64)
             continue;
         }
         // The acting blocks due at this stage run before the stage's own step; the run's lock
-        // is not held while they act.
-        if acting::has_due(&run) {
+        // is not held while they act. Paused, they wait for the pause to end (each occurrence
+        // stays due, and the stage of `blocks` does not end meanwhile).
+        if acting::has_due(&run) && !paused {
             drop(guard);
             match acting::execute(host, id, now).await? {
                 acting::Progress::Waiting => return Ok(()),
                 acting::Progress::Idle | acting::Progress::Changed => continue,
             }
         }
-        match step(host, azure, &mut run, now, poll).await {
+        match step(host, azure, &mut run, now, poll, paused).await {
             Ok(true) => {
                 run.updated_at = now;
                 state.db.save(&run)?;
@@ -460,8 +527,10 @@ async fn advance(host: &Arc<Host>, azure: &Azure, id: &str, now: i64, poll: i64)
                 state.db.save(&run)?;
                 drop(guard);
                 stop_sessions(host, &run, None).await;
-                // The blocks of the `failed` stage.
-                acting::execute(host, id, now).await?;
+                // The blocks of the `failed` stage (once the pause ends, when paused).
+                if !paused {
+                    acting::execute(host, id, now).await?;
+                }
                 return Ok(());
             }
         }
@@ -618,19 +687,21 @@ pub(in crate::app) fn same_project(workflow: &crate::workflows::Workflow, item: 
 }
 
 /// One step of a run in a driven stage other than classifying; returns whether it changed.
+/// Paused, it launches no implementation run.
 async fn step(
     host: &Arc<Host>,
     azure: &Azure,
     run: &mut Run,
     now: i64,
     poll: i64,
+    paused: bool,
 ) -> std::result::Result<bool, String> {
     let workflow = run
         .definition
         .clone()
         .ok_or("The run has no workflow definition.")?;
     match run.state {
-        Phase::Planning => planning(host, azure, run, &workflow, now).await,
+        Phase::Planning => planning(host, azure, run, &workflow, now, paused).await,
         Phase::PlanReview => {
             let plan = run
                 .planning
@@ -657,8 +728,10 @@ async fn step(
             Ok(true)
         }
         Phase::CreatingChildren => creating(host, run, now).await,
-        Phase::Coding => coding(host, azure, run, &workflow, now).await,
+        Phase::Coding => coding(host, azure, run, &workflow, now, paused).await,
         Phase::PullRequests => pull_requests(host, azure, run, now, poll).await,
+        // Paused, its blocks have not run: the stage waits for the pause to end.
+        Phase::Blocks if paused => Ok(false),
         Phase::Blocks => {
             // The blocks of this stage ran before this step (`acting`): nothing is due now.
             // Only the blocks of this stage's own occurrences count here.
@@ -737,6 +810,13 @@ fn instructions(
     text
 }
 
+/// The handover note as a coding context carries it, under its heading.
+pub(in crate::app) fn handover(note: &str) -> String {
+    format!(
+        "{HANDOVER} (the user's note, written after reading what the previous run of this item did: what it says is done is not to be repeated; what it says is left is yours to do):\n{note}\n"
+    )
+}
+
 /// Bound a context to what an implementation run takes, keeping its beginning.
 fn bounded(text: String) -> String {
     if text.len() <= CONTEXT {
@@ -755,6 +835,7 @@ async fn planning(
     run: &mut Run,
     workflow: &crate::workflows::Workflow,
     now: i64,
+    paused: bool,
 ) -> std::result::Result<bool, String> {
     let Some(planned) = run.planning.clone() else {
         // Recorded before the machine is asked, so a restart asks for this same run.
@@ -768,6 +849,9 @@ async fn planning(
         return Ok(true);
     };
     if !planned.started {
+        if paused {
+            return Ok(false);
+        }
         let detail = match azure
             .item(
                 &host.state,
@@ -1012,6 +1096,7 @@ async fn coding(
     run: &mut Run,
     workflow: &crate::workflows::Workflow,
     now: i64,
+    paused: bool,
 ) -> std::result::Result<bool, String> {
     let Some(index) = run.children.iter().position(|c| c.outcome.is_none()) else {
         let done = run.children.iter().filter(|c| !c.accepted()).count();
@@ -1038,6 +1123,9 @@ async fn coding(
         return Ok(true);
     };
     if !coding.started {
+        if paused {
+            return Ok(false);
+        }
         let detail = match azure
             .item(
                 &host.state,
@@ -1066,6 +1154,10 @@ async fn coding(
             repository.name,
             directory.display()
         );
+        // The user's note on the run this one restarted, before anything that may be cut.
+        if let Some(note) = &run.handover {
+            context.push_str(&handover(note));
+        }
         context.push_str(&instructions(workflow, &run.blocks));
         let launched = implementation::launch_planned(
             host,

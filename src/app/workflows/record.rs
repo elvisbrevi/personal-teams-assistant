@@ -331,6 +331,16 @@ pub(in crate::app) struct Run {
     /// When its pull requests were last read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked_at: Option<i64>,
+    /// The run this one restarted (`workflow_run_restart`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues: Option<String>,
+    /// The run that restarted this one; it was cancelled then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarted_as: Option<String>,
+    /// The user's handover note from the run this one restarted (at most
+    /// [`MAX_HANDOVER`] characters): given to each of its coding runs, posted nowhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handover: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -372,6 +382,9 @@ impl Run {
             acting_since: Some(now),
             waiting_since: None,
             checked_at: None,
+            continues: None,
+            restarted_as: None,
+            handover: None,
             created_at: now,
             updated_at: now,
             finished_at: None,
@@ -438,7 +451,11 @@ impl Run {
     }
     /// Stop for good: cancelled.
     pub(in crate::app) fn cancel(&mut self, now: i64) {
-        self.close(now, "cancelled");
+        self.cancel_as(now, "cancelled");
+    }
+    /// Stop for good, closing the current stage with `outcome` (`cancelled`, `restarted`).
+    pub(in crate::app) fn cancel_as(&mut self, now: i64, outcome: &str) {
+        self.close(now, outcome);
         self.state = State::Cancelled;
         self.attention = None;
         self.admitted = false;
@@ -491,6 +508,8 @@ impl Run {
             "children": self.children.len(),
             "pull_requests": self.children.iter().flat_map(|c| c.pull_requests.iter())
                 .map(|p| json!({"url": p.url, "status": p.status})).collect::<Vec<_>>(),
+            "continues": self.continues,
+            "restarted_as": self.restarted_as,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "finished_at": self.finished_at,
@@ -498,36 +517,89 @@ impl Run {
     }
 }
 
+/// The longest handover note, in characters.
+pub(in crate::app) const MAX_HANDOVER: usize = 4000;
+
+/// What a pause does to the agent sessions of the runs it covers when it begins.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::app) enum Sessions {
+    /// Stop every live session of those runs at once; each run with one stops `interrupted`.
+    Stop,
+    /// Leave the live sessions to finish; the engine still observes them.
+    Finish,
+}
+
+/// A pause of the workflow runs: of every project, or of one project (by name, in any
+/// organization). While one covers a run, the engine starts nothing for it: no slot, no
+/// director session, no planning or coding run and no acting block; it still observes the
+/// implementation runs already started and reads the creation ledger and pull requests. The
+/// watcher starts no run for a paused project. A paused run keeps its place by creation in the
+/// line for a slot, and takes it again when the pause ends.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(in crate::app) struct Pause {
+    /// The project's name; none for every project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub sessions: Sessions,
+    pub paused_at: i64,
+}
+impl Pause {
+    pub(in crate::app) fn covers(&self, project: &str) -> bool {
+        self.project
+            .as_deref()
+            .is_none_or(|p| p.eq_ignore_ascii_case(project))
+    }
+}
+/// Whether a pause covers a run's project.
+pub(in crate::app) fn paused(pauses: &[Pause], project: &str) -> bool {
+    pauses.iter().any(|p| p.covers(project))
+}
+
 /// The line for the `concurrency` slots, from `runs` oldest first (`Store::list` reversed):
 /// every run waiting for a slot, in creation order, and in its place a classifying run that is
 /// not waiting out a retry, which will need one once classified. A run that gave a slot back
 /// keeps its place, so a run created later never passes it.
-pub(in crate::app) fn line(runs: &[Run], now: i64) -> Vec<&Run> {
+/// A paused run is out of the line while its pause lasts, so it holds up no run of a project
+/// that is not paused, and back in its place when the pause ends.
+pub(in crate::app) fn line<'a>(runs: &'a [Run], now: i64, pauses: &[Pause]) -> Vec<&'a Run> {
     runs.iter()
         .filter(|r| {
             r.waits_for_slot()
                 || (r.state == State::Classifying && r.retry_at.is_none_or(|at| at <= now))
         })
+        .filter(|r| !paused(pauses, &r.item.project))
         .collect()
 }
 
 /// Whether run `id` takes a slot now: fewer runs are ahead of it in the line than slots are
 /// free.
-pub(in crate::app) fn may_take_slot(runs: &[Run], id: &str, concurrency: usize, now: i64) -> bool {
+pub(in crate::app) fn may_take_slot(
+    runs: &[Run],
+    id: &str,
+    concurrency: usize,
+    now: i64,
+    pauses: &[Pause],
+) -> bool {
     let taken = runs
         .iter()
         .filter(|r| r.admitted && r.state.takes_slot() && r.id != id)
         .count();
     let free = concurrency.saturating_sub(taken);
-    line(runs, now)
+    line(runs, now, pauses)
         .iter()
         .position(|r| r.id == id)
         .is_some_and(|ahead| ahead < free)
 }
 
-/// The place of each run waiting for a slot (1 is next), by run ID.
-pub(in crate::app) fn positions(runs: &[Run], now: i64) -> HashMap<String, usize> {
-    line(runs, now)
+/// The place of each run waiting for a slot (1 is next), by run ID; a paused run has none.
+pub(in crate::app) fn positions(
+    runs: &[Run],
+    now: i64,
+    pauses: &[Pause],
+) -> HashMap<String, usize> {
+    line(runs, now, pauses)
         .into_iter()
         .enumerate()
         .filter(|(_, r)| r.waits_for_slot())
@@ -556,7 +628,9 @@ impl Store {
             CREATE INDEX IF NOT EXISTS workflow_runs_workflow ON workflow_runs(workflow_id, created_at);
             CREATE INDEX IF NOT EXISTS workflow_runs_state ON workflow_runs(state, updated_at);
             CREATE UNIQUE INDEX IF NOT EXISTS workflow_runs_active_item ON workflow_runs(item_url)
-                WHERE state NOT IN ('done','cancelled');",
+                WHERE state NOT IN ('done','cancelled');
+            CREATE TABLE IF NOT EXISTS workflow_pauses (
+                scope TEXT PRIMARY KEY, payload TEXT NOT NULL);",
         )?;
         Ok(Self(std::sync::Mutex::new(db)))
     }
@@ -593,6 +667,33 @@ impl Store {
         )?;
         ensure!(changed == 1, "Workflow run {} is not recorded.", run.id);
         Ok(())
+    }
+    /// The pauses in force, every project's first.
+    pub(in crate::app) fn pauses(&self) -> Result<Vec<Pause>> {
+        let db = self.0.lock().unwrap();
+        let mut query = db.prepare("SELECT payload FROM workflow_pauses ORDER BY scope")?;
+        let rows = query.query_map([], |r| r.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+    /// Record a pause, replacing the one of the same scope.
+    pub(in crate::app) fn pause(&self, pause: &Pause) -> Result<()> {
+        let scope = pause.project.as_deref().unwrap_or_default().to_lowercase();
+        self.0.lock().unwrap().execute(
+            "INSERT OR REPLACE INTO workflow_pauses (scope, payload) VALUES (?1, ?2)",
+            params![scope, serde_json::to_string(pause)?],
+        )?;
+        Ok(())
+    }
+    /// End the pause of one project, or every pause; returns how many ended.
+    pub(in crate::app) fn unpause(&self, project: Option<&str>) -> Result<usize> {
+        let db = self.0.lock().unwrap();
+        Ok(match project {
+            Some(project) => db.execute(
+                "DELETE FROM workflow_pauses WHERE scope=?1",
+                [project.to_lowercase()],
+            )?,
+            None => db.execute("DELETE FROM workflow_pauses", [])?,
+        })
     }
     /// Lose a run, as a failing disk would: a test of what is reported when saving fails.
     #[cfg(all(test, unix))]

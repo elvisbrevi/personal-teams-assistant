@@ -474,7 +474,8 @@ Knowledge
                            --director lets the workflow director choose (none leaves it unassigned).
   workflows runs [--state STATE] [--workflow WORKFLOW] [--limit N]
                            Runs, newest first, and those waiting on you (attention); a run waiting
-                           for a slot has waiting_for_slot and its queue_position (1 is next).
+                           for a slot has waiting_for_slot and its queue_position (1 is next); the
+                           pauses in force are in paused, and a run one holds has paused: true.
   workflows status RUN                   One run: stages, implementation runs, children, pull requests.
                            A session that did not end with its answer shows why (failure: a fixed cause).
   workflows resume RUN --confirmed       Continues a failed, interrupted or needs_attention run from its
@@ -482,6 +483,19 @@ Knowledge
                            coding run again.
   workflows cancel RUN --confirmed       Cancels the run and its active implementation run, and stops
                            every session the run started that is still alive.
+  workflows restart RUN [--note TEXT | --note-file PATH] --confirmed
+                           Cancels the run as cancel does and starts a new run of its workflow for its
+                           work item from the first stage. The handover note (at most 4000 characters;
+                           PATH is read here, at most 16 KiB) goes to each of its coding runs under
+                           «Handover from the previous run» and is posted nowhere. The runs name each
+                           other (continues, restarted_as) in workflows status.
+  workflows pause [--project NAME] --sessions stop|finish --confirmed
+                           Pauses every run, or one project's: nothing new starts (no slot, director,
+                           planning or coding run, acting block, nor a watcher start) until unpause.
+                           stop stops their live sessions now (a run whose active implementation run
+                           is stopped becomes interrupted); finish lets them finish. Order is kept.
+  workflows unpause [--project NAME] --confirmed
+                           Ends that project's pause, or every pause; the runs go on in their order.
   workflows assign RUN WORKFLOW --confirmed   Gives an unassigned run an enabled workflow of its project.
   workflows summary RUN    The workflow director writes a progress summary of the run from its record
                            (stages, children, pull requests, block outcomes; Markdown, at most 4000
@@ -654,6 +668,9 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--text-file"
                 | "--summary"
                 | "--state"
+                | "--note"
+                | "--note-file"
+                | "--sessions"
         ) {
             skip = 1;
         } else if !arg.starts_with("--") {
@@ -1154,6 +1171,25 @@ pub(super) fn summary_send(
     Ok(Ok(body))
 }
 
+/// The longest handover note file the CLI reads: 4000 characters of UTF-8 fit in it.
+const NOTE_FILE_BYTES: u64 = 16 * 1024;
+/// A handover note from a file on this computer, read here by the CLI (never by the host from a
+/// path it was given) and bounded.
+fn note_file(path: &str) -> Result<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).with_context(|| format!("cannot read {path}"))?;
+    let mut bytes = Vec::new();
+    file.take(NOTE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("cannot read {path}"))?;
+    ensure!(
+        bytes.len() as u64 <= NOTE_FILE_BYTES,
+        "{path} is larger than {} KiB; a handover note holds at most 4000 characters",
+        NOTE_FILE_BYTES / 1024
+    );
+    String::from_utf8(bytes).with_context(|| format!("{path} is not UTF-8 text"))
+}
+
 /// Workflows and their blocks: the same host operations as the MCP workflow tools.
 async fn workflows_command(args: &[String]) -> Result<Reply> {
     let words = words(args);
@@ -1316,6 +1352,57 @@ async fn workflows_command(args: &[String]) -> Result<Reply> {
                 return Ok(reply);
             }
             (method, json!({"run":run,"confirmed":true}))
+        }
+        (Some("restart"), _) => {
+            let mut body = json!({"run":id(2)?});
+            match (option(args, "--note"), option(args, "--note-file")) {
+                (Some(_), Some(_)) => {
+                    anyhow::bail!("give --note TEXT or --note-file PATH, not both")
+                }
+                (Some(text), None) => body["note"] = json!(text),
+                (None, Some(path)) => body["note"] = json!(note_file(path)?),
+                (None, None) => {}
+            }
+            // The run's item and workflow, read from the coordinator for the question.
+            if !confirmed {
+                let question = super::tools::question("workflow_run_restart", &body)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                if let Some(reply) = unconfirmed(args, question) {
+                    return Ok(reply);
+                }
+            }
+            body["confirmed"] = json!(true);
+            ("workflow_run_restart", body)
+        }
+        (Some(action @ ("pause" | "unpause")), _) => {
+            let method = if action == "pause" {
+                "workflow_runs_pause"
+            } else {
+                "workflow_runs_unpause"
+            };
+            let mut body = json!({});
+            if let Some(project) = option(args, "--project") {
+                body["project"] = json!(project);
+            }
+            if action == "pause" {
+                let sessions = option(args, "--sessions").context(
+                    "choose --sessions stop (stop the live sessions now) or --sessions finish (let them finish)",
+                )?;
+                ensure!(
+                    matches!(sessions, "stop" | "finish"),
+                    "--sessions is stop or finish"
+                );
+                body["sessions"] = json!(sessions);
+            }
+            let question = super::tools::confirmation(method, &body).unwrap_or_default();
+            if let Some(reply) = unconfirmed(args, question) {
+                return Ok(reply);
+            }
+            body["confirmed"] = json!(true);
+            (method, body)
         }
         (Some("assign"), _) => {
             let (run, workflow) = (id(2)?, id(3)?);
@@ -2147,7 +2234,8 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | "--token-expires" | "--keep" | "--machine" | "--since" | "--until" | "--before"
             | "--from" | "--chat" | "--query" | "--wiki" | "--author" | "--project"
             | "--organization" | "--workflow" | "--state" | "--send" | "--mention"
-            | "--text-file" | "--summary" | "--image" | "--alt" => {
+            | "--text-file" | "--summary" | "--image" | "--alt" | "--note" | "--note-file"
+            | "--sessions" => {
                 i += 1;
                 ensure!(
                     args.get(i)
@@ -2457,8 +2545,12 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | ["contexts", "show" | "edit" | "remove", _]
             | ["workflows", "list" | "save" | "repositories" | "settings"]
             | ["workflows", "classify", _]
-            | ["workflows", "runs"]
-            | ["workflows", "run" | "status" | "resume" | "cancel", _]
+            | ["workflows", "runs" | "pause" | "unpause"]
+            | [
+                "workflows",
+                "run" | "status" | "resume" | "cancel" | "restart",
+                _
+            ]
             | ["workflows", "assign", _, _]
             | ["workflows", "summary", _]
             | ["workflows", "show" | "remove" | "enable" | "disable", _]
@@ -2547,7 +2639,14 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
                     p.as_slice(),
                     [
                         "workflows",
-                        "run" | "resume" | "cancel" | "assign" | "summary",
+                        "run"
+                            | "resume"
+                            | "cancel"
+                            | "assign"
+                            | "summary"
+                            | "restart"
+                            | "pause"
+                            | "unpause",
                         ..
                     ]
                 )
@@ -2740,6 +2839,15 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
         ),
         ("--state", p.as_slice() == ["workflows", "runs"]),
         (
+            "--note",
+            matches!(p.as_slice(), ["workflows", "restart", _]),
+        ),
+        (
+            "--note-file",
+            matches!(p.as_slice(), ["workflows", "restart", _]),
+        ),
+        ("--sessions", p.as_slice() == ["workflows", "pause"]),
+        (
             "--send",
             matches!(p.as_slice(), ["workflows", "summary", _]),
         ),
@@ -2769,7 +2877,7 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
                 p.as_slice(),
                 [
                     "workflows",
-                    "repositories" | "settings" | "classify" | "run",
+                    "repositories" | "settings" | "classify" | "run" | "pause" | "unpause",
                     ..
                 ]
             ),
@@ -4317,6 +4425,14 @@ mod wiki_tests {
                 "--organization",
                 "https://dev.azure.com/x",
             ],
+            &["workflows", "restart"],
+            &["workflows", "restart", "r", "--sessions", "stop"],
+            &["workflows", "restart", "r", "--note"],
+            &["workflows", "resume", "r", "--note", "done"],
+            &["workflows", "pause", "r", "--sessions", "stop"],
+            &["workflows", "pause", "--sessions"],
+            &["workflows", "pause", "--note", "x", "--sessions", "stop"],
+            &["workflows", "unpause", "--sessions", "finish"],
         ] {
             assert!(check(args).is_err(), "{args:?}");
         }
@@ -4353,9 +4469,55 @@ mod wiki_tests {
             &["workflows", "resume", "r", "--confirmed"],
             &["workflows", "cancel", "r", "--confirmed"],
             &["workflows", "assign", "r", "payments", "--confirmed"],
+            &["workflows", "restart", "r", "--confirmed"],
+            &[
+                "workflows",
+                "restart",
+                "r",
+                "--note",
+                "Branch pushed; open the pull request.",
+                "--confirmed",
+            ],
+            &["workflows", "restart", "r", "--note-file", "note.md"],
+            &["workflows", "pause", "--sessions", "finish", "--confirmed"],
+            &[
+                "workflows",
+                "pause",
+                "--project",
+                "Payments",
+                "--sessions",
+                "stop",
+            ],
+            &["workflows", "unpause", "--confirmed"],
+            &[
+                "workflows",
+                "unpause",
+                "--project",
+                "Payments",
+                "--confirmed",
+            ],
         ] {
             assert!(check(args).is_ok(), "{args:?}");
         }
+    }
+    #[test]
+    fn a_handover_note_file_is_read_here_and_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("note.md");
+        std::fs::write(
+            &note,
+            "Hecho: la rama está publicada.\nFalta: abrir el pull request.",
+        )
+        .unwrap();
+        assert_eq!(
+            note_file(note.to_str().unwrap()).unwrap(),
+            "Hecho: la rama está publicada.\nFalta: abrir el pull request."
+        );
+        std::fs::write(&note, "x".repeat(NOTE_FILE_BYTES as usize + 1)).unwrap();
+        assert!(note_file(note.to_str().unwrap()).is_err());
+        std::fs::write(&note, [0xff, 0xfe]).unwrap();
+        assert!(note_file(note.to_str().unwrap()).is_err());
+        assert!(note_file(dir.path().join("missing").to_str().unwrap()).is_err());
     }
     #[test]
     fn workflow_settings_changes_become_one_update() {

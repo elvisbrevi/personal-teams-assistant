@@ -39,6 +39,7 @@ import { openGuides, renderGuides } from './guides.js';
 import { answerBubble, bubble, chosen, resizeComposer } from './chat.js';
 import { machineTrust } from './dialogs.js';
 import { closeWorkflowRun, loadWorkflowRuns, showRunsList } from './workflow-runs.js';
+import { showPause } from './workflow-pause.js';
 
 // ---------------------------------------------------------------- wiring
 
@@ -172,6 +173,7 @@ $('#stop').onclick = () => busy($('#stop'), async () => { await invoke('stop_ass
 $('#activity-all').onclick = () => showTab('messages');
 $('#workflow-attention-open').onclick = () => showRunsList();
 $('#runs-refresh').onclick = () => loadWorkflowRuns();
+$('#runs-pause-open').onclick = () => showPause(loadWorkflowRuns);
 $('#runs-state').onchange = () => loadWorkflowRuns();
 $('#runs-workflow').onchange = () => loadWorkflowRuns();
 $('#run-detail-back').onclick = () => closeWorkflowRun();
