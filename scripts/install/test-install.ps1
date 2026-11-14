@@ -157,7 +157,9 @@ try {
         Check '  after matching its published SHA-256' (Said 'matches its published SHA-256')
         Check '  and runs' (((& (Join-Path $net 'bin\pta.exe') --version) | Out-String) -match [regex]::Escape($release))
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -Root $net -Uninstall *> $out
-        Check '  and uninstalls' ($LASTEXITCODE -eq 0 -and -not (Test-Path (Join-Path $net 'bin')))
+        $uninstalled = $LASTEXITCODE -eq 0 -and -not (Test-Path (Join-Path $net 'bin'))
+        Check '  and uninstalls' $uninstalled
+        if (-not $uninstalled) { Get-Content $out | Write-Host }
         Check '  and leaves the user PATH as before' ((UserPath) -eq $pathBefore)
         $ErrorActionPreference = 'Stop'
     }

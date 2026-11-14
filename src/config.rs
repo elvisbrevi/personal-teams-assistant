@@ -481,8 +481,12 @@ pub struct Policy {
     #[serde(default)]
     pub allowed_senders: Vec<String>,
     /// Earlier messages of the same chat read before deciding whether and how to answer
-    /// (1–50): a message that refers back («the one I mentioned») needs them.
-    #[serde(default = "default_history_messages")]
+    /// (1–50): a message that refers back («the one I mentioned») needs them. Left out while it
+    /// is the default, so a configuration nobody changed still loads on a host that predates it.
+    #[serde(
+        default = "default_history_messages",
+        skip_serializing_if = "is_default_history_messages"
+    )]
     pub history_messages: usize,
 }
 fn default_detailed_answer_chars() -> usize {
@@ -491,6 +495,9 @@ fn default_detailed_answer_chars() -> usize {
 pub const DEFAULT_HISTORY_MESSAGES: usize = 10;
 fn default_history_messages() -> usize {
     DEFAULT_HISTORY_MESSAGES
+}
+fn is_default_history_messages(value: &usize) -> bool {
+    *value == DEFAULT_HISTORY_MESSAGES
 }
 impl Config {
     pub fn desktop_template() -> Result<Self> {
@@ -598,6 +605,26 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::{Config, Language, MessageStyle};
+
+    #[test]
+    fn a_configuration_nobody_changed_is_saved_without_the_fields_older_hosts_do_not_know() {
+        // `policy` refuses unknown fields: a host that predates `history_messages` loads a
+        // configuration only while that field is left out of it.
+        let mut config = Config::desktop_template().unwrap();
+        let saved = toml::to_string_pretty(&config).unwrap();
+        assert!(!saved.contains("history_messages"), "{saved}");
+        let read: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(
+            read.policy.history_messages,
+            super::DEFAULT_HISTORY_MESSAGES
+        );
+        // A value the user chose is kept.
+        config.policy.history_messages = 25;
+        let saved = toml::to_string_pretty(&config).unwrap();
+        assert!(saved.contains("history_messages = 25"), "{saved}");
+        let read: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(read.policy.history_messages, 25);
+    }
 
     #[test]
     fn graph_callbacks_keep_existing_urls_and_isolate_web_profiles() {
