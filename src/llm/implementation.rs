@@ -1,10 +1,12 @@
 //! Interactive coding is separate from the tool-less answer providers.
 use super::agent;
 mod codex;
+mod failure;
 mod lines;
 pub(crate) mod mobile;
 use crate::workflows::Allow;
 use anyhow::{Result, ensure};
+pub(crate) use failure::{Cause, Failed, Failure, of_error};
 use serde_json::{Value, json};
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,17 +29,22 @@ fn check_offered(catalog: &Value, provider: &str, model: &str, effort: &str) -> 
         .flatten()
         .find(|p| p["id"] == provider && p["transport"] == "cli" && p["available"] == true)
         .ok_or_else(|| {
-            anyhow::anyhow!("Install and sign in to the selected CLI on this machine.")
+            Failed::with(
+                Cause::CliMissing,
+                "Install and sign in to the selected CLI on this machine.",
+            )
         })?;
-    ensure!(
-        info["models"].as_array().into_iter().flatten().any(|m| {
-            m["id"] == model
-                && m["efforts"]
-                    .as_array()
-                    .is_some_and(|e| e.iter().any(|e| e == effort))
-        }),
-        "Select an available model and effort on this machine."
-    );
+    if !info["models"].as_array().into_iter().flatten().any(|m| {
+        m["id"] == model
+            && m["efforts"]
+                .as_array()
+                .is_some_and(|e| e.iter().any(|e| e == effort))
+    }) {
+        return Err(Failed::with(
+            Cause::ModelUnavailable,
+            "Select an available model and effort on this machine.",
+        ));
+    }
     Ok(())
 }
 /// The installed CLIs as this machine last probed them, and when.
@@ -77,7 +84,12 @@ pub(crate) async fn validate_recent(
     }
     let catalog = tokio::time::timeout(bound, super::catalog())
         .await
-        .map_err(|_| anyhow::anyhow!("The installed CLIs could not be listed in time."))?;
+        .map_err(|_| {
+            Failed::with(
+                Cause::Timeout,
+                "The installed CLIs could not be listed in time.",
+            )
+        })?;
     let catalog = serde_json::to_value(catalog)?;
     remember(&catalog);
     check_offered(&catalog, provider, model, effort)
@@ -93,6 +105,10 @@ thread_local! {
 #[cfg(all(test, unix))]
 pub(crate) fn use_test_cli(cli: Option<PathBuf>) {
     TEST_CLI.with(|current| *current.borrow_mut() = cli);
+}
+/// The selected CLI is not installed on this machine.
+fn unavailable() -> anyhow::Error {
+    Failed::with(Cause::CliMissing, "Selected CLI is unavailable.")
 }
 /// The installed CLI of a provider.
 fn locate(provider: &str) -> Option<PathBuf> {
@@ -220,13 +236,15 @@ pub(crate) fn permission_mode(provider: &str, planning: bool) -> &'static str {
     }
 }
 
-/// What a finished CLI turn returned: whether it completed, its final text, and the
-/// permission prompts it still stopped on (bounded and redacted), which no one answered.
+/// What a finished CLI turn returned: whether it completed, its final text, the permission
+/// prompts it still stopped on (bounded and redacted), which no one answered, and, when it did
+/// not complete, why (`Failure`).
 #[derive(Debug, Default)]
 pub(crate) struct Outcome {
     pub(crate) ok: bool,
     pub(crate) text: String,
     pub(crate) prompts: Vec<String>,
+    pub(crate) failure: Option<Failure>,
 }
 /// A session ends within this, still working or not; it is then stopped and its run records
 /// `LIMIT_REACHED`.
@@ -275,7 +293,19 @@ impl Outcome {
             ok,
             text: redactor.redact(text),
             prompts: prompts.iter().map(|p| redactor.redact(p)).collect(),
+            failure: None,
         })
+    }
+    /// Why it did not complete; kept only when it did not.
+    fn because(mut self, failure: Failure) -> Self {
+        if !self.ok {
+            self.failure = Some(failure);
+        }
+        self
+    }
+    /// Why a finished session did not complete, when it neither stopped early nor timed out.
+    fn failure(&self) -> Failure {
+        self.failure.unwrap_or(Failure::of(Cause::Unknown))
     }
 }
 
@@ -292,7 +322,7 @@ pub(crate) async fn plan(
     observer: SessionObserver<'_>,
     remote: mobile::Observer,
 ) -> Result<Value> {
-    let binary = locate(choice.0).ok_or_else(|| anyhow::anyhow!("Selected CLI is unavailable."))?;
+    let binary = locate(choice.0).ok_or_else(unavailable)?;
     let prompt = format!(
         "{instructions}\n{PLAN_RULES} Return only JSON matching this schema: {}\n{}",
         plan_schema(),
@@ -308,8 +338,23 @@ pub(crate) async fn plan(
         remote,
     )
     .await?;
-    ensure!(outcome.ok, "Planning did not complete.");
-    Ok(serde_json::from_str(&outcome.text)?)
+    if !outcome.ok {
+        return Err(Failed::wrap(
+            outcome.failure(),
+            "Planning did not complete.",
+        ));
+    }
+    answered(&outcome.text)
+}
+
+/// A JSON answer, or `invalid_answer`.
+fn answered(text: &str) -> Result<Value> {
+    serde_json::from_str(text).map_err(|_| {
+        Failed::with(
+            Cause::InvalidAnswer,
+            "The agent's answer is not the JSON it was asked for.",
+        )
+    })
 }
 
 /// The CLI arguments of a run. A coding run (`planning` false) starts the provider in its
@@ -416,7 +461,7 @@ pub(crate) async fn request(
     observer: SessionObserver<'_>,
     remote: mobile::Observer,
 ) -> Result<Value> {
-    let binary = locate(choice.0).ok_or_else(|| anyhow::anyhow!("Selected CLI is unavailable."))?;
+    let binary = locate(choice.0).ok_or_else(unavailable)?;
     let schema = json!({"type":"object","additionalProperties":false,"required":["title","description","fields"],"properties":{"title":{"type":"string"},"description":{"type":"string"},"fields":fields_schema()}});
     let prompt =
         format!("{instructions}\n{REQUEST_RULES} Return only JSON matching {schema}.\n{input}");
@@ -430,8 +475,13 @@ pub(crate) async fn request(
         remote,
     )
     .await?;
-    ensure!(outcome.ok, "Request generation did not complete.");
-    Ok(serde_json::from_str(&outcome.text)?)
+    if !outcome.ok {
+        return Err(Failed::wrap(
+            outcome.failure(),
+            "Request generation did not complete.",
+        ));
+    }
+    answered(&outcome.text)
 }
 
 /// The closed answer of the workflow director: a listed workflow ID (or an empty one for none)
@@ -479,6 +529,8 @@ impl DirectTask {
 pub(crate) struct Direction {
     pub(crate) answer: Option<Value>,
     pub(crate) problem: Option<&'static str>,
+    /// Why there is no answer, from the fixed vocabulary.
+    pub(crate) failure: Option<Failure>,
 }
 impl Direction {
     fn read(outcome: &Outcome) -> Self {
@@ -486,16 +538,19 @@ impl Direction {
             return Self {
                 answer: None,
                 problem: Some("The workflow director returned no answer."),
+                failure: Some(outcome.failure()),
             };
         }
         match serde_json::from_str::<Value>(outcome.text.trim()) {
             Ok(answer) => Self {
                 answer: Some(answer),
                 problem: None,
+                failure: None,
             },
             Err(_) => Self {
                 answer: None,
                 problem: Some("The workflow director's answer is not the JSON it was asked for."),
+                failure: Some(Failure::of(Cause::InvalidAnswer)),
             },
         }
     }
@@ -512,7 +567,7 @@ pub(crate) async fn direct(
     observer: SessionObserver<'_>,
     remote: mobile::Observer,
 ) -> Result<Direction> {
-    let binary = locate(choice.0).ok_or_else(|| anyhow::anyhow!("Selected CLI is unavailable."))?;
+    let binary = locate(choice.0).ok_or_else(unavailable)?;
     // One read-only turn: its process ends with the answer, never retained.
     let outcome = execute_allowing(
         &binary,
@@ -557,7 +612,7 @@ pub(crate) async fn execute(
     observer: SessionObserver<'_>,
     remote: mobile::Observer,
 ) -> Result<Outcome> {
-    let binary = locate(provider).ok_or_else(|| anyhow::anyhow!("Selected CLI is unavailable."))?;
+    let binary = locate(provider).ok_or_else(unavailable)?;
     execute_allowing(
         &binary,
         (provider, model, effort),
@@ -618,8 +673,40 @@ struct Events {
     prompts: Vec<String>,
     /// An event could not be read within the stream's bounds (`lines`) and was skipped.
     skipped: bool,
+    /// The session reported at least one event.
+    seen: bool,
+    /// The last report read empty because its text was over the stream's string bound.
+    truncated: bool,
 }
 impl Events {
+    /// One event; `dropped` says its line had a string too long to keep (`lines`).
+    fn read(
+        &mut self,
+        provider: &str,
+        event: &Value,
+        dropped: bool,
+        observer: SessionObserver<'_>,
+        requested: &str,
+    ) -> Result<()> {
+        self.event(provider, event, observer, requested)?;
+        if ["result", "item.completed", "text"]
+            .contains(&event["type"].as_str().unwrap_or_default())
+        {
+            self.truncated = dropped && self.text.trim().is_empty();
+        }
+        Ok(())
+    }
+    /// Why a session whose last turn ended did not complete: its CLI said the turn failed, or
+    /// its report is empty (over the bound, or missing).
+    fn failure(&self) -> Failure {
+        Failure::of(if self.failed {
+            Cause::AgentError
+        } else if self.truncated {
+            Cause::OutputLimit
+        } else {
+            Cause::NoReport
+        })
+    }
     fn event(
         &mut self,
         provider: &str,
@@ -627,6 +714,7 @@ impl Events {
         observer: SessionObserver<'_>,
         requested: &str,
     ) -> Result<()> {
+        self.seen = true;
         let kind = event["type"].as_str().unwrap_or_default();
         let session = if provider == "codex" && kind == "thread.started" {
             event["thread_id"].as_str()
@@ -721,8 +809,10 @@ async fn events(
     let mut buffer = [0; 8192];
     loop {
         let count = stream.read(&mut buffer).await?;
-        let mut line = |line| match line {
-            lines::Line::Event(event) => result.event(provider, &event, observer, requested),
+        let mut line = |line, dropped| match line {
+            lines::Line::Event(event) => {
+                result.read(provider, &event, dropped, observer, requested)
+            }
             lines::Line::Skipped => {
                 result.skipped = true;
                 Ok(())
@@ -731,7 +821,7 @@ async fn events(
         };
         if count == 0 {
             if let Some(last) = lines.finish() {
-                line(last)?;
+                line(last, lines.dropped())?;
             }
             return Ok(result);
         }
@@ -740,7 +830,7 @@ async fn events(
             let (used, read) = lines.feed(bytes);
             bytes = &bytes[used..];
             if let Some(read) = read {
-                line(read)?;
+                line(read, lines.dropped())?;
             }
         }
     }
@@ -832,6 +922,7 @@ async fn execute_allowing(
     if provider == "codex" {
         match codex::Client::connect(binary).await {
             Ok(client) => {
+                // A connection that ends before the turn does is a stream that ended.
                 return client
                     .execute(
                         (model, effort),
@@ -841,7 +932,8 @@ async fn execute_allowing(
                         observer,
                         remote,
                     )
-                    .await;
+                    .await
+                    .map_err(|error| Failed::or(error, Cause::StreamEnded));
             }
             Err(_) => remote(mobile::Access::unavailable())?,
         }
@@ -865,7 +957,9 @@ async fn execute_allowing(
         );
     }
     // A run gets the user's CLI login, never the assistant's Graph/ADO credentials.
-    let mut child = command.spawn()?;
+    let mut child = command
+        .spawn()
+        .map_err(|_| Failed::with(Cause::CliMissing, "Coding process did not start."))?;
     let _process = ProcessTree(
         child
             .id()
@@ -887,16 +981,19 @@ async fn execute_allowing(
             tail(stderr)
         );
         let _ = written;
-        Ok::<_, anyhow::Error>((status?.success(), out?, err?))
+        Ok::<_, anyhow::Error>((status?, out?, err?))
     })
     .await;
     // The process tree is stopped when `_process` drops; the run records why.
     let Ok(result) = result else {
-        return Outcome::redacted(false, LIMIT_REACHED, &[]);
+        return Ok(
+            Outcome::redacted(false, LIMIT_REACHED, &[])?.because(Failure::of(Cause::Timeout))
+        );
     };
     let result = result?;
-    let (status, mut events, stderr) = result;
-    let stderr = String::from_utf8_lossy(&stderr);
+    let (exit, mut events, stderr_bytes) = result;
+    let status = exit.success();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
     for line in stderr.lines() {
         // OpenCode's non-interactive run rejects a request nobody can answer and says so here.
         if let Some(asked) = line.split("permission requested:").nth(1) {
@@ -907,13 +1004,24 @@ async fn execute_allowing(
         }
     }
     let ok = status && !events.failed && !events.text.trim().is_empty();
-    let text = if events.text.is_empty() {
-        format!("The coding agent did not return a final result. {stderr}")
+    // Why it did not complete, chosen here; what the CLI wrote to stderr is never kept.
+    let failure = if !events.seen && !status {
+        Failure::exited_at_start(exit.code(), &stderr_bytes)
+    } else if !status && !events.failed {
+        Failure {
+            exit_code: exit.code(),
+            ..Failure::of(Cause::StreamEnded)
+        }
     } else {
-        events.text
+        events.failure()
+    };
+    let text = if events.text.is_empty() {
+        "The coding agent did not return a final result.".to_owned()
+    } else {
+        std::mem::take(&mut events.text)
     };
     let text = noted(text, events.skipped, planning);
-    Outcome::redacted(ok, &text, &events.prompts)
+    Ok(Outcome::redacted(ok, &text, &events.prompts)?.because(failure))
 }
 
 #[cfg(test)]
@@ -978,6 +1086,61 @@ mod tests {
         finish.send(()).unwrap();
         assert_eq!(reading.await.unwrap().text, "Done");
         writing.await.unwrap();
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn another_cli_that_exits_at_once_records_why_without_its_stderr() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("opencode");
+        agent::install_fake_cli(
+            &binary,
+            "#!/bin/sh\ncat > /dev/null\necho 'error: unknown option --standalone (from /home/someone/.config)' >&2\nexit 2\n",
+        );
+        let outcome = execute_at(
+            &binary,
+            ("opencode", "provider/model", "default"),
+            &[root.path().into()],
+            "Synthetic task",
+            None,
+            &|_| Ok(()),
+            std::sync::Arc::new(|_| Ok(())),
+        )
+        .await
+        .unwrap();
+        assert!(!outcome.ok);
+        assert_eq!(
+            outcome.failure,
+            Some(Failure {
+                cause: Cause::CliExitedAtStart,
+                exit_code: Some(2),
+                stderr: Some(failure::Stderr::UnknownFlag),
+            })
+        );
+        assert!(!outcome.text.contains("someone"), "{}", outcome.text);
+        // One that reported events and then exited with an error: its stream ended.
+        agent::install_fake_cli(
+            &binary,
+            "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' '{\"type\":\"step_start\",\"sessionID\":\"ses_x\"}'\nexit 4\n",
+        );
+        let outcome = execute_at(
+            &binary,
+            ("opencode", "provider/model", "default"),
+            &[root.path().into()],
+            "Synthetic task",
+            None,
+            &|_| Ok(()),
+            std::sync::Arc::new(|_| Ok(())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome.failure,
+            Some(Failure {
+                cause: Cause::StreamEnded,
+                exit_code: Some(4),
+                stderr: None,
+            })
+        );
     }
     #[tokio::test]
     async fn an_oversized_line_in_another_cli_stream_is_read_or_skipped_not_dropped() {

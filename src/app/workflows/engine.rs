@@ -358,6 +358,19 @@ pub(in crate::app) async fn stop_sessions(
 }
 
 /// Record the observed state of the run's active implementation run.
+/// Why an implementation run another machine returned did not end with its answer, as it
+/// reported it (`Failure::of_record`).
+fn observed_failure(observed: &Value) -> Option<crate::llm::implementation::Failure> {
+    crate::llm::implementation::Failure::of_record(observed)
+}
+/// `ended {state}`, with the cause's sentence when there is one.
+fn ended(state: &str, failure: Option<crate::llm::implementation::Failure>) -> String {
+    match failure {
+        Some(failure) => format!("ended {state}: {}", failure.sentence()),
+        None => format!("ended {state}."),
+    }
+}
+
 fn set_observed(run: &mut Run, observed: &str) {
     let stage = run.stopped_in.unwrap_or(run.state);
     let target = match stage {
@@ -539,13 +552,20 @@ async fn classify(host: &Arc<Host>, azure: &Azure, run: Run, now: i64) -> Result
         }
         Ok(verdict) => verdict,
     };
-    run.classification = Some(json!({
+    let mut classification = json!({
         "workflow": verdict["workflow"],
         "outcome": verdict["outcome"],
         "reason": verdict["reason"],
         "director": verdict["director"],
         "session": verdict["run"],
-    }));
+    });
+    // The director's session gave no answer: why, from the fixed vocabulary.
+    let failure = (!verdict["failure"].is_null())
+        .then(|| crate::llm::implementation::Failure::read(&verdict["failure"]));
+    if let Some(failure) = failure {
+        classification["failure"] = failure.view();
+    }
+    run.classification = Some(classification);
     // Checked against the workflows as they are now: one removed or disabled during the
     // session is not assigned.
     let map = host.state.settings.map()?;
@@ -575,9 +595,15 @@ async fn classify(host: &Arc<Host>, azure: &Azure, run: Run, now: i64) -> Result
             };
             run.error = None;
             run.advance(Phase::Unassigned, now, "no workflow");
-            run.attention = Some(format!(
-                "The workflow director chose no workflow ({reason}); assign one to this run."
-            ));
+            run.attention = Some(match failure {
+                Some(failure) => format!(
+                    "The workflow director gave no answer: {} Assign a workflow to this run.",
+                    failure.sentence()
+                ),
+                None => format!(
+                    "The workflow director chose no workflow ({reason}); assign one to this run."
+                ),
+            });
         }
     }
     state.db.save(&run)?;
@@ -737,6 +763,7 @@ async fn planning(
             machine: workflow.machine.clone(),
             started: false,
             state: None,
+            failure: None,
         });
         return Ok(true);
     };
@@ -828,12 +855,17 @@ async fn planning(
             Ok(true)
         }
         other => {
+            let failure = observed_failure(&observed);
+            if let Some(planning) = run.planning.as_mut() {
+                planning.failure = failure;
+            }
             run.stop(
                 Phase::NeedsAttention,
                 now,
                 format!(
-                    "Planning run {} ended {other}; read its record (implementation_runs), then resume to plan again.",
-                    planned.id
+                    "Planning run {} {} Read its record (implementation_runs), then resume to plan again.",
+                    planned.id,
+                    ended(other, failure)
                 ),
             );
             Ok(true)
@@ -1001,6 +1033,7 @@ async fn coding(
             machine: workflow.machine.clone(),
             started: false,
             state: None,
+            failure: None,
         });
         return Ok(true);
     };
@@ -1105,12 +1138,18 @@ async fn coding(
             Ok(true)
         }
         other => {
+            let failure = observed_failure(&observed);
+            if let Some(coding) = run.children[index].coding.as_mut() {
+                coding.failure = failure;
+            }
             run.stop(
                 Phase::NeedsAttention,
                 now,
                 format!(
-                    "Coding run {} of {} ended {other}; read its record (implementation_runs), finish or fix the child, then resume to continue with the next child (this run is not started again).",
-                    coding.id, child.url
+                    "Coding run {} of {} {} Read its record (implementation_runs), finish or fix the child, then resume to continue with the next child (this run is not started again).",
+                    coding.id,
+                    child.url,
+                    ended(other, failure)
                 ),
             );
             Ok(true)

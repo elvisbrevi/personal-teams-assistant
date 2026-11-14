@@ -308,6 +308,10 @@ pub(crate) struct Run {
     /// The permission prompts the CLI still raised and nobody answered (bounded, redacted).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) prompts: Vec<String>,
+    /// Why a run that did not end with its answer ended so, chosen in code on its machine
+    /// (`llm::implementation::Failure`); none in a record from an older host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) failure: Option<crate::llm::implementation::Failure>,
 }
 /// The final state of a coding run that stopped on a permission prompt, recorded with its text
 /// so its cause can be removed; distinct from `needs_attention`.
@@ -329,6 +333,10 @@ struct SessionSummary {
     created_at: String,
     started_at: Option<String>,
     finished_at: Option<String>,
+    /// Why the run did not end with its answer. Sent to a coordinator only when it says it
+    /// reads the field (`session_failure_support`): an older one refuses unknown fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure: Option<crate::llm::implementation::Failure>,
 }
 impl From<Run> for SessionSummary {
     fn from(run: Run) -> Self {
@@ -347,6 +355,7 @@ impl From<Run> for SessionSummary {
             created_at: run.created_at,
             started_at: run.started_at,
             finished_at: run.finished_at,
+            failure: run.failure,
         }
     }
 }
@@ -1069,7 +1078,8 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
                 .db
                 .list(args["work_item_url"].as_str(), args["id"].as_str(), false)?
             {
-                let mut value = json!({"id":run.launch.id,"item":run.launch.detail.item,"planning":run.launch.planning,"state":run.state,"created_at":run.created_at,"started_at":run.started_at,"finished_at":run.finished_at,"session_id":run.session_id,"remote":run.remote,"provider":run.launch.request.provider,"model":run.launch.request.model,"effort":run.launch.request.effort,"machine":run.launch.request.machine,"output":run.output,"plan":run.plan,"permission_mode":run.permission_mode,"prompts":run.prompts});
+                let mut value = json!({"id":run.launch.id,"item":run.launch.detail.item,"planning":run.launch.planning,"state":run.state,"created_at":run.created_at,"started_at":run.started_at,"finished_at":run.finished_at,"session_id":run.session_id,"remote":run.remote,"provider":run.launch.request.provider,"model":run.launch.request.model,"effort":run.launch.request.effort,"machine":run.launch.request.machine,"output":run.output,"plan":run.plan,"permission_mode":run.permission_mode,"prompts":run.prompts,"failure":run.failure});
+                with_failure(&mut value);
                 mark_session(&mut value, &own).await;
                 size += serde_json::to_vec(&value)?.len();
                 if size > 800_000 && !runs.is_empty() {
@@ -1099,6 +1109,12 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
                 // Keep the run active, and its directories reserved, until the daemon confirms stop.
                 crate::llm::implementation::mobile::cancel_codex(&session).await?;
             }
+            let _ = state.db.failure(
+                id,
+                &crate::llm::implementation::Failure::of(
+                    crate::llm::implementation::Cause::Cancelled,
+                ),
+            );
             LocalImplementation::new(&state.db).finish_run(id, "cancelled", "", None)?;
             // A finished run's session kept after it (or opened again by the user) stops too:
             // cancelling ends every process of the run.
@@ -1158,6 +1174,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
                 session_id: None,
                 started_at: None,
                 remote: None,
+                failure: None,
                 permission_mode: Some(
                     crate::llm::implementation::permission_mode(
                         &launch.request.provider,
@@ -1344,7 +1361,7 @@ async fn run(host: &Arc<Host>, launch: Launch) {
             for child in children {
                 validate_child(child)?;
             }
-            Ok((true, String::new(), Some(plan), Vec::new()))
+            Ok((true, String::new(), Some(plan), Vec::new(), None))
         }
         .await
     } else {
@@ -1361,16 +1378,49 @@ async fn run(host: &Arc<Host>, launch: Launch) {
             remote,
         )
         .await
-        .map(|outcome| (outcome.ok, outcome.text, None, outcome.prompts))
+        .map(|outcome| {
+            let failure = outcome.failure;
+            (outcome.ok, outcome.text, None, outcome.prompts, failure)
+        })
     };
-    let (status, output, plan, prompts) = match result {
-        Ok((ok, output, plan, prompts)) => (final_state(ok, plan.is_some(), &prompts), output, plan, prompts),
-        Err(_) => ("failed", "The selected CLI did not complete. Check its login, permissions and model availability on the execution machine.".into(), None, Vec::new()),
+    use crate::llm::implementation::{Cause, Failure};
+    let (status, output, plan, prompts, failure) = match result {
+        Ok((ok, output, plan, prompts, failure)) => {
+            let status = final_state(ok, plan.is_some(), &prompts);
+            let failure = match status {
+                "done" | "plan_ready" => None,
+                PERMISSION_PROMPT => Some(Failure::of(Cause::PermissionPrompt)),
+                _ => Some(failure.unwrap_or(Failure::of(Cause::Unknown))),
+            };
+            (status, output, plan, prompts, failure)
+        }
+        // What the session's error carries; a plan that is not a valid child plan is an
+        // invalid answer. Its text is the cause's sentence, never the error's.
+        Err(error) => {
+            let failure = crate::llm::implementation::of_error(
+                &error,
+                if launch.planning {
+                    Cause::InvalidAnswer
+                } else {
+                    Cause::Unknown
+                },
+            );
+            (
+                "failed",
+                failure.sentence(),
+                None,
+                Vec::new(),
+                Some(failure),
+            )
+        }
     };
     let db = &host.state.implementation.db;
     if authority::invocation(&host.state).is_ok_and(|i| i.scope.owner) {
         if !prompts.is_empty() {
             let _ = db.prompts(&launch.id, &prompts);
+        }
+        if let Some(failure) = &failure {
+            let _ = db.failure(&launch.id, failure);
         }
         let _ = LocalImplementation::new(db).finish_run(&launch.id, status, &output, plan);
     }
@@ -1386,6 +1436,14 @@ async fn run(host: &Arc<Host>, launch: Launch) {
 /// The endings after which a run's Claude session stays reachable through Remote Control, for
 /// up to two hours, and belongs to the user: a coding run `done`, a planning run `plan_ready`.
 const KEPT_AFTER: [&str; 2] = ["done", "plan_ready"];
+
+/// Give a recorded run or session its `failure` as operations show it: the identifiers and the
+/// sentence (`Failure::view`), read within the vocabulary; for a record from before causes
+/// that did not end with its answer, what its state says or `unknown`.
+pub(super) fn with_failure(value: &mut Value) {
+    value["failure"] = crate::llm::implementation::Failure::of_record(value)
+        .map_or(Value::Null, |failure| failure.view());
+}
 
 /// Mark a recorded agent run or session (this machine's record, or the summary the coordinator
 /// keeps) with whether its agent process exists now (`session_alive`) and whether it outlived
