@@ -682,6 +682,10 @@ async fn a_planned_child_keeps_its_one_repository_and_two_task_runs_of_a_workflo
         .await;
     assert!(waiting.admitted);
     assert!(!waiting.children[0].coding.as_ref().unwrap().started);
+    // The first run's CLI logs its start a moment after its launch is accepted.
+    while bench.count("starts") == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     assert_eq!(bench.count("starts"), 1);
     // A single `Branch:` line behaves as before: one branch, one pull request to wait for.
     bench.mode("mode", "done");

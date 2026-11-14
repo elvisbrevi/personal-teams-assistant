@@ -39,8 +39,7 @@ pub(in crate::app) struct Catalog {
 #[cfg(unix)]
 pub(in crate::app) const ORGANIZATION: &str = "https://dev.azure.com/example";
 
-/// A work item of project Payments.
-#[cfg(unix)]
+/// A work item of project Payments (also built by tests that run on every platform).
 pub(in crate::app) fn detail(
     id: u64,
     kind: &str,
