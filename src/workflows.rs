@@ -153,9 +153,9 @@ pub fn describe_preapprove(preapprove: &[Preapproval]) -> String {
     let effects: Vec<String> = preapprove
         .iter()
         .map(|p| match p.action {
-            Preapproved::RestartAfterCut => "restart a run whose coding session was cut (the stream ended, a line was over the limit, the time limit, a host restart or an offline machine) with its drafted handover note, once and never for a run it restarted itself".to_owned(),
+            Preapproved::RestartAfterCut => "restart a run whose coding session was cut (the stream ended, a line was over the limit, the time limit, a host restart or an offline machine) with its drafted handover note, once and never for a run it restarted itself. That note is written by a model that read the work item's comments, and it reaches a coding agent with full permissions that no person reads first: between a comment and that agent there are only prompts (the supervisor's fixed rules and the note's preface, which calls it untrusted), a 4000-character bound, the cleaner that removes links and mentions, and one automatic restart per run a person started. That lowers the risk; it is not a guarantee".to_owned(),
             Preapproved::PostSummary => format!(
-                "post its drafted summary of a stopped run, as you, to the Teams chat {} ({}), mentioning {}, once per look",
+                "post its drafted summary of a stopped run, as you, to the Teams chat {} ({}), mentioning {}, once per look and at most 3 times a day for this workflow, only when the text passes the checks of an answer",
                 p.chat.as_ref().map(|c| c.name.as_str()).unwrap_or("?"),
                 p.chat.as_ref().map(|c| c.id.as_str()).unwrap_or("?"),
                 if p.mentions.is_empty() {

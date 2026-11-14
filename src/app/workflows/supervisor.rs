@@ -39,6 +39,8 @@ pub(in crate::app) const METHODS: [&str; 5] = [
     "workflow_run_requeue",
 ];
 
+/// Settled rows of `workflow_looks` are kept this long (30 days).
+const KEEP_LOOK_ROWS: i64 = 30 * DAY;
 /// A request for a look of a run waits this long after its previous look started.
 pub(in crate::app) const REQUEST_SECONDS: i64 = 300;
 /// At most this many looks are kept on a run; the oldest is dropped.
@@ -336,6 +338,14 @@ impl Looks {
         )?;
         Ok(usize::try_from(count).unwrap_or_default())
     }
+    /// Delete the settled rows older than `KEEP_LOOK_ROWS` seconds: an event that old can no
+    /// longer occur again (every event looks at the last day), so the table stays bounded.
+    pub(in crate::app) fn prune(&self, now: i64) -> Result<usize> {
+        Ok(self.0.lock().unwrap().execute(
+            "DELETE FROM workflow_looks WHERE state IN ('done','failed','skipped') AND updated_at < ?1",
+            [now - KEEP_LOOK_ROWS],
+        )?)
+    }
     /// Store an audit, keeping the most recent `audit::MAX_AUDITS`.
     pub(in crate::app) fn insert_audit(&self, audit: &audit::Audit) -> Result<()> {
         let db = self.0.lock().unwrap();
@@ -627,9 +637,10 @@ pub(in crate::app) async fn tick(host: &Arc<Host>, azure: &Azure, now: i64) -> R
     }
     let (found, suspects) = events(&runs, &observed, &settings, &pauses, now);
     *supervision.suspects.lock().unwrap() = suspects;
+    supervision.looks.prune(now)?;
     // A batch whose runs have all ended gets one audit, once (its key).
     if !queued_rows(state, audit::AUDIT_ROW)
-        && let Some(batch) = audit::batch(&runs, audit::last_until(&supervision.looks)?, now)
+        && let Some(batch) = audit::batch(&runs, audit::last(&supervision.looks)?.as_ref(), now)
     {
         supervision.looks.insert(&Row {
             key: batch.key,
@@ -1128,6 +1139,7 @@ pub(in crate::app) fn input(
             note(&mut truncated, "the latest report");
         } else {
             // The rest is bounded by code already; cut the run's own lists as a last resort.
+            truncated.push("the end of the input".into());
             return (cut(&text, MAX_INPUT), truncated);
         }
     }
@@ -1676,8 +1688,36 @@ const CUT_CAUSES: [Cause; 5] = [
     Cause::HostRestarted,
     Cause::MachineOffline,
 ];
-/// Why a pre-approved post waits for the person instead (a fixed text).
+/// Why a pre-approved post waits for the person instead (fixed texts).
 const NOT_POSTED: &str = "Pre-approved, but its text did not pass the sensitive-data and size checks of an answer: it waits for you.";
+const NOT_POSTED_CAP: &str = "Pre-approved, but this workflow already posted its pre-approved summaries for the last 24 hours: it waits for you.";
+/// At most this many pre-approved posts per workflow in 24 hours; the rest wait for the person.
+pub(in crate::app) const PREAPPROVED_POSTS_PER_DAY: usize = 3;
+
+/// The exact secrets a test gives instead of reading the credential store.
+#[cfg(test)]
+pub(in crate::app) static TEST_SECRETS: std::sync::Mutex<Option<Vec<String>>> =
+    std::sync::Mutex::new(None);
+
+/// The redactor an assistant's answer passes: the running pipeline's, or the same one built
+/// from the configuration and the exact secrets `runtime::serve` gives it. None when a secret
+/// cannot be read, so nothing is posted unchecked.
+async fn answer_redactor(host: &Arc<Host>) -> Option<Arc<security::Redactor>> {
+    if let Ok(pipeline) = crate::app::running_pipeline(&host.state).await {
+        return Some(pipeline.redactor.clone());
+    }
+    let config = host.state.settings.config().ok()?;
+    #[cfg(test)]
+    if let Some(secrets) = TEST_SECRETS.lock().unwrap().clone() {
+        return security::Redactor::new(&config.policy.sensitive_patterns, secrets)
+            .ok()
+            .map(Arc::new);
+    }
+    let secrets = crate::runtime::answer_secrets(&config).ok()?;
+    security::Redactor::new(&config.policy.sensitive_patterns, secrets)
+        .ok()
+        .map(Arc::new)
+}
 
 /// Why a pre-approved restart may not run now, or none: every condition, read from the run, its
 /// sessions, the pauses and the workflow as the map holds it now.
@@ -1723,47 +1763,188 @@ async fn restart_refusal(host: &Arc<Host>, run: &Run, look: &Look) -> Option<&'s
 }
 
 /// Whether a drafted summary passes what an assistant's answer must (`Pipeline::valid_answer`):
-/// not empty, within Teams' body once rendered, and nothing the redactor would remove.
-fn postable(host: &Arc<Host>, text: &str) -> bool {
-    let Ok(config) = host.state.settings.config() else {
-        return false;
-    };
-    let Ok(redactor) = security::Redactor::new(&config.policy.sensitive_patterns, Vec::new())
-    else {
-        return false;
-    };
+/// not empty, within Teams' body once rendered, and nothing that redactor would remove.
+fn postable(redactor: &security::Redactor, text: &str) -> bool {
     !text.trim().is_empty()
         && crate::adapters::teams::html(text).len() <= 27_800
         && redactor.clean(text)
 }
 
-/// Carry out what the run's workflow pre-approved among the look's proposals: a restart after a
-/// cut session, a post of the drafted summary to the chat the workflow names. Each runs once
+/// How many summaries the workflow's pre-approval posted (or tried to) in the last 24 hours.
+fn preapproved_posts(host: &Arc<Host>, workflow: &str, now: i64) -> usize {
+    host.state
+        .workflows
+        .db
+        .list(&[], Some(workflow), -1)
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|r| r.supervision.iter().flat_map(|l| l.actions.iter()))
+        .filter(|a| {
+            a.action == "post_summary"
+                && a.by.as_deref() == Some("preapproval")
+                && matches!(a.state.as_str(), "attempting" | "executed" | "uncertain")
+                && a.at.is_some_and(|at| now - at < DAY)
+        })
+        .count()
+}
+
+/// Mark one proposed action `attempting` by the workflow's pre-approval, in the run already
+/// read under its lock; false when it is no longer proposed.
+fn claim(run: &mut Run, look: &str, action: &str) -> bool {
+    let Some(entry) = run
+        .supervision
+        .iter_mut()
+        .find(|l| l.id == look)
+        .and_then(|l| l.actions.iter_mut().find(|a| a.id == action))
+    else {
+        return false;
+    };
+    if entry.state != "proposed" {
+        return false;
+    }
+    entry.state = "attempting".into();
+    entry.by = Some("preapproval".into());
+    entry.at = Some(now());
+    entry.outcome = None;
+    true
+}
+
+/// What a pre-approved post may do now, decided under the run's lock.
+enum PostClaim {
+    /// Claimed: it is `attempting`; post it.
+    Go,
+    /// It waits for the person, with why.
+    Hold(&'static str),
+    /// Nothing to do (moved on, no longer proposed).
+    Skip,
+}
+
+/// Decide a pre-approved post and claim it, under the run's lock, from the run read now.
+async fn claim_post(
+    host: &Arc<Host>,
+    id: &str,
+    look: &Look,
+    action: &Action,
+    workflow: &str,
+    redactor: Option<&security::Redactor>,
+) -> PostClaim {
+    let state = &host.state;
+    let lock = state.workflows.lock(id);
+    let _guard = lock.lock().await;
+    let Ok(mut run) = found(state, id) else {
+        return PostClaim::Skip;
+    };
+    let pauses = state.workflows.db.pauses().unwrap_or_default();
+    if marker(&run, &pauses) != look.marker {
+        return PostClaim::Skip;
+    }
+    if !redactor.is_some_and(|r| postable(r, &look.summary)) {
+        return PostClaim::Hold(NOT_POSTED);
+    }
+    if preapproved_posts(host, workflow, now()) >= PREAPPROVED_POSTS_PER_DAY {
+        return PostClaim::Hold(NOT_POSTED_CAP);
+    }
+    if !claim(&mut run, &look.id, &action.id) || state.workflows.db.save(&run).is_err() {
+        return PostClaim::Skip;
+    }
+    PostClaim::Go
+}
+
+/// Decide a pre-approved restart and claim it, under the run's lock, from the run read now: a
+/// person who resumed the run meanwhile is never overridden.
+async fn claim_restart(host: &Arc<Host>, id: &str, look: &Look, action: &Action) -> bool {
+    let state = &host.state;
+    let lock = state.workflows.lock(id);
+    let _guard = lock.lock().await;
+    let Ok(mut run) = found(state, id) else {
+        return false;
+    };
+    if restart_refusal(host, &run, look).await.is_some() {
+        return false;
+    }
+    claim(&mut run, &look.id, &action.id) && state.workflows.db.save(&run).is_ok()
+}
+
+/// The workflow a run belongs to, as the map holds it now, when the supervisor is still on and
+/// the workflow is enabled.
+fn current_workflow(host: &Arc<Host>, run: &Run) -> Option<crate::workflows::Workflow> {
+    let map = host.state.settings.map().ok()?;
+    map.workflow_settings.supervisor.active()?;
+    let id = run.workflow.as_ref()?;
+    map.workflows.into_iter().find(|w| &w.id == id && w.enabled)
+}
+
+/// Carry out what the run's workflow pre-approved among the look's proposals, in code's order:
+/// the post first (it reports the stop as the look saw it), then the restart. Each is read
+/// again, decided and claimed under the run's lock from the map as it is then, and carried out
 /// through `carry_out` (`by: "preapproval"`); a condition that fails leaves it for the person.
 async fn preapproved(host: &Arc<Host>, azure: &Azure, id: &str, look: &Look) {
     if look.outcome != "done" || look.event != "run_stopped" {
         return;
     }
-    let Ok(map) = host.state.settings.map() else {
-        return;
-    };
-    let Ok(run) = found(&host.state, id) else {
-        return;
-    };
-    let Some(workflow) = run
-        .workflow
-        .as_ref()
-        .and_then(|w| map.workflows.iter().find(|d| &d.id == w && d.enabled))
-    else {
-        return;
-    };
-    let entry = |action: crate::workflows::Preapproved| {
-        workflow.preapprove.iter().find(|p| p.action == action)
-    };
-    for action in look.actions.iter().filter(|a| a.state == "proposed") {
-        match action.action.as_str() {
-            "restart" if entry(crate::workflows::Preapproved::RestartAfterCut).is_some() => {
-                if restart_refusal(host, &run, look).await.is_none() {
+    for kind in ["post_summary", "restart"] {
+        let Some(action) = look
+            .actions
+            .iter()
+            .find(|a| a.action == kind && a.state == "proposed")
+        else {
+            continue;
+        };
+        let Ok(run) = found(&host.state, id) else {
+            return;
+        };
+        let Some(workflow) = current_workflow(host, &run) else {
+            return;
+        };
+        let entry = |wanted: crate::workflows::Preapproved| {
+            workflow.preapprove.iter().find(|p| p.action == wanted)
+        };
+        match kind {
+            "post_summary" => {
+                let Some((chat, mentions)) = entry(crate::workflows::Preapproved::PostSummary)
+                    .and_then(|p| p.chat.as_ref().map(|c| (c.id.clone(), p.mentions.clone())))
+                else {
+                    continue;
+                };
+                let redactor = answer_redactor(host).await;
+                match claim_post(host, id, look, action, &workflow.id, redactor.as_deref()).await {
+                    PostClaim::Go => {
+                        let _ = carry_out(
+                            host,
+                            azure,
+                            &run,
+                            look,
+                            action,
+                            NoteChoice::Draft,
+                            &chat,
+                            &mentions,
+                            "preapproval",
+                            true,
+                        )
+                        .await;
+                    }
+                    PostClaim::Hold(reason) => {
+                        let _ = transition(
+                            host,
+                            id,
+                            &look.id,
+                            &action.id,
+                            &["proposed"],
+                            "proposed",
+                            Some(reason),
+                            "preapproval",
+                        )
+                        .await;
+                    }
+                    PostClaim::Skip => {}
+                }
+            }
+            _ => {
+                if entry(crate::workflows::Preapproved::RestartAfterCut).is_none() {
+                    continue;
+                }
+                if claim_restart(host, id, look, action).await {
+                    let run = found(&host.state, id).unwrap_or(run);
                     let _ = carry_out(
                         host,
                         azure,
@@ -1774,50 +1955,11 @@ async fn preapproved(host: &Arc<Host>, azure: &Azure, id: &str, look: &Look) {
                         "",
                         &[],
                         "preapproval",
+                        true,
                     )
                     .await;
                 }
             }
-            "post_summary" => {
-                let Some(chat) = entry(crate::workflows::Preapproved::PostSummary)
-                    .and_then(|p| p.chat.as_ref().map(|c| (c.id.clone(), p.mentions.clone())))
-                else {
-                    continue;
-                };
-                let pauses = host.state.workflows.db.pauses().unwrap_or_default();
-                let current = found(&host.state, id).ok();
-                if current.is_none_or(|r| marker(&r, &pauses) != look.marker) {
-                    continue;
-                }
-                if !postable(host, &look.summary) {
-                    // It stays proposed, with why, for the person to read and decide.
-                    let _ = transition(
-                        host,
-                        id,
-                        &look.id,
-                        &action.id,
-                        &["proposed"],
-                        "proposed",
-                        Some(NOT_POSTED),
-                        "preapproval",
-                    )
-                    .await;
-                    continue;
-                }
-                let _ = carry_out(
-                    host,
-                    azure,
-                    &run,
-                    look,
-                    action,
-                    NoteChoice::Draft,
-                    &chat.0,
-                    &chat.1,
-                    "preapproval",
-                )
-                .await;
-            }
-            _ => {}
         }
     }
 }
@@ -2050,12 +2192,21 @@ async fn request_audit(
         )));
     }
     let since = match since {
-        Some(text) => chrono::DateTime::parse_from_rfc3339(text)
-            .map_err(|_| invalid("since is an RFC 3339 time, such as 2026-11-10T00:00:00Z."))?
-            .timestamp(),
-        None => audit::last_until(looks)
+        Some(text) => {
+            let since = chrono::DateTime::parse_from_rfc3339(text)
+                .map_err(|_| invalid("since is an RFC 3339 time, such as 2026-11-10T00:00:00Z."))?
+                .timestamp();
+            // A window that starts in the future covers nothing and would silence later audits.
+            if since > now {
+                return Err(invalid(
+                    "since is in the future; give a time that has passed.",
+                ));
+            }
+            since
+        }
+        None => audit::last(looks)
             .map_err(fail)?
-            .unwrap_or(now - 7 * DAY),
+            .map_or(now - 7 * DAY, |l| l.until),
     };
     let key = format!("{}:requested:{}", audit::AUDIT_ROW, uuid::Uuid::new_v4());
     looks
@@ -2499,6 +2650,7 @@ async fn act(host: &Arc<Host>, args: ActArgs, azure: &Azure) -> Result<Value, St
         args.chat.as_deref().unwrap_or_default(),
         &args.mentions,
         "person",
+        false,
     )
     .await
 }
@@ -2517,21 +2669,25 @@ async fn carry_out(
     chat: &str,
     mentions: &[String],
     by: &str,
+    claimed: bool,
 ) -> Result<Value, String> {
     let state = &host.state;
     // Recorded before it acts, in one step with the check: an interruption never reads as an
     // action that did not happen, and a second confirmation finds it attempting.
-    transition(
-        host,
-        &run.id,
-        &look.id,
-        &action.id,
-        &["proposed"],
-        "attempting",
-        None,
-        by,
-    )
-    .await?;
+    // A pre-approval claimed it already, under the run's lock.
+    if !claimed {
+        transition(
+            host,
+            &run.id,
+            &look.id,
+            &action.id,
+            &["proposed"],
+            "attempting",
+            None,
+            by,
+        )
+        .await?;
+    }
     let key = format!("{}/{}/{}", run.id, look.id, action.id);
     state
         .workflows

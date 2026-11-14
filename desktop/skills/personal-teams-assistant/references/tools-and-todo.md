@@ -789,8 +789,14 @@ by default and an update never turns it on.
   session was cut (stream ended, over the line limit, time limit, host restart, machine offline),
   no session is alive, no pause, the workflow is enabled, the run is as the look saw it, and the
   run is not itself a pre-approved restart (so restarts never chain); a post only to the chat and
-  members saved there, and only when the drafted summary passes the sensitive-data and size checks
-  of an answer, otherwise it stays proposed for the person. Nothing else is ever pre-approved.
+  members saved there (the chat must be in the user's chat list under that name, read when the
+  workflow is saved; the save is refused when the list cannot be read), at most 3 a day per
+  workflow, and only when the drafted summary passes the same checks as an answer, otherwise it
+  stays proposed for the person. The post goes first, then the restart, whatever order the model
+  wrote them in. Nothing else is ever pre-approved. Tell the user plainly: a pre-approved restart
+  gives a fully permitted coding agent a note written by a model that read the item's comments;
+  prompts, a 4000-character bound, the cleaner and one automatic restart lower that risk, they
+  are not a guarantee.
 - **Audits:** when every run created since the last audit has ended (one reached coding), or with
   `pta workflows supervise --audit [--since TIME]` (MCP `workflow_supervise {audit: true}`), the
   supervisor writes an audit: per run its result, the pull requests and unverified claims, the

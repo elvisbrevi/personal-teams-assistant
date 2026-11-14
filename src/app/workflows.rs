@@ -470,6 +470,9 @@ async fn save(host: &Arc<Host>, args: SaveArgs) -> Result<Value, String> {
             core::validate_workflow(&workflow).map_err(invalid)?;
             workflow.allow.sort();
             workflow.preapprove.sort_by_key(|p| p.action);
+            // A pre-approved post's chat is one of the user's, under the name their chat list
+            // gives it, before the confirmation shows it.
+            preapproved_chats(state, &workflow).await?;
             // Lifting a fixed rule of its coding agents is the user's decision, confirmed with
             // what it lets them do.
             if let Some(question) = describe_workflow(&workflow)
@@ -490,11 +493,6 @@ async fn save(host: &Arc<Host>, args: SaveArgs) -> Result<Value, String> {
             fits(&workflow, &candidate.workflow_blocks)?;
             let mut warnings = verify(host, &mut workflow).await?;
             // A pre-approved post goes only to a chat the user belongs to.
-            for entry in &workflow.preapprove {
-                if let Some(chat) = &entry.chat {
-                    warnings.extend(verify_chat(state, &chat.id).await?);
-                }
-            }
             let saved = workflow.clone();
             // Again with the directories as the machine spells them and the blocks as they are now.
             let used = change(host, |map| {
@@ -671,6 +669,48 @@ async fn verify_chat(state: &DesktopState, chat: &str) -> Result<Option<String>,
             "The chat {chat} could not be checked against your chats (no Microsoft session could read them here); it is checked again when the block posts."
         ))),
     }
+}
+
+/// A pre-approved post goes, with nobody reading it first, only to a chat the user belongs to:
+/// the chat must be in the user's chat list, read now, under the name that list gives it
+/// (otherwise the confirmation would show the caller's label). A list that cannot be read
+/// refuses the save: a destination nobody could check is not pre-approved.
+pub(super) async fn preapproved_chats(
+    state: &DesktopState,
+    workflow: &Workflow,
+) -> Result<(), String> {
+    let chats: Vec<&core::Chat> = workflow
+        .preapprove
+        .iter()
+        .filter_map(|p| p.chat.as_ref())
+        .collect();
+    if chats.is_empty() {
+        return Ok(());
+    }
+    let read = tokio::time::timeout(std::time::Duration::from_secs(CHATS_SECONDS), async {
+        let graph = teams_graph(state).await?;
+        graph.chat_directory(None).await
+    })
+    .await;
+    let Ok(Ok(directory)) = read else {
+        return Err("[not_ready] Your chats could not be read here (no Microsoft session could read them): a pre-approved post needs its chat checked against your chats. Save it where they can be read.".into());
+    };
+    for chat in chats {
+        let Some(listed) = directory.iter().find(|c| c["id"] == chat.id.as_str()) else {
+            return Err(invalid(format!(
+                "You are not a member of the chat {}; choose one that pta teams chats lists.",
+                chat.id
+            )));
+        };
+        let name = listed["topic"].as_str().unwrap_or_default();
+        if name != chat.name {
+            return Err(invalid(format!(
+                "The chat {} is named «{name}» in your chats; save the pre-approved post with that name.",
+                chat.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn save_block(host: &Arc<Host>, args: BlockSaveArgs) -> Result<Value, String> {

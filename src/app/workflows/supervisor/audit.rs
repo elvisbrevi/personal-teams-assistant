@@ -126,6 +126,10 @@ pub(in crate::app) struct Audit {
     pub work_items: Vec<AuditDraft>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub dropped: u32,
+    /// The runs of the audit that had not finished (`done` or `cancelled`): the next batch
+    /// takes them again, so their real ending is audited too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried: Vec<String>,
 }
 impl Audit {
     /// The audit in a list: its identity, when, what it covers and how it went.
@@ -171,18 +175,54 @@ fn window(runs: &[Run], since: i64) -> Vec<&Run> {
     after.split_off(skip)
 }
 
-/// The batch that has ended now, if any (a pure function of the runs): every run created since
-/// the last audit has left the stages the engine drives, and one of them reached coding.
-pub(in crate::app) fn batch(runs: &[Run], last_until: Option<i64>, now: i64) -> Option<Batch> {
-    let since = last_until.unwrap_or(now - FIRST_BATCH_SECONDS);
-    let runs = window(runs, since);
-    let coded = runs
+/// Where the last audit that gave an answer left off: the end of its window and the runs it
+/// carries forward. An audit that failed consumes nothing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(in crate::app) struct Last {
+    pub until: i64,
+    pub carried: Vec<String>,
+}
+
+/// The last audit that gave an answer, from the stored audits.
+pub(in crate::app) fn last(looks: &Looks) -> Result<Option<Last>> {
+    Ok(looks
+        .audits(MAX_AUDITS)?
+        .into_iter()
+        .find(|a| a.outcome == "done")
+        .map(|a| Last {
+            until: a.until,
+            carried: a.carried,
+        }))
+}
+
+/// The runs carried from the last audit (still recorded), then the new ones, at most
+/// `MAX_BATCH` in all.
+fn with_carried<'a>(runs: &'a [Run], new: Vec<&'a Run>, last: Option<&Last>) -> Vec<&'a Run> {
+    let carried: Vec<&Run> = last
+        .map(|l| {
+            runs.iter()
+                .filter(|r| l.carried.contains(&r.id) && !new.iter().any(|n| n.id == r.id))
+                .collect()
+        })
+        .unwrap_or_default();
+    let room = MAX_BATCH.saturating_sub(new.len());
+    carried.into_iter().take(room).chain(new).collect()
+}
+
+/// The batch that has ended now, if any (a pure function of the runs): at least one run was
+/// created since the last audit, every run of the batch (those new runs and the ones the last
+/// audit carried) has left the stages the engine drives, and one of them reached coding.
+pub(in crate::app) fn batch(runs: &[Run], last: Option<&Last>, now: i64) -> Option<Batch> {
+    let since = last.map_or(now - FIRST_BATCH_SECONDS, |l| l.until);
+    let new = window(runs, since);
+    let newest = new.last().copied()?;
+    let all = with_carried(runs, new, last);
+    let coded = all
         .iter()
         .any(|r| r.timeline.iter().any(|s| s.stage == Phase::Coding));
-    if runs.is_empty() || !coded || runs.iter().any(|r| active(r.state)) {
+    if !coded || all.iter().any(|r| active(r.state)) {
         return None;
     }
-    let newest = runs.last()?;
     Some(Batch {
         key: format!(
             "{AUDIT_ROW}:batch_ended:{}:{}",
@@ -190,23 +230,21 @@ pub(in crate::app) fn batch(runs: &[Run], last_until: Option<i64>, now: i64) -> 
         ),
         since,
         until: newest.created_at,
-        runs: runs.iter().map(|r| r.id.clone()).collect(),
+        runs: all.iter().map(|r| r.id.clone()).collect(),
     })
 }
 
-/// When the last audit's window ends, from the stored audits.
-pub(in crate::app) fn last_until(looks: &Looks) -> Result<Option<i64>> {
-    Ok(looks.audits(1)?.first().map(|a| a.until))
-}
-
-/// The runs a requested audit covers: those created after `since`, or after the last audit.
-pub(in crate::app) fn requested_runs(runs: &[Run], since: i64) -> Batch {
-    let runs = window(runs, since);
+/// The runs a requested audit covers: those created after `since` (or the last audit's end),
+/// with the runs the last audit carried.
+pub(in crate::app) fn requested_runs(runs: &[Run], since: i64, last: Option<&Last>) -> Batch {
+    let new = window(runs, since);
+    let until = new.last().map_or(since, |r| r.created_at);
+    let all = with_carried(runs, new, last);
     Batch {
         key: String::new(),
         since,
-        until: runs.last().map_or(since, |r| r.created_at),
-        runs: runs.iter().map(|r| r.id.clone()).collect(),
+        until,
+        runs: all.iter().map(|r| r.id.clone()).collect(),
     }
 }
 
@@ -376,6 +414,7 @@ pub(in crate::app) fn input(
                 truncated.push("the oldest comments".into());
             }
         } else {
+            truncated.push("the end of the input".into());
             return (cut(&text, AUDIT_INPUT), truncated);
         }
     }
@@ -497,7 +536,8 @@ pub(in crate::app) async fn audit_at(
         .as_i64()
         .unwrap_or(now - FIRST_BATCH_SECONDS);
     let selected = if wanted.is_empty() {
-        requested_runs(&all, since)
+        let last = last(&state.workflows.supervision.looks)?;
+        requested_runs(&all, since, last.as_ref())
     } else {
         Batch {
             key: row.key.clone(),
@@ -531,6 +571,11 @@ pub(in crate::app) async fn audit_at(
         unread: read.unread.clone(),
         truncated,
         items: runs.iter().map(item_of).collect(),
+        carried: runs
+            .iter()
+            .filter(|r| !r.state.finished())
+            .map(|r| r.id.clone())
+            .collect(),
         merged_branches: read.merged.clone(),
         failed_looks: runs
             .iter()

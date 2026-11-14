@@ -56,15 +56,72 @@ fn a_batch_ends_when_every_run_since_the_last_audit_has_left_the_engines_stages(
     assert_eq!(ended.until, now - 300);
     // The same runs make the same key, so the batch is audited once.
     assert_eq!(batch(&runs, None, now + 30).unwrap().key, ended.key);
-    // After the audit, only runs created later make the next batch.
-    assert_eq!(batch(&runs, Some(ended.until), now), None);
+    // After an audit that answered, which carried the run that had not finished, nothing new
+    // makes no batch; a new run makes the next one, with the carried run in it.
+    let last = Last {
+        until: ended.until,
+        carried: vec![runs[1].id.clone()],
+    };
+    assert_eq!(batch(&runs, Some(&last), now), None);
     runs.push(run(4, now - 100, Phase::Done));
-    let next = batch(&runs, Some(ended.until), now).unwrap();
-    assert_eq!(next.runs, [runs[3].id.clone()]);
+    let next = batch(&runs, Some(&last), now).unwrap();
+    assert_eq!(next.runs, [runs[1].id.clone(), runs[3].id.clone()]);
+    // A carried run that is coding again holds the batch until it stops.
+    runs[1] = {
+        let mut resumed = runs[1].clone();
+        resumed.state = Phase::Coding;
+        resumed
+    };
+    assert_eq!(batch(&runs, Some(&last), now), None);
     // A batch where nothing reached coding is not audited.
     let mut unassigned = Run::new(runs[0].item.clone(), now - 50);
     unassigned.advance(Phase::Unassigned, now - 49, "none");
-    assert_eq!(batch(&[unassigned], Some(now - 60), now), None);
+    let quiet = Last {
+        until: now - 60,
+        carried: Vec::new(),
+    };
+    assert_eq!(batch(&[unassigned], Some(&quiet), now), None);
+}
+
+#[test]
+fn an_audit_that_failed_consumes_no_batch_and_a_cut_input_says_so() {
+    let root = tempfile::tempdir().unwrap();
+    let looks = Looks::open(&root.path().join("workflows.db")).unwrap();
+    let audit = |id: &str, outcome: &str, until: i64, at: i64| Audit {
+        id: id.into(),
+        outcome: outcome.into(),
+        until,
+        created_at: at,
+        carried: vec!["carried-run".into()],
+        ..Default::default()
+    };
+    looks.insert_audit(&audit("a1", "done", 100, 1)).unwrap();
+    looks.insert_audit(&audit("a2", "failed", 200, 2)).unwrap();
+    let last = last(&looks).unwrap().unwrap();
+    assert_eq!(
+        last.until, 100,
+        "the failed audit's window is audited again"
+    );
+    assert_eq!(last.carried, ["carried-run"]);
+    // An input past its bound even without comments is cut, and says so.
+    let runs = vec![run(1, 1_800_000_000, Phase::Done)];
+    let read = AuditRead {
+        merged: (0..2000)
+            .map(|n| MergedBranch {
+                run: runs[0].id.clone(),
+                repository: "payments-api".into(),
+                branch: format!("feature/{n}-{}", "b".repeat(200)),
+                pull_request: n,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let (text, truncated) = input(&runs, &read, crate::config::Language::En, 1_800_000_100);
+    assert!(text.chars().count() <= AUDIT_INPUT);
+    assert!(
+        truncated.iter().any(|t| t == "the end of the input"),
+        "{truncated:?}"
+    );
 }
 
 #[test]

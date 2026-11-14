@@ -697,6 +697,9 @@ async fn saving_the_supervisor_warns_about_machines_that_predate_it() {
 // ---- Pre-approval ----
 
 const CHAT: &str = "19:team@thread.v2";
+/// An exact secret the answer redactor holds in these tests, as the pipeline's holds the
+/// configured ones.
+const EXACT_SECRET: &str = "synthetic-exact-secret-0123456789abcdef";
 const OTHER_CHAT: &str = "19:other@thread.v2";
 
 struct SyntheticToken;
@@ -710,6 +713,7 @@ impl crate::adapters::oauth::AccessToken for SyntheticToken {
 /// A mocked Graph for the running assistant: two group chats the user belongs to, their
 /// members, and every post answered as created.
 async fn graph(bench: &Bench) -> wiremock::MockServer {
+    *super::super::TEST_SECRETS.lock().unwrap() = Some(vec![EXACT_SECRET.into()]);
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
@@ -833,6 +837,13 @@ async fn a_preapproved_restart_after_a_cut_session_runs_once_and_never_chains() 
     assert!(next.preapproved_restart && next.handover_drafted);
     // The restarted run is cut again: its own look proposes a restart, which waits for the person.
     let next = bench.state(&next.id, Phase::NeedsAttention).await;
+    // Its coding agent read the note as applied by the pre-approval, read by no person.
+    let coding = fs::read_to_string(bench.log.join("coding.2")).unwrap();
+    assert!(
+        coding.contains("applied by the workflow's pre-approval"),
+        "{coding}"
+    );
+    assert!(!coding.contains("confirmed by the user"), "{coding}");
     bench.cut(&next.id, Cause::StreamEnded);
     let again = bench.wait_look(&next.id, 1).await;
     assert_eq!(again.supervision[0].actions[0].state, "proposed");
@@ -937,8 +948,9 @@ async fn a_preapproved_post_whose_text_fails_the_answer_checks_waits_for_the_per
         "x",
         json!([{"action":"post_summary","run":"","sessions":"","work_item":-1,"reason":"Tell them."}]),
     );
-    answer["summary"] =
-        json!("Write to ana.perez@example.com, token ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+    // A configured secret, word for word: only the answer's redactor (with the exact secrets)
+    // knows it.
+    answer["summary"] = json!(format!("The run used {EXACT_SECRET} to reach the API."));
     bench.answer(answer);
     let id = failed_run(&bench).await;
     let run = bench.wait_look(&id, 1).await;
@@ -1042,4 +1054,187 @@ async fn the_audit_of_a_finished_batch_lists_its_items_findings_and_merged_branc
     .unwrap();
     assert_eq!(list["audits"].as_array().unwrap().len(), 1);
     assert!(bench.catalog.only_reads());
+}
+
+#[tokio::test]
+async fn both_preapproved_actions_run_in_codes_order_whatever_the_models() {
+    let post = json!({"action":"post_summary","run":"","sessions":"","work_item":-1,"reason":"Tell them."});
+    let restart = json!({"action":"restart","run":"","sessions":"","work_item":-1,"reason":"Cut."});
+    for actions in [json!([restart, post]), json!([post, restart])] {
+        let bench = Bench::new().await;
+        let server = graph(&bench).await;
+        bench.supervisor(true);
+        bench.preapprove(vec![post_to_team(), restart_after_cut()]);
+        bench.answer(assessment("Commit is on feature/child-1.", actions.clone()));
+        let id = failed_run(&bench).await;
+        bench.cut(&id, Cause::StreamEnded);
+        let run = bench.wait_look(&id, 1).await;
+        let state = |name: &str| {
+            run.supervision[0]
+                .actions
+                .iter()
+                .find(|a| a.action == name)
+                .map(|a| a.state.clone())
+        };
+        assert_eq!(
+            state("post_summary").as_deref(),
+            Some("executed"),
+            "{actions}"
+        );
+        assert_eq!(state("restart").as_deref(), Some("executed"), "{actions}");
+        assert_eq!(posts(&server).await.len(), 1, "{actions}");
+        assert_eq!(run.state, Phase::Cancelled);
+    }
+}
+
+#[tokio::test]
+async fn a_preapproval_is_decided_on_the_run_as_it_is_now_and_only_while_the_supervisor_is_on() {
+    let bench = Bench::new().await;
+    bench.supervisor(true);
+    bench.answer(assessment("x", restart_proposed()));
+    let id = failed_run(&bench).await;
+    bench.cut(&id, Cause::StreamEnded);
+    // Not pre-approved when the look was stored: the restart waits for the person.
+    let run = bench.wait_look(&id, 1).await;
+    let look = run.supervision[0].clone();
+    assert_eq!(look.actions[0].state, "proposed");
+    // Pre-approved now, but the supervisor is off: nothing happens.
+    bench.preapprove(vec![restart_after_cut()]);
+    bench.supervisor(false);
+    super::super::preapproved(&bench.host, &bench.azure, &id, &look).await;
+    assert_eq!(bench.run(&id).state, Phase::NeedsAttention);
+    assert_eq!(bench.run(&id).supervision[0].actions[0].state, "proposed");
+    // On again, but the person resumed the run meanwhile: the restart is judged on the run as it
+    // is now, and the session the person resumed is never ended.
+    bench.supervisor(true);
+    bench.preapprove(vec![restart_after_cut()]);
+    bench.mode("mode", "block");
+    bench
+        .op("workflow_run_resume", json!({"run": id, "confirmed": true}))
+        .await
+        .unwrap();
+    super::super::preapproved(&bench.host, &bench.azure, &id, &look).await;
+    let after = bench.run(&id);
+    assert_ne!(after.state, Phase::Cancelled);
+    assert!(after.restarted_as.is_none());
+    assert_eq!(after.supervision[0].actions[0].state, "proposed");
+    bench.release();
+}
+
+#[tokio::test]
+async fn preapproved_posts_have_a_daily_cap_per_workflow() {
+    let bench = Bench::new().await;
+    let server = graph(&bench).await;
+    bench.supervisor(true);
+    bench.preapprove(vec![post_to_team()]);
+    bench.answer(assessment(
+        "x",
+        json!([{"action":"post_summary","run":"","sessions":"","work_item":-1,"reason":"Tell them."}]),
+    ));
+    let id = failed_run(&bench).await;
+    // This workflow already posted its pre-approved summaries today.
+    let mut run = bench.run(&id);
+    run.supervision.push(Look {
+        id: "earlier".into(),
+        outcome: "done".into(),
+        actions: (0..PREAPPROVED_POSTS_PER_DAY)
+            .map(|n| Action {
+                id: format!("a{n}"),
+                action: "post_summary".into(),
+                state: "executed".into(),
+                by: Some("preapproval".into()),
+                at: Some(bench.now()),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    });
+    bench.save(&run);
+    let run = bench.wait_look(&id, 2).await;
+    let action = &run.supervision.last().unwrap().actions[0];
+    assert_eq!(action.state, "proposed");
+    assert_eq!(action.outcome.as_deref(), Some(NOT_POSTED_CAP));
+    assert!(posts(&server).await.is_empty());
+    // The save text names the cap.
+    let described = crate::workflows::describe_preapprove(&[post_to_team()]);
+    assert!(
+        described.contains(&format!("at most {PREAPPROVED_POSTS_PER_DAY} times a day")),
+        "{described}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_the_host_restart_interrupted_records_why_its_coding_run_stopped() {
+    let mut bench = Bench::new().await;
+    bench.mode("mode", "block");
+    let id = bench.start(TASK).await;
+    bench
+        .until(&id, |r| {
+            r.children
+                .first()
+                .and_then(|c| c.coding.as_ref())
+                .is_some_and(|c| c.started)
+        })
+        .await;
+    bench.restart().await;
+    let run = bench.state(&id, Phase::Interrupted).await;
+    let failure = run.children[0].coding.as_ref().unwrap().failure.unwrap();
+    assert_eq!(failure.cause, Cause::HostRestarted);
+    bench.release();
+}
+
+#[tokio::test]
+async fn a_preapproved_posts_chat_is_checked_against_the_users_own_chats() {
+    let bench = Bench::new().await;
+    let workflow = |id: &str, name: &str| crate::workflows::Workflow {
+        preapprove: vec![crate::workflows::Preapproval {
+            action: crate::workflows::Preapproved::PostSummary,
+            chat: Some(crate::workflows::Chat {
+                id: id.into(),
+                name: name.into(),
+            }),
+            mentions: Vec::new(),
+        }],
+        ..Default::default()
+    };
+    // No chat list can be read here yet: refused.
+    let unread =
+        crate::app::workflows::preapproved_chats(&bench.host.state, &workflow(CHAT, "Equipo"))
+            .await
+            .unwrap_err();
+    assert!(unread.contains("could not be read"), "{unread}");
+    let _server = graph(&bench).await;
+    crate::app::workflows::preapproved_chats(&bench.host.state, &workflow(CHAT, "Equipo"))
+        .await
+        .unwrap();
+    // The caller's label is not the chat's name: refused with the name the list gives.
+    let renamed = crate::app::workflows::preapproved_chats(
+        &bench.host.state,
+        &workflow(CHAT, "Pagos urgentes"),
+    )
+    .await
+    .unwrap_err();
+    assert!(renamed.contains("«Equipo»"), "{renamed}");
+    let stranger = crate::app::workflows::preapproved_chats(
+        &bench.host.state,
+        &workflow("19:nope@thread.v2", "Nope"),
+    )
+    .await
+    .unwrap_err();
+    assert!(stranger.contains("not a member"), "{stranger}");
+}
+
+#[tokio::test]
+async fn an_audit_from_the_future_is_refused() {
+    let bench = Bench::new().await;
+    bench.supervisor(true);
+    let refused = super::super::operation(
+        &bench.host,
+        "workflow_supervise",
+        &json!({"audit": true, "since": "2999-01-01T00:00:00Z"}),
+        &bench.azure,
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.contains("in the future"), "{refused}");
 }

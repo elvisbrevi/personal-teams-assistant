@@ -419,27 +419,39 @@ async fn a_workflow_that_preapproves_the_supervisor_is_saved_only_once_confirmed
         }),
         mentions: vec!["Ana Pérez".into()],
     }];
-    // Unconfirmed: refused with what the supervisor may do, its chat and mentions.
+    // A post's chat must be checked against the user's chats: here they cannot be read, so the
+    // save is refused before anything else.
     let refused = call(&host, Local, "workflow_save", json!({"workflow":w})).await;
-    assert_eq!(refused.code, "invalid_input");
-    let text = refused.message.unwrap();
-    assert!(
-        text.contains("confirmed: true") && text.contains("Equipo") && text.contains("Ana Pérez"),
-        "{text}"
-    );
-    // MCP's question says the same.
+    assert_eq!(refused.code, "not_ready", "{:?}", refused.message);
+    assert!(refused.message.unwrap().contains("could not be read"));
+    // MCP's question names the chat and mentions.
     let question =
         crate::app::tools::confirmation("workflow_save", &json!({"workflow":w})).unwrap();
     assert!(
         question.contains("without asking") && question.contains("Equipo"),
         "{question}"
     );
+    // A restart alone: unconfirmed, refused with what the supervisor may do and how far the
+    // barrier goes.
+    let mut restart = workflow("payments", &own);
+    restart.preapprove = vec![crate::workflows::Preapproval {
+        action: crate::workflows::Preapproved::RestartAfterCut,
+        chat: None,
+        mentions: Vec::new(),
+    }];
+    let refused = call(&host, Local, "workflow_save", json!({"workflow":restart})).await;
+    assert_eq!(refused.code, "invalid_input");
+    let text = refused.message.unwrap();
+    assert!(
+        text.contains("confirmed: true") && text.contains("not a guarantee"),
+        "{text}"
+    );
     // Confirmed: it goes on to the checks (here, the Azure source this host lacks).
     let refused = call(
         &host,
         Local,
         "workflow_save",
-        json!({"workflow":w,"confirmed":true}),
+        json!({"workflow":restart,"confirmed":true}),
     )
     .await;
     assert_eq!(refused.code, "not_ready", "{:?}", refused.message);

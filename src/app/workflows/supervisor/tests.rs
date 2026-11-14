@@ -607,5 +607,37 @@ fn a_notification_block_never_posts_a_summary_the_supervisor_drafted() {
     assert_eq!(super::super::acting::latest_summary(&run), "");
 }
 
+#[test]
+fn settled_look_rows_are_pruned_after_thirty_days_and_pending_ones_kept() {
+    let root = tempfile::tempdir().unwrap();
+    let looks = Looks::open(&root.path().join("workflows.db")).unwrap();
+    let now = 1_800_000_000;
+    let row = |key: &str, state: &str, at: i64| Row {
+        key: key.into(),
+        run: "r".into(),
+        event: "run_stopped".into(),
+        state: state.into(),
+        requested: false,
+        created_at: at,
+        updated_at: at,
+        payload: json!({}),
+    };
+    looks
+        .insert(&row("old-done", "done", now - KEEP_LOOK_ROWS - 1))
+        .unwrap();
+    looks
+        .insert(&row("old-pending", "pending", now - KEEP_LOOK_ROWS - 1))
+        .unwrap();
+    looks.insert(&row("new-done", "done", now - 10)).unwrap();
+    assert_eq!(looks.prune(now).unwrap(), 1);
+    let left: Vec<String> = looks
+        .of_run("r")
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(left.contains(&"old-pending".to_owned()) && left.contains(&"new-done".to_owned()));
+}
+
 #[cfg(unix)]
 mod end_to_end;
