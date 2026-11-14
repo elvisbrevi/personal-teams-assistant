@@ -1264,6 +1264,119 @@ async fn history_session(bench: &Bench, id: &str) -> Value {
     json!({"session_alive":run["session_alive"],"handed_to_user":run["handed_to_user"]})
 }
 
+/// A Claude CLI that logs each Remote Control request to `names` and answers as the director
+/// (in its private directory), as a planning session (with a schema) or as a coding session.
+const NAMED_CLAUDE: &str = r#"#!/bin/sh
+schema=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-id) shift; session="$1" ;;
+    --json-schema) schema=1 ;;
+  esac
+  shift
+done
+read -r initialize
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-initialize","response":{}}}'
+read -r remote
+printf '%s\n' "$remote" >> '{log}/names'
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-remote","response":{"session_url":"https://claude.ai/code/session_Remote123"}}}'
+read -r prompt
+printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$session"
+case "$PWD" in
+  */directors/*) cat '{log}/claude-director.jsonl' ;;
+  *) if [ -n "$schema" ]; then cat '{log}/claude-plan.jsonl'; else cat '{log}/claude-code.jsonl'; fi ;;
+esac
+printf '%s\n' '{"type":"system","subtype":"session_state_changed","state":"idle"}'
+"#;
+
+#[tokio::test]
+async fn the_sessions_a_workflow_starts_carry_the_work_item_in_their_name() {
+    let bench = Bench::new().await;
+    // A schema session answers with `structured_output`, a coding session with its text.
+    for (file, answer) in [
+        (
+            "claude-director.jsonl",
+            json!({"workflow":"payments","reason":"Pagos."}),
+        ),
+        (
+            "claude-plan.jsonl",
+            json!({"children":[{"title":"API","description":"Change the endpoint.","type":"Task","fields":[]}]}),
+        ),
+        (
+            "claude-code.jsonl",
+            json!("Implemented.\nBranch: feature/named"),
+        ),
+    ] {
+        let line = match answer {
+            Value::String(text) => json!({"type":"result","is_error":false,"result":text}),
+            other => {
+                json!({"type":"result","is_error":false,"result":"","structured_output":other})
+            }
+        };
+        fs::write(bench.log.join(file), format!("{line}\n")).unwrap();
+    }
+    let cli = bench.log.join("claude");
+    crate::llm::agent::install_fake_cli(
+        &cli,
+        &NAMED_CLAUDE.replace("{log}", &bench.log.display().to_string()),
+    );
+    crate::llm::implementation::use_test_cli(Some(cli));
+    bench.director();
+    let claude = Agent {
+        provider: "claude".into(),
+        model: "synthetic-model".into(),
+        effort: "low".into(),
+    };
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflows[0].agent = claude.clone();
+    let director = map.workflow_settings.director.as_mut().unwrap();
+    (director.provider, director.model, director.effort) =
+        (claude.provider, claude.model, claude.effort);
+    // A title with line breaks, quotes and more than the name holds.
+    let title = format!("Fix \"rounding\"\r\nin totals {}", "x".repeat(300));
+    bench.catalog.add(
+        synthetic::detail(201, "Task", "task", &title, "In payments-web."),
+        true,
+    );
+    bench.host.state.settings.save_map(&map).unwrap();
+
+    // The director's session, then the planning run of the item it classified.
+    let planned = bench.start_director(HU).await;
+    bench.state(&planned, Phase::PlanReview).await;
+    // A coding run.
+    let coded = bench.start(201).await;
+    bench.state(&coded, Phase::PullRequests).await;
+    let names: Vec<String> = fs::read_to_string(bench.log.join("names"))
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let request: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(request["request"]["subtype"], "remote_control");
+            request["request"]["name"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(names.len(), 3, "{names:?}");
+    assert_eq!(names[0], format!("Teams Assistant - director {HU}"));
+    assert_eq!(names[1], format!("Teams Assistant - {HU} Pay by card"));
+    let expected: String = format!(
+        "Teams Assistant - 201 Fix \"rounding\" in totals {}",
+        "x".repeat(300)
+    )
+    .chars()
+    .take(crate::llm::implementation::name::NAME_CHARS - 1)
+    .collect();
+    assert_eq!(names[2], format!("{expected}…"));
+    // The name is not an argument, and nothing records it.
+    for line in fs::read_to_string(bench.log.join("names")).unwrap().lines() {
+        assert!(!line.contains('\r') && !line.contains("\\r"));
+    }
+    let status = bench
+        .op("workflow_run_status", json!({"run":coded}))
+        .await
+        .unwrap();
+    assert!(!status.to_string().contains("Teams Assistant"));
+}
+
 #[tokio::test]
 async fn a_done_coding_session_is_handed_to_the_user_until_its_workflow_run_is_cancelled() {
     let bench = Bench::new().await;

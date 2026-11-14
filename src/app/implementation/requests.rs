@@ -271,6 +271,7 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
             directory,
             &instructions,
             &input,
+            &crate::llm::implementation::SessionName::request(&request.kind),
             &observer,
             super::remote_observer(host, &request.id),
         )

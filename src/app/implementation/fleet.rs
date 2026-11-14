@@ -339,6 +339,7 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         workflow_direct: false,
         upgrade: false,
         agent_sessions: false,
+        session_names: false,
         workflow_supervise: false,
     });
     state.save(&data)?;
@@ -436,6 +437,7 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
             machine.workflow_direct = args["workflow_direct_support"] == true;
             machine.upgrade = args["upgrade_support"] == true;
             machine.agent_sessions = args["agent_sessions_support"] == true;
+            machine.session_names = args["session_names_support"] == true;
             machine.workflow_supervise = args["workflow_supervise_support"] == true;
         }
         state.save(&data)?;
@@ -957,7 +959,7 @@ async fn poll(host: Arc<Host>) {
             let polled = remote(
                 &connection,
                 json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next,"assistant_phase":assistant_phase,"management_support":true,"roots":roots,
-                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host),"checkout_inspect_support":true,"workflow_direct_support":true,"workflow_supervise_support":true,"agent_sessions_support":true,"upgrade_support":crate::app::maintenance::remote_capable(&host)}),
+                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host),"checkout_inspect_support":true,"workflow_direct_support":true,"workflow_supervise_support":true,"agent_sessions_support":true,"session_names_support":true,"upgrade_support":crate::app::maintenance::remote_capable(&host)}),
             )
             .await;
             standing::note(&host.state, &polled);
@@ -1171,6 +1173,7 @@ mod tests {
             workflow_direct: false,
             upgrade: false,
             agent_sessions: false,
+            session_names: false,
             workflow_supervise: false,
         });
         data.teams_machine = worker.clone();

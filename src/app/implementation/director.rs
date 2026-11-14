@@ -66,6 +66,11 @@ struct Call {
     effort: String,
     instructions: String,
     input: String,
+    /// The item's ID, for the session's name; sent only to a worker that advertises
+    /// `session_names_support` (an older one refuses unknown fields) and absent from an older
+    /// coordinator's call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    item: Option<u64>,
     /// The session's bound when it is not `SESSION_SECONDS` (a supervisor's look); left out
     /// otherwise, and sent only to a worker that advertises `workflow_supervise_support`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,6 +138,7 @@ async fn session(
             directory.path().to_path_buf(),
             &call.instructions,
             &call.input,
+            &call.task.session_name(call.item),
             observer,
             remote,
         ),
@@ -220,6 +226,14 @@ pub(in crate::app) async fn ask(host: &Arc<Host>, ask: Ask<'_>) -> Result<Answer
         crate::llm::implementation::DirectTask::Summarize => "summary",
         crate::llm::implementation::DirectTask::Supervise => "supervision",
     };
+    let named = local
+        || state
+            .registry
+            .lock()
+            .await
+            .machines
+            .iter()
+            .any(|m| m.id == ask.machine && m.session_names);
     let record = json!({"id":id,"machine":ask.machine,"purpose":purpose,"project":item.project,"kind":item.kind,"provider":director.provider,"model":director.model,"effort":director.effort,"state":"generating","created_at":now_text(),"started_at":null,"finished_at":null,"session_id":null,"item":item,"output":"","permission_mode":crate::llm::implementation::permission_mode(&director.provider, true)});
     state.db.request_insert(&record)?;
     let call = Call {
@@ -230,6 +244,7 @@ pub(in crate::app) async fn ask(host: &Arc<Host>, ask: Ask<'_>) -> Result<Answer
         effort: director.effort.clone(),
         instructions: ask.instructions.to_owned(),
         input: ask.input,
+        item: named.then_some(item.id),
         seconds: ask.seconds,
     };
     let result: Result<(Direction, Option<String>, Option<String>)> = if local {
