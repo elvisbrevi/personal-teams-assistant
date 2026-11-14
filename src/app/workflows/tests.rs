@@ -329,7 +329,7 @@ async fn a_save_is_refused_before_anything_is_read_when_the_map_alone_refuses_it
     w.instructions = "x".repeat(crate::workflows::MAX_INSTRUCTIONS + 1);
     let refused = call(&host, Local, "workflow_save", save(&w)).await;
     assert_eq!(refused.code, "invalid_input");
-    assert!(refused.message.unwrap().contains("8000"));
+    assert!(refused.message.unwrap().contains("20000"));
     let mut w = workflow("payments", &own);
     w.blocks = vec!["missing".into()];
     let refused = call(&host, Local, "workflow_save", save(&w)).await;
@@ -1687,4 +1687,159 @@ fn a_classification_answers_within_the_control_deadline_with_margin() {
     };
     // A settings update: every project read at once, then the director's machine (40 s).
     const { assert!(director::READY_READ_SECONDS + 40 + MARGIN <= CONTROL_DEADLINE_SECONDS) };
+}
+
+/// Instruction blocks `rule-0`… of `each` characters, stored as a save would store them.
+fn store_blocks(host: &Arc<Host>, count: usize, each: usize) -> Vec<String> {
+    let mut map = host.state.settings.map().unwrap();
+    map.workflow_blocks = (0..count)
+        .map(|n| Block {
+            id: format!("rule-{n}"),
+            name: format!("Rule {n}"),
+            text: "r".repeat(each),
+            ..Default::default()
+        })
+        .collect();
+    host.state.settings.save_map(&map).unwrap();
+    map.workflow_blocks.iter().map(|b| b.id.clone()).collect()
+}
+
+#[tokio::test]
+async fn a_workflow_at_its_limits_saves_and_one_whose_context_cannot_fit_is_refused_with_the_numbers()
+ {
+    use crate::workflows::{MAX_CONTEXT, MAX_INSTRUCTIONS, MAX_WORKFLOW_BLOCKS};
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let save = |w: &Workflow| json!({"workflow":w});
+    let ids = store_blocks(&host, MAX_WORKFLOW_BLOCKS + 1, 2000);
+    let mut w = workflow("payments", &own);
+    w.instructions = "x".repeat(MAX_INSTRUCTIONS);
+    w.blocks = ids[..MAX_WORKFLOW_BLOCKS].to_vec();
+    // 20,000 characters and 20 blocks pass every check of the map and the context: what is
+    // left is reading the Azure source this host lacks.
+    let reached = call(&host, Local, "workflow_save", save(&w)).await;
+    assert_eq!(reached.code, "not_ready", "{:?}", reached.message);
+    // One block more, or one character more, is refused with the limit and the count.
+    let mut more = w.clone();
+    more.blocks = ids.clone();
+    let refused = call(&host, Local, "workflow_save", save(&more)).await;
+    assert_eq!(refused.code, "invalid_input");
+    let text = refused.message.unwrap();
+    assert!(text.contains("at most 20 blocks (it lists 21)"), "{text}");
+    let mut more = w.clone();
+    more.instructions.push('x');
+    let refused = call(&host, Local, "workflow_save", save(&more)).await;
+    assert_eq!(refused.code, "invalid_input");
+    let text = refused.message.unwrap();
+    assert!(text.contains("20000") && text.contains("20001"), "{text}");
+
+    // Blocks long enough that a run's context could not hold everything: refused before
+    // anything is read, with what it takes, the limit and what to take out.
+    store_blocks(&host, MAX_WORKFLOW_BLOCKS, crate::workflows::MAX_BLOCK_TEXT);
+    let refused = call(&host, Local, "workflow_save", save(&w)).await;
+    assert_eq!(refused.code, "invalid_input");
+    let text = refused.message.unwrap();
+    let blocks = host.state.settings.map().unwrap().workflow_blocks;
+    let largest = engine::largest_context(&w, &blocks);
+    assert!(largest > MAX_CONTEXT);
+    assert!(
+        text.contains(&format!("{largest} characters of context"))
+            && text.contains(&format!("more than the {MAX_CONTEXT}"))
+            && text.contains(&format!("by at least {}", largest - MAX_CONTEXT)),
+        "{text}"
+    );
+    assert!(host.state.settings.map().unwrap().workflows.is_empty());
+}
+
+#[tokio::test]
+async fn a_longer_block_is_refused_when_a_workflow_that_lists_it_would_not_fit() {
+    use crate::workflows::{MAX_BLOCK_TEXT, MAX_CONTEXT, MAX_INSTRUCTIONS, MAX_WORKFLOW_BLOCKS};
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let ids = store_blocks(&host, MAX_WORKFLOW_BLOCKS, 3000);
+    let mut w = workflow("payments", &own);
+    w.instructions = "x".repeat(MAX_INSTRUCTIONS);
+    w.blocks = ids;
+    store(&host, vec![w.clone()]);
+    let before = host.state.settings.map().unwrap();
+    let longer = json!({"id":"rule-0","name":"Rule 0","kind":"instruction","text":"r".repeat(MAX_BLOCK_TEXT)});
+    // One longer block still fits; every block at its longest does not.
+    let saved = call(&host, Local, "workflow_block_save", json!({"block":longer})).await;
+    assert!(saved.ok, "{:?}", saved.message);
+    let mut refused = None;
+    for n in 1..MAX_WORKFLOW_BLOCKS {
+        let block = json!({"id":format!("rule-{n}"),"name":format!("Rule {n}"),"kind":"instruction","text":"r".repeat(MAX_BLOCK_TEXT)});
+        let reply = call(&host, Local, "workflow_block_save", json!({"block":block})).await;
+        if !reply.ok {
+            refused = Some((n, reply));
+            break;
+        }
+    }
+    let (n, reply) = refused.expect("a block that does not fit");
+    assert_eq!(reply.code, "invalid_input");
+    let text = reply.message.unwrap();
+    assert!(
+        text.contains("workflow payments") && text.contains(&MAX_CONTEXT.to_string()),
+        "{text}"
+    );
+    // The refused block keeps its text, and the stored workflow fits.
+    let map = host.state.settings.map().unwrap();
+    assert_eq!(map.workflow_blocks[n].text, before.workflow_blocks[n].text);
+    assert!(engine::largest_context(&w, &map.workflow_blocks) <= MAX_CONTEXT);
+}
+
+#[tokio::test]
+async fn list_and_show_say_how_much_of_each_limit_a_workflow_uses() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let ids = store_blocks(&host, 3, 100);
+    let mut w = workflow("payments", &own);
+    w.instructions = "Write tests first.".into();
+    w.blocks = ids;
+    store(&host, vec![w.clone()]);
+    let blocks = host.state.settings.map().unwrap().workflow_blocks;
+    let largest = engine::largest_context(&w, &blocks);
+    let part = engine::instructions_part(&w, &blocks);
+    // The instructions' section, and each block's (`Instruction block «Rule N»:` and its text).
+    assert_eq!(part, 15 + 18 + 3 * (23 + 6 + 100));
+    let expected = json!({
+        "instructions": {"used": 18, "limit": 20000},
+        "blocks": {"used": 3, "limit": 20},
+        "context": {"used": largest, "limit": 100000, "fixed": largest - part},
+    });
+    let shown = call(&host, Local, "workflow_show", json!({"id":"payments"})).await;
+    assert_eq!(shown.data["usage"], expected);
+    let list = call(&host, Local, "workflows_list", json!({})).await;
+    assert_eq!(list.data["usage"]["payments"], expected);
+    // The definition itself carries no usage, so it can be saved back as shown.
+    assert!(shown.data["workflow"].get("usage").is_none());
+}
+
+#[tokio::test]
+async fn a_workflow_larger_than_older_hosts_accept_warns_and_names_the_older_machines() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let mut w = workflow("payments", &own);
+    w.instructions = "x".repeat(crate::workflows::OLDER_MAX_INSTRUCTIONS);
+    w.blocks = (0..crate::workflows::OLDER_MAX_WORKFLOW_BLOCKS)
+        .map(|n| format!("rule-{n}"))
+        .collect();
+    assert!(older_hosts(&host, &w).await.is_none());
+    let worker = uuid::Uuid::new_v4().to_string();
+    implementation::register(&host, &json!({"id":worker,"name":"Worker","os":"linux"}))
+        .await
+        .unwrap();
+    w.blocks.push("rule-10".into());
+    let warning = older_hosts(&host, &w).await.unwrap();
+    assert!(
+        warning.contains("11 blocks")
+            && warning.contains("release 0.12.22 or older")
+            && warning.contains("Worker (unknown version)")
+            && warning.contains("pta update --machine NAME"),
+        "{warning}"
+    );
 }

@@ -284,6 +284,20 @@
       mentions: ['Victoria Gómez'], template: 'The release of {item} is ready: {pull_requests}', updated_at: secs(NOW - 7_200_000) },
     { id: 'release-desa', name: 'Release in desa', kind: 'launcher', stage: 'pull_requests_completed', launcher: { id: 'release-tool', digest: 'd'.repeat(64) }, updated_at: secs(NOW - 7_200_000) },
   ] : [];
+  // How much of each limit a workflow uses (`workflows::usage`): a fixed part for the sentences,
+  // checkouts, item and handover note, plus its instructions and instruction blocks as the host
+  // writes them.
+  const workflowUsage = workflow => {
+    const length = text => [...(text ?? '')].length;
+    let part = workflow.instructions.trim() ? 15 + length(workflow.instructions) : 0;
+    for (const id of workflow.blocks) {
+      const block = workflowBlocks.find(b => b.id === id);
+      if (block?.kind === 'instruction') part += 23 + length(block.name) + length(block.text);
+    }
+    const fixed = 7200;
+    return { instructions: { used: length(workflow.instructions), limit: 20000 }, blocks: { used: workflow.blocks.length, limit: 20 },
+      context: { used: fixed + part, limit: 100000, fixed } };
+  };
   const teamsChats = [
     { id: '19:abc@thread.v2', type: 'group', topic: 'Payments team', members: ['Victoria Gómez', 'Luis Soto', 'Ana Pérez'], last_updated: '2026-10-14T15:00:00Z', readable: true },
     { id: '19:def@thread.v2', type: 'oneOnOne', topic: 'Ana Pérez', members: ['Ana Pérez'], last_updated: '2026-10-14T14:00:00Z', readable: true },
@@ -541,8 +555,8 @@
       run.ahead_since = args.ahead ? secs(Date.now()) : null;
       return { run: run.id, ahead: Boolean(args.ahead), ahead_since: run.ahead_since };
     },
-    workflows_list: () => ({ workflows: structuredClone(workflows), editable: !window.__ptaWorkflowsElsewhere }),
-    workflow_show: args => ({ workflow: structuredClone(workflows.find(w => w.id === args.id)), blocks: [], editable: true }),
+    workflows_list: () => ({ workflows: structuredClone(workflows), usage: Object.fromEntries(workflows.map(w => [w.id, workflowUsage(w)])), editable: !window.__ptaWorkflowsElsewhere }),
+    workflow_show: args => ({ workflow: structuredClone(workflows.find(w => w.id === args.id)), blocks: [], usage: workflowUsage(workflows.find(w => w.id === args.id)), editable: true }),
     workflow_blocks_list: () => ({ blocks: structuredClone(workflowBlocks), used_by: usedBy(), editable: !window.__ptaWorkflowsElsewhere }),
     workflow_repositories: args => {
       if (!workflowRepositories[args.project]) throw new Error(`invalid project: ${args.project} is not in the configured organizations of the enabled Azure source.`);

@@ -648,7 +648,9 @@ async fn a_requested_look_never_spends_the_automatic_budget_nor_comes_too_soon()
     // A second request right after is refused with when it can be asked again (with nothing
     // queued for the run).
     for row in looks.in_state("pending").unwrap() {
-        looks.set(&row.key, "skipped", &json!({}), bench.now()).unwrap();
+        looks
+            .set(&row.key, "skipped", &json!({}), bench.now())
+            .unwrap();
     }
     let soon = super::super::operation(
         &bench.host,

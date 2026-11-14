@@ -2176,6 +2176,19 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.evaluate(() => { for (const d of document.querySelectorAll('#workflow-rows details')) d.open = true; });
   await page.waitForTimeout(400);
   check(`workflows ${label}: the list with its editors passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  // How much of each limit the workflow uses: its blocks, and the context the instructions follow.
+  const usageOf = page.locator('[data-workflow="payments-features"] .workflow-editor');
+  const contextText = async () => usageOf.locator('.workflow-usage').textContent();
+  const contextBefore = await contextText();
+  check(`workflows ${label}: the editor shows the blocks and context used against their limits`,
+    await usageOf.locator('fieldset .counter', { hasText: '2 de 20 bloques' }).count() === 1 && /de 100000 caracteres/.test(contextBefore), contextBefore);
+  const area = usageOf.locator('textarea').nth(1);
+  const instructionsBefore = await area.inputValue();
+  await area.fill(`${instructionsBefore} Keep every commit small.`);
+  const contextAfter = await contextText();
+  const number = text => Number(/hasta (\d+) de/.exec(text)?.[1]);
+  check(`workflows ${label}: the context used follows the instructions as they are typed`, number(contextAfter) - number(contextBefore) === ' Keep every commit small.'.length, `${contextBefore} → ${contextAfter}`);
+  await area.fill(instructionsBefore);
   check(`workflows ${label}: no free-text directory field`, await page.locator('#workflows input:not([type=checkbox]):not([type=search])').evaluateAll(inputs => inputs.every(i => !/dir|path|checkout/i.test(i.name + i.id + i.placeholder))));
 
   // A new workflow: project, repositories, checkout on the machine, agent; saved and verified.

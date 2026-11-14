@@ -35,7 +35,8 @@ const STEPS: usize = 16;
 const BRANCH: &str = "Branch:";
 /// The heading the user's handover note goes under in a restarted run's coding context.
 pub(in crate::app) const HANDOVER: &str = "Handover from the previous run";
-const CONTEXT: usize = 32_000;
+/// The characters a run's context takes (`crate::workflows::MAX_CONTEXT`).
+const CONTEXT: usize = crate::workflows::MAX_CONTEXT;
 
 /// The engine's state on the profile: the runs' store and what advances now.
 pub(in crate::app) struct State {
@@ -877,16 +878,154 @@ pub(in crate::app) fn drafted_handover(note: &str) -> String {
     )
 }
 
-/// Bound a context to what an implementation run takes, keeping its beginning.
-fn bounded(text: String) -> String {
-    if text.len() <= CONTEXT {
-        return text;
+/// A context as an implementation run takes it: whole, never cut. Saving a workflow refuses a
+/// definition whose largest context does not fit (`largest_context`), so only a definition saved
+/// by an older host can be refused here, with the numbers.
+fn fitted(text: String) -> std::result::Result<String, String> {
+    let used = text.chars().count();
+    if used <= CONTEXT {
+        return Ok(text);
     }
-    let mut end = CONTEXT;
-    while !text.is_char_boundary(end) {
-        end -= 1;
+    Err(format!(
+        "The run's context would take {used} characters, more than the {CONTEXT} a run takes, and it is never cut: shorten the workflow's instructions or instruction blocks (or the handover note) and restart the run, which takes the workflow as it is then."
+    ))
+}
+
+/// The item a coding context names.
+struct Subject<'a> {
+    kind: &'a str,
+    id: u64,
+    title: &'a str,
+    url: &'a str,
+    /// The parent's link, for a planned child.
+    parent: Option<&'a str>,
+}
+
+/// The sentence a coding context opens with: the item, the checkouts it is given (its own
+/// repository's first, its working directory) and how to report its branches.
+fn opening(subject: &Subject, given: &[(crate::workflows::Repository, PathBuf)]) -> String {
+    let Some((repository, directory)) = given.first() else {
+        return String::new();
+    };
+    if given.len() > 1 {
+        let others: Vec<String> = given[1..]
+            .iter()
+            .map(|(r, d)| format!("{} at {}", r.name, d.display()))
+            .collect();
+        format!(
+            "You are implementing {} {} «{}» ({}). Your working directory is the checkout of repository {} at {}, where its pull request goes. This run is also given the checkouts of the workflow's other repositories ({}): when the item needs it, change them too, each on its own branch with its own pull request, opened as the instructions ask. When you finish, end your report with one line `{BRANCH} NAME` naming the branch you pushed in {} (without refs/heads/), and one line `Branch REPOSITORY: NAME` for each other repository you pushed a branch in, REPOSITORY being its name as listed here.\n",
+            subject.kind,
+            subject.id,
+            subject.title,
+            subject.url,
+            repository.name,
+            directory.display(),
+            others.join("; "),
+            repository.name,
+        )
+    } else {
+        format!(
+            "You are implementing {} {} «{}» ({}){}, in the checkout of repository {} at {}. Open its pull request as the instructions ask. When you finish, end your report with one line `{BRANCH} NAME` naming the branch you pushed (without refs/heads/).\n",
+            subject.kind,
+            subject.id,
+            subject.title,
+            subject.url,
+            subject
+                .parent
+                .map(|p| format!(", a child of {p}"))
+                .unwrap_or_default(),
+            repository.name,
+            directory.display()
+        )
     }
-    text[..end].to_owned()
+}
+
+/// The handover note a restarted run's coding runs get, and whose it is.
+#[derive(Clone, Copy)]
+enum Note<'a> {
+    /// The person's note.
+    Person(&'a str),
+    /// The workflow supervisor's draft, which the person confirmed unedited.
+    Drafted(&'a str),
+}
+
+/// A coding run's context: the opening sentence, the handover note on the run this one
+/// restarted with its preface (the person's, or the supervisor's draft), before the workflow's
+/// text, then the workflow's instructions and instruction blocks.
+fn coding_context(
+    subject: &Subject,
+    given: &[(crate::workflows::Repository, PathBuf)],
+    note: Option<Note>,
+    workflow: &crate::workflows::Workflow,
+    blocks: &[crate::workflows::Block],
+) -> String {
+    let mut context = opening(subject, given);
+    match note {
+        Some(Note::Person(text)) => context.push_str(&handover(text)),
+        Some(Note::Drafted(text)) => context.push_str(&drafted_handover(text)),
+        None => {}
+    }
+    context.push_str(&instructions(workflow, blocks));
+    context
+}
+
+/// The longest item text a context is measured with: an item's kind, ID, title (a run keeps at
+/// most 500 characters of it) and links.
+const ITEM_KIND: usize = 100;
+const ITEM_TITLE: usize = 500;
+const ITEM_LINK: usize = 600;
+
+/// The most characters a planning or coding run of this definition can be given, `blocks` being
+/// the blocks it lists, in order: the planning context, and the coding context of each of its
+/// repositories as a task's own (with every checkout) or as a planned child's (with its parent's
+/// link), for an item with the longest kind, ID, title and links and the longest handover note.
+pub(in crate::app) fn largest_context(
+    workflow: &crate::workflows::Workflow,
+    blocks: &[crate::workflows::Block],
+) -> usize {
+    let (kind, title, link) = (
+        "x".repeat(ITEM_KIND),
+        "x".repeat(ITEM_TITLE),
+        "x".repeat(ITEM_LINK),
+    );
+    let subject = Subject {
+        kind: &kind,
+        id: u64::MAX,
+        title: &title,
+        url: &link,
+        parent: Some(&link),
+    };
+    // A coding context is its opening, the note and the planning context (`coding_context`):
+    // only the opening depends on the repository.
+    let planning = instructions(workflow, blocks).chars().count();
+    // The longest note with the longer of its two prefaces (the person's or the supervisor's).
+    let note = "x".repeat(record::MAX_HANDOVER);
+    let rest = handover(&note)
+        .chars()
+        .count()
+        .max(drafted_handover(&note).chars().count())
+        + planning;
+    checkouts(workflow)
+        .into_iter()
+        .flat_map(|(repository, directory)| {
+            [
+                task_checkouts(workflow, &repository, &directory),
+                vec![(repository, directory)],
+            ]
+        })
+        .map(|given| opening(&subject, &given).chars().count() + rest)
+        .fold(planning, usize::max)
+}
+
+/// The characters of the instructions and instruction blocks as a context carries them: what a
+/// change to them adds to or takes from `largest_context`.
+pub(in crate::app) fn instructions_part(
+    workflow: &crate::workflows::Workflow,
+    blocks: &[crate::workflows::Block],
+) -> usize {
+    let mut bare = workflow.clone();
+    bare.instructions.clear();
+    instructions(workflow, blocks).chars().count() - instructions(&bare, &[]).chars().count()
 }
 
 async fn planning(
@@ -933,7 +1072,7 @@ async fn planning(
                 model: workflow.agent.model.clone(),
                 effort: workflow.agent.effort.clone(),
                 directories: checkouts(workflow).into_iter().map(|(_, d)| d).collect(),
-                context: bounded(instructions(workflow, &run.blocks)),
+                context: fitted(instructions(workflow, &run.blocks))?,
                 source: run.item.source.clone(),
                 detail,
                 planning: true,
@@ -1319,46 +1458,27 @@ async fn coding(
         } else {
             vec![(repository.clone(), directory.clone())]
         };
-        let mut context = if given.len() > 1 {
-            let others: Vec<String> = given[1..]
-                .iter()
-                .map(|(r, d)| format!("{} at {}", r.name, d.display()))
-                .collect();
-            format!(
-                "You are implementing {} {} «{}» ({}). Your working directory is the checkout of repository {} at {}, where its pull request goes. This run is also given the checkouts of the workflow's other repositories ({}): when the item needs it, change them too, each on its own branch with its own pull request, opened as the instructions ask. When you finish, end your report with one line `{BRANCH} NAME` naming the branch you pushed in {} (without refs/heads/), and one line `Branch REPOSITORY: NAME` for each other repository you pushed a branch in, REPOSITORY being its name as listed here.\n",
-                child.kind,
-                child.id,
-                child.title,
-                child.url,
-                repository.name,
-                directory.display(),
-                others.join("; "),
-                repository.name,
-            )
-        } else {
-            format!(
-                "You are implementing {} {} «{}» ({}){}, in the checkout of repository {} at {}. Open its pull request as the instructions ask. When you finish, end your report with one line `{BRANCH} NAME` naming the branch you pushed (without refs/heads/).\n",
-                child.kind,
-                child.id,
-                child.title,
-                child.url,
-                parent
-                    .as_ref()
-                    .map(|p| format!(", a child of {p}"))
-                    .unwrap_or_default(),
-                repository.name,
-                directory.display()
-            )
+        let subject = Subject {
+            kind: &child.kind,
+            id: child.id,
+            title: &child.title,
+            url: &child.url,
+            parent: parent.as_deref(),
         };
-        // The user's note on the run this one restarted, before anything that may be cut.
-        if let Some(note) = &run.handover {
-            context.push_str(&if run.handover_drafted {
-                drafted_handover(note)
+        let note = run.handover.as_deref().map(|text| {
+            if run.handover_drafted {
+                Note::Drafted(text)
             } else {
-                handover(note)
-            });
-        }
-        context.push_str(&instructions(workflow, &run.blocks));
+                Note::Person(text)
+            }
+        });
+        let context = fitted(coding_context(
+            &subject,
+            &given,
+            note,
+            workflow,
+            &run.blocks,
+        ))?;
         let launched = implementation::launch_planned(
             host,
             implementation::Planned {
@@ -1368,7 +1488,7 @@ async fn coding(
                 model: workflow.agent.model.clone(),
                 effort: workflow.agent.effort.clone(),
                 directories: given.into_iter().map(|(_, d)| d).collect(),
-                context: bounded(context),
+                context,
                 source: run.item.source.clone(),
                 detail,
                 planning: false,
@@ -1737,5 +1857,73 @@ pub(in crate::app) async fn schedule(host: Arc<Host>) {
             tracing::warn!(event = "workflow_supervisor_not_ready");
         }
         tokio::time::sleep(std::time::Duration::from_secs(TICK_SECONDS)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workflows::{Repository, tests as fixtures};
+
+    #[test]
+    fn the_largest_context_is_the_longest_context_the_engine_builds() {
+        let mut workflow = fixtures::workflow("payments");
+        workflow.repositories.push(Repository {
+            id: "1a2b3c4d-5b1d-4f7a-9c8e-0f3c6a2e5e6f".into(),
+            name: "payments-web-with-a-longer-name".into(),
+        });
+        workflow.checkouts.insert(
+            "1a2b3c4d-5b1d-4f7a-9c8e-0f3c6a2e5e6f".into(),
+            PathBuf::from("/work/payments-web-with-a-longer-name"),
+        );
+        let blocks = vec![fixtures::instruction("base")];
+        workflow.blocks = vec!["base".into()];
+        let (kind, title, link) = (
+            "x".repeat(ITEM_KIND),
+            "x".repeat(ITEM_TITLE),
+            "x".repeat(ITEM_LINK),
+        );
+        let subject = Subject {
+            kind: &kind,
+            id: u64::MAX,
+            title: &title,
+            url: &link,
+            parent: Some(&link),
+        };
+        let note = "x".repeat(record::MAX_HANDOVER);
+        let built = checkouts(&workflow)
+            .into_iter()
+            .flat_map(|(repository, directory)| {
+                [
+                    task_checkouts(&workflow, &repository, &directory),
+                    vec![(repository, directory)],
+                ]
+            })
+            .flat_map(|given| {
+                [Note::Person(&note), Note::Drafted(&note)].map(|preface| {
+                    coding_context(&subject, &given, Some(preface), &workflow, &blocks)
+                })
+            })
+            .map(|context| context.chars().count())
+            .max()
+            .unwrap();
+        assert_eq!(largest_context(&workflow, &blocks), built);
+        // The instructions and blocks take what their sections take, nothing else.
+        let part = instructions_part(&workflow, &blocks);
+        let block = &blocks[0];
+        assert_eq!(
+            part,
+            15 + workflow.instructions.chars().count()
+                + 23
+                + block.name.chars().count()
+                + block.text.chars().count()
+        );
+        // A context that does not fit is refused whole, never cut.
+        assert_eq!(fitted("x".repeat(CONTEXT)).unwrap().len(), CONTEXT);
+        assert!(
+            fitted("x".repeat(CONTEXT + 1))
+                .unwrap_err()
+                .contains("never cut")
+        );
     }
 }
