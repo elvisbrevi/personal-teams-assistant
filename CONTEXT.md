@@ -198,7 +198,7 @@ One execution of a workflow for one work item, kept on the coordinator, advancin
 _Avoid_: implementation run (one of its parts), job
 
 **Ready state**:
-A workflow state of a project's process, among those of its requirement, bug and listed task types, that the user chose in the workflow settings as «ready to develop»: an assigned item that reaches it can start its workflow. Chosen from the states the process has, never typed.
+A workflow state of a project's process, among those of its requirement, bug and task types, that the user chose in the workflow settings as «ready to develop»: an assigned item that reaches it can start its workflow. Chosen from the states the process has, never typed.
 _Avoid_: trigger state, start state
 
 **Workflow watcher**:

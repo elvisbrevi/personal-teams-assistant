@@ -2,7 +2,7 @@
 //! and leaving a ready state, an item seen twice, the cases that start nothing, the bounds and
 //! where it does not run. Every read is recorded by the catalog, which has no way to write.
 use super::super::record::State as Phase;
-use super::super::runs::tests::{Bench, HU};
+use super::super::runs::tests::{Bench, HU, TASK};
 use super::*;
 use crate::store::settings::SettingsStore;
 use crate::workflows::director::ReadyStates;
@@ -94,10 +94,11 @@ async fn an_item_entering_a_ready_state_starts_one_run_once_and_again_after_it_l
     assert_eq!(last["projects"][0]["complete"], true);
 
     // Not due within the interval (five minutes), due after it.
+    // Each poll makes the state's two reads: the default list and the task kind.
     super::tick(&bench.host, &bench.azure, 1_000 + 299).await;
-    assert_eq!(bench.reads("list Payments"), 1);
-    super::tick(&bench.host, &bench.azure, 1_000 + 300).await;
     assert_eq!(bench.reads("list Payments"), 2);
+    super::tick(&bench.host, &bench.azure, 1_000 + 300).await;
+    assert_eq!(bench.reads("list Payments"), 4);
     // The same item on the next poll starts nothing: not while its run is active, and not
     // after the run was cancelled either, while the item stays in the state.
     assert_eq!(runs(&bench).len(), 1);
@@ -415,7 +416,7 @@ async fn a_mark_without_its_run_is_asked_for_again_after_one_interval_under_the_
     // An abort between the mark and the start: a row, no run.
     let item = bench
         .catalog
-        .ready_items(None, "Payments", "Ready", 10)
+        .ready_items(None, "Payments", "Ready", None, 10)
         .unwrap()
         .items
         .remove(0);
@@ -549,4 +550,65 @@ async fn each_ready_state_entry_is_read_through_the_source_that_names_its_organi
         tools::todo::source_for(state, "https://dev.azure.com/other").unwrap(),
         None
     );
+}
+
+#[tokio::test]
+async fn one_poll_starts_a_run_for_every_ready_item_whatever_its_type_and_each_only_once() {
+    let bench = Bench::new().await;
+    set_ready(&bench, &["Ready"]);
+    edit_workflow(&bench, |w| w.auto_start = true);
+    answer(&bench, "payments");
+    // An HU, a bug, a development bug listed with the bugs by its guide and a plain Task.
+    for id in [101, 102] {
+        bench.catalog.set_state(id, "New");
+    }
+    bench.catalog.add(
+        super::super::synthetic::detail(500, "Bug", "bug", "Rounding", "Text."),
+        true,
+    );
+    bench.catalog.add(
+        super::super::synthetic::detail(501, "Development Bug", "task", "Totals", "Text."),
+        true,
+    );
+    bench
+        .catalog
+        .listed_with_bugs
+        .lock()
+        .unwrap()
+        .insert("Development Bug".into());
+    let first = poll(&bench).await;
+    assert_eq!(first["started"], 4, "{first}");
+    let project = &first["projects"][0];
+    assert_eq!(project["seen"], 4);
+    assert_eq!(
+        project["seen_by_category"],
+        json!({"requirement": 1, "bug": 1, "task": 2})
+    );
+    assert_eq!(
+        first["seen_by_category"],
+        json!({"requirement": 1, "bug": 1, "task": 2})
+    );
+    assert_eq!(project["complete"], true);
+    let items: std::collections::BTreeSet<u64> = runs(&bench).iter().map(|r| r.item.id).collect();
+    assert_eq!(items, [HU, TASK, 500, 501].into());
+    // Both reads of the state are the To-Do read's own, within the project's bound.
+    assert_eq!(bench.reads("list Payments Ready limit 100"), 1);
+    assert_eq!(bench.reads("list Payments Ready kind task limit 97"), 1);
+
+    // Every type is seen once: the next poll starts nothing.
+    let again = poll(&bench).await;
+    assert_eq!(again["started"], 0);
+    assert_eq!(again["projects"][0]["already_seen"], 4);
+    assert_eq!(runs(&bench).len(), 4);
+    assert_eq!(bench.host.state.workflows.watcher.seen(), 4);
+
+    // `workflows settings` shows the last poll's counts by category.
+    let shown = super::super::director::operation(&bench.host, "workflow_settings", &json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        shown["watcher"]["last_poll"]["seen_by_category"],
+        json!({"requirement": 1, "bug": 1, "task": 2})
+    );
+    assert!(bench.catalog.only_reads());
 }
