@@ -1649,6 +1649,42 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "workflow_run_restart",
+        title: "Restart a workflow run",
+        description: "Ends a workflow run that is not done or cancelled and has a workflow, the way workflow_run_cancel does (its active implementation run is cancelled, every session it started that is still alive is stopped, the file changes stay), and starts a new run of the same workflow (enabled, as the map holds it now) for the same work item, read fresh, from its first stage: an HU or bug plans again and waits for the plan review, a task is coded again. note is the user's handover note (plain text, at most 4000 characters): what the previous run did, not to be repeated, and what is left. It is stored with the new run (handover) and given to each of its coding runs under «Handover from the previous run», next to the item's evidence; the engine posts it nowhere, neither to Teams nor to the work item. Write it with the user from what the old run's record shows (workflow_run_status: stages, branches, pull requests) and what they know. The new run records the old one in continues and the old one the new in restarted_as. While a pause covers the project, the new run waits. Returns the new run's record.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"run": string("The workflow run's ID."), "note": string("The user's handover note, at most 4000 characters."), "confirmed": confirmed()}),
+                &["run"],
+            )
+        },
+    },
+    Tool {
+        name: "workflow_runs_pause",
+        title: "Pause the workflow runs",
+        description: "Pauses every workflow run, or those of one project (by name, in any organization): until workflow_runs_unpause, no run of it takes a slot, asks the director, launches a planning or coding run or runs an acting block, and the watcher starts no run for it; what already runs is still observed. sessions is the user's explicit choice: stop stops every agent session of those runs that is still alive now (the file changes stay), and a run whose active implementation run was stopped becomes interrupted (restart it with workflow_run_restart or resume it); finish leaves them to finish, and their runs record how they end. The runs keep their order in the line for a slot. workflow_runs, workflow_run_status and workflow_settings show the pauses in force (paused) and each held run (paused: true). Pausing again replaces that scope's pause.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"project": string("Only this project's runs; every project's when left out."), "sessions": {"type": "string", "enum": ["stop", "finish"], "description": "stop: stop the live sessions now; finish: let them finish."}, "confirmed": confirmed()}),
+                &["sessions"],
+            )
+        },
+    },
+    Tool {
+        name: "workflow_runs_unpause",
+        title: "Unpause the workflow runs",
+        description: "Ends the pause of one project (project), or every pause (no project): the runs it held continue on their own in the order they were created, and the watcher starts runs again. A project paused only by a pause of every project needs the unpause without a project.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"project": string("End this project's pause; every pause when left out."), "confirmed": confirmed()}),
+                &[],
+            )
+        },
+    },
+    Tool {
         name: "workflow_summary",
         title: "Summarize a workflow run",
         description: "Asks the run's project's workflow director (the same one that classifies it: workflow_settings directors; the direct prompt plus a summarize task that code appends) for a progress summary of one workflow run, written in the configured language (Markdown, at most 4000 characters), and stores it on the run (summaries, the last 20: id, text, created_at, provider, model and native session_id). It runs a model on the director's machine, so it takes time and uses that agent's quota, and it needs no confirmation (like workflow_classify, it writes only the summary on the run, rotating the 20 kept, and the session in Agent history, nothing to a provider): the input is the run record (the item's title and verified link, the workflow, every stage with timestamps and outcome, the children with links, coding run states and pull requests, block outcomes and the attention text), never a session transcript or launcher output; the session is read-only and tool-less and appears in Agent history (implementation_history, purpose summary). The director writes no links: any URL it wrote is dropped and code appends the verified links of the item and of the children and pull requests the summary names. An empty or malformed answer is an error and stores nothing. Runs only on the owner's coordinator. Show the user the summary before offering workflow_summary_send.",
@@ -2374,6 +2410,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         | "workflow_repositories" | "workflow_settings" | "workflow_settings_update"
         | "workflow_classify" | "workflow_run_start" | "workflow_runs" | "workflow_run_status"
         | "workflow_run_resume" | "workflow_run_cancel" | "workflow_run_assign"
+        | "workflow_run_restart" | "workflow_runs_pause" | "workflow_runs_unpause"
         | "workflow_summary" | "workflow_summary_send" => ipc(name, args.clone()).await,
         "answer_rate" => ipc("answer_feedback", json!({"resource": text(args, "resource")?, "rating": args.get("rating"),
             "comment": args.get("comment"), "example": args.get("example"), "context": args.get("context")})).await,
@@ -2550,6 +2587,35 @@ pub(super) async fn question(name: &str, args: &Value) -> Result<Option<String>,
             }));
         }
     }
+    // A restart names the run's item and its workflow as the coordinator holds it now; when the
+    // run cannot be read, the host refuses an unknown run anyway.
+    if name == "workflow_run_restart"
+        && let Ok(status) = run("workflow_run_status", &json!({"run": args["run"]})).await
+    {
+        let workflow = match status["run"]["workflow"].as_str() {
+            Some(id) => run("workflow_show", &json!({"id": id}))
+                .await
+                .ok()
+                .and_then(|s| {
+                    serde_json::from_value::<crate::workflows::Workflow>(s["workflow"].clone()).ok()
+                }),
+            None => None,
+        };
+        let note = args["note"]
+            .as_str()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(|n| n.chars().count());
+        return Ok(Some(format!(
+            "{}?",
+            super::workflows::runs::describe_restart(
+                args["run"].as_str().unwrap_or("this"),
+                workflow.as_ref(),
+                status["run"]["item"]["id"].as_u64(),
+                note
+            )
+        )));
+    }
     let edited = args["text"].as_str().is_some_and(|t| !t.trim().is_empty());
     if name != "workflow_summary_send" || edited {
         return Ok(Some(asked));
@@ -2646,6 +2712,38 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             "Assign workflow {} to workflow run {}? It then plans with that workflow's agent and, once you confirm the children, codes each one with full permissions on its machine.",
             args["workflow"].as_str().unwrap_or("this"),
             args["run"].as_str().unwrap_or("this")
+        ),
+        "workflow_run_restart" => format!(
+            "{}?",
+            super::workflows::runs::describe_restart(
+                args["run"].as_str().unwrap_or("this"),
+                None,
+                None,
+                args["note"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .map(|n| n.chars().count())
+            )
+        ),
+        "workflow_runs_pause" => match serde_json::from_value(args["sessions"].clone()) {
+            Ok(sessions) => format!(
+                "{}?",
+                super::workflows::runs::describe_pause(args["project"].as_str(), sessions)
+            ),
+            // Without the choice the host refuses it; the question says so.
+            Err(_) => format!(
+                "Pause {}? Give sessions stop or finish: what happens to the sessions running now is your choice, and the pause is refused without it.",
+                args["project"]
+                    .as_str()
+                    .map_or("every workflow run".to_owned(), |p| format!(
+                        "the workflow runs of project {p}"
+                    ))
+            ),
+        },
+        "workflow_runs_unpause" => format!(
+            "{}?",
+            super::workflows::runs::describe_unpause(args["project"].as_str())
         ),
         "workflow_summary_send" => format!("{}?", super::workflows::summary::describe_args(args, None)),
         "cloud_disconnect" => if args["forget_service_token"] == true {
@@ -2943,6 +3041,9 @@ mod tests {
             ("workflow_run_resume", "needs confirmation"),
             ("workflow_run_cancel", "needs confirmation"),
             ("workflow_run_assign", "needs confirmation"),
+            ("workflow_run_restart", "needs confirmation"),
+            ("workflow_runs_pause", "needs confirmation"),
+            ("workflow_runs_unpause", "needs confirmation"),
             ("workflow_summary", "local"),
             ("workflow_summary_send", "needs confirmation"),
         ] {

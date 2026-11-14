@@ -1277,24 +1277,24 @@ fn the_line_for_a_slot_is_creation_order_and_a_retrying_run_keeps_its_place() {
     }
     let ids: Vec<String> = runs.iter().map(|r| r.id.clone()).collect();
     // A run created later never takes the slot first, whichever asks first.
-    assert!(!record::may_take_slot(&runs, &ids[2], 1, 150));
-    assert!(!record::may_take_slot(&runs, &ids[3], 1, 150));
+    assert!(!record::may_take_slot(&runs, &ids[2], 1, 150, &[]));
+    assert!(!record::may_take_slot(&runs, &ids[3], 1, 150, &[]));
     // Waiting out its retry, the retrying run is out of the line.
-    assert!(record::may_take_slot(&runs, &ids[1], 1, 150));
+    assert!(record::may_take_slot(&runs, &ids[1], 1, 150, &[]));
     // Once its retry is due it is back in its place: nobody created after it passes it.
-    assert!(!record::may_take_slot(&runs, &ids[1], 1, 200));
-    let places = record::positions(&runs, 200);
+    assert!(!record::may_take_slot(&runs, &ids[1], 1, 200, &[]));
+    let places = record::positions(&runs, 200, &[]);
     assert_eq!(places.get(&ids[0]), None);
     assert_eq!(places[&ids[1]], 2);
     runs[0].state = Phase::Coding;
     runs[0].retry_at = None;
-    assert!(record::may_take_slot(&runs, &ids[0], 1, 200));
+    assert!(record::may_take_slot(&runs, &ids[0], 1, 200, &[]));
     // A slot held is not free; a second slot goes to the next in the line only.
     runs[0].admitted = true;
-    assert!(!record::may_take_slot(&runs, &ids[1], 1, 200));
-    assert!(record::may_take_slot(&runs, &ids[1], 2, 200));
-    assert!(!record::may_take_slot(&runs, &ids[2], 2, 200));
-    let places = record::positions(&runs, 200);
+    assert!(!record::may_take_slot(&runs, &ids[1], 1, 200, &[]));
+    assert!(record::may_take_slot(&runs, &ids[1], 2, 200, &[]));
+    assert!(!record::may_take_slot(&runs, &ids[2], 2, 200, &[]));
+    let places = record::positions(&runs, 200, &[]);
     assert_eq!(places.get(&ids[0]), None);
     assert_eq!(
         (places[&ids[1]], places[&ids[2]], places[&ids[3]]),
@@ -1865,6 +1865,7 @@ async fn a_ledger_entry_for_another_parent_is_planned_again_on_resume_not_looped
 }
 
 mod acting;
+mod pause;
 
 /// Why the session of run `id` did not end with its answer, as Agent history shows it.
 async fn history_failure(bench: &Bench, id: &str) -> Value {

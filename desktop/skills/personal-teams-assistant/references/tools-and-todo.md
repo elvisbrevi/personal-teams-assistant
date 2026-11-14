@@ -472,7 +472,13 @@ How a workflow takes an item from its ready state to its release, and where the 
    `workflow_summary_send` posts it, after the person confirms the exact text, to each chat chosen.
 9. **When something stops it** (`needs_attention`, `interrupted`, `failed`, `unassigned`), the run
    says why; the person fixes the cause and resumes, assigns a workflow, or cancels. Nothing that
-   may already have happened is done again by a resume.
+   may already have happened is done again by a resume. When the agent stopped halfway and its
+   work must go on without being repeated, restart the run with a handover note instead
+   (`workflows restart`), written with the person from the run's record and what they know.
+10. **When the network to the customer drops** or two sessions would collide, pause the runs
+   (`workflows pause`, every project or one, stopping the live sessions or letting them finish)
+   and unpause when it is back; restart each interrupted run with its note, in the order that
+   makes sense.
 
 ### Workflow settings and the director
 
@@ -487,8 +493,10 @@ Requires host and CLI `workflow_director_support: true`.
   `workflow` the machine and agent its enabled workflows that start by themselves share (all its
   enabled ones when none does), `global` the account's; null without one), with the defaults,
   the bounds, `editable` and `watcher` (the ready-state watcher on this computer:
-  `state` `watching`, `idle` while no ready state is configured, `waiting_for_director` or
-  `unavailable` where it never runs, the interval and `last_poll`; see [automatic starts](#automatic-starts-and-the-implement-choice)).
+  `state` `watching`, `idle` while no ready state is configured, `waiting_for_director`,
+  `paused` while every run is paused (`paused_projects` names the projects paused on their own) or
+  `unavailable` where it never runs, the interval and `last_poll`; see [automatic starts](#automatic-starts-and-the-implement-choice))
+  and `paused` (the pauses in force; see [workflow runs](#workflow-runs)).
   With `--project NAME` (and `--organization URL` or
   `--source ID` when needed) it adds `process_states`: the states that project's process has
   for its requirement, bug and task types. Choose ready states only from that list.
@@ -580,7 +588,7 @@ run (any state but `done` and `cancelled`).
   wait longer than `pull_request_wait_days` stop the run in `needs_attention`, naming the cause and the linked run
   or pull request; for a coding or planning run the attention text is `… ended STATE: SENTENCE`,
   the sentence of the session's cause. A director that gave no answer leaves the run
-  `unassigned` with `The workflow director gave no answer: SENTENCE Assign a workflow to this run.` A restart while a planning or coding run was active leaves it `interrupted`.
+  `unassigned` with `The workflow director gave no answer: SENTENCE Assign a workflow to this run.` A host restart while a planning or coding run was active leaves it `interrupted`, and so does a pause with `--sessions stop` that stopped its active run.
 - **Resume:** `pta workflows resume RUN --confirmed` (MCP `workflow_run_resume`) continues a
   `failed`, `interrupted` or `needs_attention` run from the stage it stopped in, accepting what
   stopped it: a new planning run replaces one that did not end ready, the children that were
@@ -610,6 +618,31 @@ run (any state but `done` and `cancelled`).
   before telling the user it did or did not happen. Resuming a run stopped by a launcher goes on
   with the blocks that have not run and never runs that launcher again. Blocks never post to a
   Teams channel, only to chats, and a block cannot do anything but these two things.
+- **Restart with a handover note:** `pta workflows restart RUN [--note TEXT | --note-file PATH]
+  --confirmed` (MCP `workflow_run_restart {run, note?}`) is for a run whose agent stopped halfway
+  and must not repeat what it did. It ends the run as cancel does (its live sessions stop, the file
+  changes stay) and starts a new run of the same workflow (enabled, as it is now) for the same
+  item, read fresh, from its first stage: an HU or bug plans again and waits for the plan review, a
+  task is coded again. Before it, read the old run (`status`: stages, branches, pull requests) and
+  ask the user what was really done; write the note with them: what is done and must not be
+  repeated (branch pushed, version deployed, notices sent, pull request state) and what is left. It
+  is plain text, at most 4000 characters (`--note-file` is read on this computer, at most 16 KiB),
+  stored with the new run (`handover`) and given to each of its coding runs under «Handover from
+  the previous run»; it is posted nowhere, so do not also write it on the work item unless the
+  user asks (that is a separate confirmed write). The new run names the old one in `continues`,
+  the old one the new in `restarted_as`. An unassigned or classifying run has no workflow to
+  restart: assign one or cancel it.
+- **Pause and unpause:** `pta workflows pause [--project NAME] --sessions stop|finish --confirmed`
+  (MCP `workflow_runs_pause {project?, sessions}`) holds every run, or one project's (by name):
+  no run takes a slot, asks the director, starts a planning or coding run or runs an acting block,
+  and the watcher starts nothing for it, while what already runs is still followed. The choice
+  for the sessions running now is the user's and has no default: `stop` stops them now (their runs
+  become `interrupted`, to restart with a note or resume), `finish` lets them finish and records
+  how they end. Use it when the network to the customer dropped or two sessions would collide.
+  The runs keep their order in the line; a run started or restarted meanwhile waits.
+  `pta workflows unpause [--project NAME] --confirmed` (MCP `workflow_runs_unpause`) ends that
+  project's pause, or every pause; the held runs go on in the order they were created. `runs`,
+  `status` and `settings` show the pauses in force (`paused`) and each held run (`paused: true`).
 - **Cancel:** `pta workflows cancel RUN --confirmed` (MCP `workflow_run_cancel`) cancels the active
   planning or coding run (its file changes stay), stops every other session the run started that
   is still alive (a coding session handed to the user after `done`, or one the user opened again;
