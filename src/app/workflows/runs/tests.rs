@@ -25,13 +25,20 @@ impl Shell for TestShell {
 /// The fake provider CLI: a director session prints `director.jsonl`, a planning session
 /// prints `plan.jsonl` (or waits while `plan_mode` is `block`), and a coding session counts
 /// itself in `starts` and then, by `mode`, reports its branch (`done`), waits for `release`
-/// first (`block`), raises a permission prompt nobody answers (`prompt`) or fails (`fail`).
+/// first (`block`), raises a permission prompt nobody answers (`prompt`), fails (`fail`) or
+/// exits at once with code 1, writing on stderr that a system variable is missing (`exit`,
+/// also a `director_mode`).
 const CLI: &str = r#"#!/bin/sh
 LOG='{log}'
 prompt="$LOG/prompt.$$"
 cat > "$prompt"
+exit_at_start() {
+  echo 'Error: the SystemRoot environment variable is not set (C:\Users\someone)' >&2
+  exit 1
+}
 if grep -q 'Choose only the ID of a workflow' "$prompt"; then
   echo x >> "$LOG/directions"
+  [ "$(cat "$LOG/director_mode" 2>/dev/null)" = exit ] && exit_at_start
   printf '%s\n' '{"type":"step_start","sessionID":"ses_direct"}'
   if [ "$(cat "$LOG/director_mode" 2>/dev/null)" = block ]; then
     while [ ! -f "$LOG/release" ]; do sleep 0.05; done
@@ -53,6 +60,7 @@ echo x >> "$LOG/starts"
 n=$(wc -l < "$LOG/starts" | tr -d ' ')
 cp "$prompt" "$LOG/coding.$n"
 printf '%s' "$OPENCODE_CONFIG_CONTENT" > "$LOG/config.$n"
+[ "$(cat "$LOG/mode" 2>/dev/null)" = exit ] && exit_at_start
 printf '%s\n' "{\"type\":\"step_start\",\"sessionID\":\"ses_code$n\"}"
 case "$(cat "$LOG/mode" 2>/dev/null)" in
   block) while [ ! -f "$LOG/release" ]; do sleep 0.05; done ;;
@@ -1199,6 +1207,7 @@ async fn cancelling_a_run_stops_a_kept_session_on_a_worker_machine() {
             machine: worker.clone(),
             started: true,
             state: Some("done".into()),
+            failure: None,
         }),
         outcome: Some("done".into()),
         ..Default::default()
@@ -1812,6 +1821,7 @@ async fn cancel_warns_when_a_recorded_run_may_be_running_on_an_unreachable_machi
         machine: machine.clone(),
         started: false,
         state: None,
+        failure: None,
     });
     bench.save(&run);
     let cancelled = bench
@@ -1855,3 +1865,306 @@ async fn a_ledger_entry_for_another_parent_is_planned_again_on_resume_not_looped
 }
 
 mod acting;
+
+/// Why the session of run `id` did not end with its answer, as Agent history shows it.
+async fn history_failure(bench: &Bench, id: &str) -> Value {
+    let history = implementation::operate(&bench.host, "implementation_history", &json!({}))
+        .await
+        .unwrap();
+    history["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap()["failure"]
+        .clone()
+}
+
+/// A worker machine registered on the bench's coordinator and seen once, as a poll would make
+/// it: its ID and token.
+async fn worker(bench: &Bench) -> (String, String) {
+    let worker = uuid::Uuid::new_v4().to_string();
+    let registration = implementation::fleet::register(
+        &bench.host,
+        &json!({"id":worker,"name":"Worker","os":"linux"}),
+    )
+    .await
+    .unwrap();
+    let token = registration["token"].as_str().unwrap().to_owned();
+    let poll = json!({"id":worker,"token":token,"action":"poll","management_support":true,
+        "roots":[],"workflow_direct_support":true});
+    let reply = implementation::fleet::protocol(&bench.host, &poll)
+        .await
+        .unwrap();
+    // A coordinator says it reads a session's failure, so a worker sends it.
+    assert_eq!(reply["session_failure_support"], true);
+    (worker, token)
+}
+/// Answer, as the worker, every call it is given with `answer`, until `until` finishes.
+async fn serve<T>(
+    bench: &Bench,
+    (worker, token): (&str, &str),
+    until: tokio::task::JoinHandle<T>,
+    answer: impl AsyncFn(&serde_json::Map<String, Value>) -> Value,
+) -> (T, Vec<String>) {
+    let poll = json!({"id":worker,"token":token,"action":"poll","management_support":true,
+        "roots":[],"workflow_direct_support":true});
+    let mut methods = Vec::new();
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if until.is_finished() {
+                break until.await.unwrap();
+            }
+            let reply = implementation::fleet::protocol(&bench.host, &poll)
+                .await
+                .unwrap();
+            if let Some(command) = reply["command"].as_object() {
+                methods.push(command["method"].as_str().unwrap().to_owned());
+                let mut answered = poll.clone();
+                answered["results"] = json!([{"id":command["id"],"result":answer(command).await}]);
+                implementation::fleet::protocol(&bench.host, &answered)
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the coordinator kept waiting");
+    (finished, methods)
+}
+
+#[tokio::test]
+async fn a_cli_that_exits_at_once_names_its_cause_in_the_record_and_the_attention_text() {
+    let bench = Bench::new().await;
+    bench.mode("mode", "exit");
+    let id = bench.start(TASK).await;
+    let run = bench.state(&id, Phase::NeedsAttention).await;
+    let attention = run.attention.clone().unwrap();
+    assert!(
+        attention.contains("ended needs_attention: The CLI exited as soon as it started with exit code 1. It reported a missing system variable"),
+        "{attention}"
+    );
+    let coding = run.children[0].coding.clone().unwrap();
+    let expected = json!({"cause":"cli_exited_at_start","exit_code":1,"stderr":"missing_variable"});
+    assert_eq!(serde_json::to_value(coding.failure).unwrap(), expected);
+    // The machine's record and Agent history say the same, with the sentence; the status too.
+    let runs = implementation::operate(
+        &bench.host,
+        "implementation_runs",
+        &json!({"machine":bench.machine,"id":coding.id}),
+    )
+    .await
+    .unwrap();
+    let record = &runs["runs"][0];
+    assert_eq!(record["state"], "needs_attention");
+    assert_eq!(record["failure"]["cause"], "cli_exited_at_start");
+    assert_eq!(record["failure"]["exit_code"], 1);
+    assert_eq!(record["failure"]["stderr"], "missing_variable");
+    assert!(
+        record["failure"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("missing system variable")
+    );
+    assert_eq!(
+        history_failure(&bench, &coding.id).await["cause"],
+        "cli_exited_at_start"
+    );
+    let status = bench
+        .op("workflow_run_status", json!({"run":id}))
+        .await
+        .unwrap();
+    assert_eq!(status["run"]["children"][0]["coding"]["failure"], expected);
+    // What the CLI wrote on stderr is in no record.
+    let history = implementation::operate(&bench.host, "implementation_history", &json!({}))
+        .await
+        .unwrap();
+    for text in [
+        runs.to_string(),
+        history.to_string(),
+        status.to_string(),
+        serde_json::to_string(&run).unwrap(),
+    ] {
+        assert!(
+            !text.contains("someone") && !text.contains("is not set"),
+            "{text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_director_that_gives_no_answer_names_its_cause_in_the_attention_text_and_the_status() {
+    let bench = Bench::new().await;
+    bench.director();
+    bench.mode("director_mode", "exit");
+    let id = bench.start_director(HU).await;
+    let run = bench.state(&id, Phase::Unassigned).await;
+    let attention = run.attention.clone().unwrap();
+    assert!(
+        attention.starts_with("The workflow director gave no answer: The CLI exited as soon as it started with exit code 1. It reported a missing system variable")
+            && attention.ends_with("Assign a workflow to this run."),
+        "{attention}"
+    );
+    let status = bench
+        .op("workflow_run_status", json!({"run":id}))
+        .await
+        .unwrap();
+    let failure = &status["run"]["classification"]["failure"];
+    assert_eq!(failure["cause"], "cli_exited_at_start");
+    assert_eq!(failure["exit_code"], 1);
+    assert_eq!(failure["stderr"], "missing_variable");
+    assert!(!status.to_string().contains("someone"));
+    // The director's session in Agent history says why.
+    let session = run.classification.as_ref().unwrap()["session"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        history_failure(&bench, &session).await["cause"],
+        "cli_exited_at_start"
+    );
+    // A summary the director cannot write (the fake CLI answers it with a plan) says why on
+    // the run.
+    let summary =
+        super::super::summary::operation(&bench.host, "workflow_summary", &json!({"run":id}))
+            .await
+            .unwrap_err();
+    assert!(
+        summary.contains("The agent's answer was not the JSON it was asked for."),
+        "{summary}"
+    );
+    let error = bench.run(&id).error.unwrap();
+    assert!(
+        error.starts_with("The progress summary failed: ")
+            && error.contains("The agent's answer was not the JSON it was asked for."),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_worker_reports_why_its_sessions_did_not_end_with_their_answer() {
+    let bench = Bench::new().await;
+    bench.director();
+    bench.mode("director_mode", "exit");
+    let (worker, token) = worker(&bench).await;
+    // The director is the workflow's own machine and agent: the worker.
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflow_settings.director.as_mut().unwrap().machine = worker.clone();
+    map.workflows[0].machine = worker.clone();
+    bench.host.state.settings.save_map(&map).unwrap();
+    let classify = |bench: &Bench| {
+        let (host, azure) = (bench.host.clone(), bench.azure.clone());
+        tokio::spawn(async move {
+            super::super::director::classify_for(&host, &azure, HU, None, None).await
+        })
+    };
+    // The worker runs the director, whose CLI exits at once: its cause reaches the coordinator.
+    let host = bench.host.clone();
+    let (reply, methods) = serve(
+        &bench,
+        (&worker, &token),
+        classify(&bench),
+        async |command| implementation::fleet::answer(&host, command).await,
+    )
+    .await;
+    assert_eq!(methods, ["workflow_direct"], "{reply:?}");
+    let reply = reply.unwrap();
+    assert!(reply["workflow"].is_null());
+    assert_eq!(reply["failure"]["cause"], "cli_exited_at_start");
+    assert_eq!(reply["failure"]["exit_code"], 1);
+    assert_eq!(reply["failure"]["stderr"], "missing_variable");
+    // A worker whose director could not run says why; an older one says nothing, and that
+    // reads as unknown.
+    for (result, said) in [
+        (
+            json!({"ok":false,"failure":{"cause":"cli_missing"}}),
+            "The selected CLI is not installed on the machine.",
+        ),
+        (json!({"ok":false}), "The machine did not say why"),
+        (
+            json!({"ok":false,"failure":{"cause":"a_cause_from_a_newer_version"}}),
+            "The machine did not say why",
+        ),
+    ] {
+        let (reply, _) = serve(&bench, (&worker, &token), classify(&bench), async |_| {
+            result.clone()
+        })
+        .await;
+        let error = reply.unwrap_err();
+        assert!(
+            error.starts_with("[not_ready] The workflow director did not run.")
+                && error.contains(said),
+            "{error}"
+        );
+    }
+
+    // A coding run on the worker that ended without its answer: the cause it reported, or
+    // unknown from a worker that predates causes.
+    for (item, failure, said) in [
+        (
+            301,
+            json!({"cause":"cli_exited_at_start","exit_code":1,"stderr":"missing_variable"}),
+            "The CLI exited as soon as it started with exit code 1.",
+        ),
+        (302, Value::Null, "The machine did not say why"),
+    ] {
+        let coding = uuid::Uuid::new_v4().to_string();
+        let url = format!("https://dev.azure.com/example/Payments/_workitems/edit/{item}");
+        let mut run = Run::new(
+            Item {
+                id: item,
+                url: url.clone(),
+                ..Default::default()
+            },
+            bench.now(),
+        );
+        run.state = Phase::Coding;
+        run.workflow = Some("payments".into());
+        run.definition = Some(map.workflows[0].clone());
+        run.admitted = true;
+        run.acting_since = Some(bench.now());
+        run.children = vec![record::Child {
+            id: item,
+            title: "Worker task".into(),
+            url,
+            coding: Some(record::Implementation {
+                id: coding.clone(),
+                machine: worker.clone(),
+                started: true,
+                state: Some("running".into()),
+                failure: None,
+            }),
+            ..Default::default()
+        }];
+        assert!(bench.host.state.workflows.db.insert(&run).unwrap());
+        let mut reported =
+            json!({"id":coding,"machine":worker,"state":"needs_attention","output":""});
+        if !failure.is_null() {
+            reported["failure"] = failure.clone();
+        }
+        let ticking = {
+            let (host, azure, now) = (bench.host.clone(), bench.azure.clone(), bench.now());
+            tokio::spawn(async move { engine::tick(&host, &azure, now, 0).await })
+        };
+        let (ticked, _) = serve(&bench, (&worker, &token), ticking, async |command| {
+            assert_eq!(command["method"], "implementation_runs");
+            json!({"ok":true,"data":{"runs":[reported.clone()]}})
+        })
+        .await;
+        ticked.unwrap();
+        let run = bench.run(&run.id);
+        assert_eq!(run.state, Phase::NeedsAttention);
+        let attention = run.attention.unwrap();
+        assert!(attention.contains(said), "{attention}");
+        let recorded = run.children[0].coding.as_ref().unwrap().failure.unwrap();
+        assert_eq!(
+            recorded.cause,
+            if failure.is_null() {
+                crate::llm::implementation::Cause::Unknown
+            } else {
+                crate::llm::implementation::Cause::CliExitedAtStart
+            }
+        );
+    }
+}

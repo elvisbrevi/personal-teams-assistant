@@ -38,6 +38,10 @@ pub(super) struct Lines {
     /// The line passed `KEPT` or `LINE`.
     over: bool,
     length: usize,
+    /// The current line dropped the content of a string longer than `STRING`.
+    dropping: bool,
+    /// The last line read did.
+    dropped: bool,
 }
 impl Lines {
     pub(super) fn new() -> Self {
@@ -49,7 +53,14 @@ impl Lines {
             long: false,
             over: false,
             length: 0,
+            dropping: false,
+            dropped: false,
         }
+    }
+    /// Whether the last line read had a string read as empty because it was too long: a
+    /// report that reads empty from such a line was over the bound, not missing.
+    pub(super) fn dropped(&self) -> bool {
+        self.dropped
     }
     /// Reads `bytes` up to the end of a line: how many it used and, at a line's end, the line.
     pub(super) fn feed(&mut self, bytes: &[u8]) -> (usize, Option<Line>) {
@@ -106,6 +117,7 @@ impl Lines {
             self.string.push(byte);
         } else {
             self.long = true;
+            self.dropping = true;
             self.string.clear();
         }
     }
@@ -134,6 +146,7 @@ impl Lines {
         self.long = false;
         self.over = false;
         self.length = 0;
+        self.dropped = std::mem::take(&mut self.dropping);
         line
     }
     #[cfg(test)]
@@ -198,10 +211,28 @@ mod tests {
                 json!({"type":"result","is_error":false,"result":"Done.\nBranch: feature/x"})
             )
         );
+        assert!(!lines.dropped());
         // The 5 MB line was never held whole: what is retained stays within the kept and
         // string bounds (the 300 KB line is kept whole), far below the line.
         assert!(lines.retained() < KEPT + 2 * STRING, "{}", lines.retained());
         assert!(lines.retained() < 5_000_000 / 4, "{}", lines.retained());
+    }
+
+    #[test]
+    fn a_line_says_whether_it_dropped_a_long_string() {
+        let mut lines = Lines::new();
+        let mut line =
+            serde_json::to_vec(&json!({"type":"result","result":"R".repeat(300_000)})).unwrap();
+        line.push(b'\n');
+        let (_, read) = lines.feed(&line);
+        assert_eq!(
+            read,
+            Some(Line::Event(json!({"type":"result","result":""})))
+        );
+        assert!(lines.dropped());
+        let (_, read) = lines.feed(b"{\"type\":\"result\",\"result\":\"Done.\"}\n");
+        assert!(matches!(read, Some(Line::Event(_))));
+        assert!(!lines.dropped());
     }
 
     #[test]

@@ -125,14 +125,14 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "implementation_history",
         title: "Agent execution history",
-        description: "Latest 100 local request runs and implementation sessions, including cached sessions from enrolled machines. Each result has its run ID, native session ID, model, effort, state and dates; partial reports bounded history.",
+        description: "Latest 100 local request runs and implementation sessions, including cached sessions from enrolled machines. Each result has its run ID, native session ID, model, effort, state and dates, and failure (cause and sentence, as implementation_runs) when it did not end with its answer; partial reports bounded history.",
         effect: Effect::Read,
         schema: none,
     },
     Tool {
         name: "implementation_sessions",
         title: "Work item agent sessions",
-        description: "Persisted native coding-agent session IDs, machines, states and start/finish times for verified work item URLs, including the last reported sessions of offline machines.",
+        description: "Persisted native coding-agent session IDs, machines, states and start/finish times for verified work item URLs, including the last reported sessions of offline machines, and failure (cause and sentence, as implementation_runs) for a session that did not end with its answer.",
         effect: Effect::Read,
         schema: || {
             object(
@@ -1018,7 +1018,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "implementation_runs",
         title: "Implementation runs",
-        description: "Durable run states, results and child plans on the selected machine.",
+        description: "Durable run states, results and child plans on the selected machine. A run that did not end with its answer has failure: {cause, exit_code?, stderr?, text}, a fixed cause its machine chose (cli_missing, model_unavailable, cli_exited_at_start with the exit code and the kind of the CLI's first stderr line, stream_ended, output_limit, timeout, cancelled, permission_prompt, invalid_answer, agent_error, no_report, host_restarted, machine_offline, unknown) and a sentence with the next action; never the CLI's own text.",
         effect: Effect::Read,
         schema: || {
             object(
@@ -1608,7 +1608,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "workflow_run_status",
         title: "A workflow run",
-        description: "The whole record of one workflow run: the workflow's definition and blocks as they were when the run got it, the item and its verified link, the state and the stage, the stage timeline (stage, started_at, finished_at, outcome), the planning run and each child's coding run (IDs and machine; implementation_runs shows them), the creation ledger entry (implementation_creation), the children with their links, repository, branch and pull requests (links and status), the block outcomes (each acting block's outcome at each occurrence of its stage: sent, refused or uncertain for a notification; succeeded, failed, timed_out, not_started or uncertain for a launcher, with the reason, exit code and duration, never a launcher's output), the director's classification and what the user must look at (attention) or what went wrong (error).",
+        description: "The whole record of one workflow run: the workflow's definition and blocks as they were when the run got it, the item and its verified link, the state and the stage, the stage timeline (stage, started_at, finished_at, outcome), the planning run and each child's coding run (IDs and machine, and failure: the cause its machine reported when it did not end with its answer; implementation_runs shows them), the creation ledger entry (implementation_creation), the children with their links, repository, branch and pull requests (links and status), the block outcomes (each acting block's outcome at each occurrence of its stage: sent, refused or uncertain for a notification; succeeded, failed, timed_out, not_started or uncertain for a launcher, with the reason, exit code and duration, never a launcher's output), the director's classification (with failure when its session gave no answer) and what the user must look at (attention, naming the cause) or what went wrong (error).",
         effect: Effect::Read,
         schema: || object(json!({"run": string("The workflow run's ID.")}), &["run"]),
     },

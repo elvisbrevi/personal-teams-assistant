@@ -13,7 +13,7 @@ import { busy, done, notify } from './notices.js';
 import { selectTab, showTab } from './nav.js';
 import { chooseFromList } from './directory-sheet.js';
 import { link, markdown } from './markdown.js';
-import { allowNames, runStateLabel } from './run-states.js';
+import { allowNames, failureText, runStateLabel } from './run-states.js';
 import { openAgentSession, sessionLifeBadge } from './sessions.js';
 import { planChildrenReview } from './implementation.js';
 import { STAGE_NAMES } from './workflow-blocks.js';
@@ -261,6 +261,9 @@ function renderRunDetail(run, sessions) {
   if (run.attention) notes.push(el('div', { class: `callout ${WAITING.includes(run.state) ? 'warn' : 'info'}`, id: 'run-attention' }, el('p', { textContent: tx(run.attention) })));
   if (run.error) notes.push(el('div', { class: 'callout error', role: 'alert' }, el('p', { textContent: tx(run.error) })));
   if (run.classification?.reason) notes.push(el('p', { class: 'hint', id: 'run-classification', textContent: t('The director said: {reason}', { reason: run.classification.reason }) }));
+  // Why the session it waits on did not end with its answer, from the host's fixed vocabulary.
+  const stopped = WAITING.includes(run.state) ? (run.classification?.failure ?? run.planning?.failure ?? (run.children ?? []).map(c => c.coding?.failure).find(Boolean)) : null;
+  if (stopped) notes.push(el('div', { class: 'callout warn', id: 'run-failure' }, el('p', {}, el('strong', { textContent: t('Why it stopped') }), ' ', failureText(stopped))));
   detail.replaceChildren(head, facts, ...notes, runActions(run, sessionButton), timeline(run), children(run, sessionButton, sessions), blocks(run), summaries(run));
   if (focusId) /** @type {HTMLElement | null} */ (document.getElementById(focusId))?.focus({ preventScroll: true });
 }
@@ -385,6 +388,7 @@ function children(run, sessionButton, sessions) {
       el('div', { class: 'resource-head' }, badge(tx(state), state === 'done' ? 'ok' : ['failed', 'permission_prompt', 'interrupted', 'needs_attention', 'missing'].includes(state) ? 'warn' : 'info'),
         link(`#${child.id} ${child.title}`, child.url), el('span', { class: 'grow' }), life, sessionButton(child.coding)),
       el('p', { class: 'resource-facts' }, el('small', { textContent: [child.repository?.name, child.branch ? t('Branch {name}', { name: child.branch }) : null, child.outcome ? tx(child.outcome) : null].filter(Boolean).join(' · ') })),
+      child.coding?.failure ? el('p', { class: 'hint run-child-failure', textContent: failureText(child.coding.failure) }) : null,
       prs.length ? el('ul', { class: 'run-pulls' }, ...prs.map(pr => el('li', {}, link(pr.title ? `!${pr.id} ${pr.title}` : pr.url, pr.url), ' ', badge(tx(pr.status), pr.status === 'completed' ? 'ok' : pr.status === 'abandoned' ? 'warn' : 'info')))) : null);
   });
   return el('details', { class: 'fold', open: true, id: 'run-children' }, el('summary', { textContent: tn(rows.length, 'Children (1)', 'Children ({n})') }),

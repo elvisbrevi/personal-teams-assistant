@@ -2769,7 +2769,29 @@ const UI_CATALOG = { es: {
   "Open run": "Abrir ejecución",
   "An earlier send of this summary to this chat is uncertain: it may have been posted. Check Teams first; it is left out unless you send it again.": "Un envío anterior de este resumen a este chat quedó incierto: puede que se haya publicado. Revisa Teams primero; queda fuera a menos que lo envíes de nuevo.",
   "Send again anyway": "Enviar de nuevo de todas formas",
-  "Left out: an earlier send may have been posted.": "Quedó fuera: un envío anterior puede haberse publicado."
+  "Left out: an earlier send may have been posted.": "Quedó fuera: un envío anterior puede haberse publicado.",
+  "The selected CLI is not installed on the machine. Install it there, sign in and start again.": "El CLI seleccionado no está instalado en la máquina. Instálalo allí, inicia sesión y vuelve a empezar.",
+  "The machine's CLI does not offer the selected model or effort. Choose one it offers and start again.": "El CLI de la máquina no ofrece el modelo o el esfuerzo seleccionado. Elige uno que ofrezca y vuelve a empezar.",
+  "The agent's final report was too large to read. Read the session for its report.": "El informe final del agente era demasiado grande para leerlo. Lee la sesión para ver su informe.",
+  "The session reached its time limit and was stopped. Read the session for what it left unfinished.": "La sesión alcanzó su límite de tiempo y se detuvo. Lee la sesión para ver qué dejó sin terminar.",
+  "The run was cancelled.": "La ejecución se canceló.",
+  "The agent stopped on a permission prompt nobody could answer. Read the recorded prompt, remove its cause and start again.": "El agente se detuvo en una solicitud de permiso que nadie podía responder. Lee la solicitud registrada, elimina su causa y vuelve a empezar.",
+  "The agent's answer was not the JSON it was asked for. Try again, or choose another model.": "La respuesta del agente no fue el JSON que se le pidió. Inténtalo de nuevo o elige otro modelo.",
+  "The CLI reported an error for the agent's turn (for example a model, quota or service error). Read the session, then start again.": "El CLI informó un error en el turno del agente (por ejemplo, de modelo, de cuota o del servicio). Lee la sesión y vuelve a empezar.",
+  "The agent ended without a final report. Read the session for what it did.": "El agente terminó sin un informe final. Lee la sesión para ver qué hizo.",
+  "The application on the machine restarted while the session ran. Start the run again.": "La aplicación de la máquina se reinició mientras la sesión se ejecutaba. Vuelve a iniciar la ejecución.",
+  "The machine did not answer. Check that it is online and up to date, then try again.": "La máquina no respondió. Comprueba que esté en línea y actualizada, y vuelve a intentarlo.",
+  "The machine did not say why (its version may predate causes). Update it and read the run's record and session there.": "La máquina no dijo por qué (puede que su versión sea anterior a las causas). Actualízala y lee allí el registro y la sesión de la ejecución.",
+  "It reported a missing system variable: update the application on that machine and start again.": "Informó que falta una variable del sistema: actualiza la aplicación en esa máquina y vuelve a empezar.",
+  "It reported that it is not signed in: sign in to the CLI on that machine and start again.": "Informó que no tiene la sesión iniciada: inicia sesión en el CLI de esa máquina y vuelve a empezar.",
+  "It reported an unknown model: choose a model it offers and start again.": "Informó un modelo desconocido: elige un modelo que ofrezca y vuelve a empezar.",
+  "It rejected an option it was given: update the CLI on that machine and start again.": "Rechazó una opción que se le dio: actualiza el CLI en esa máquina y vuelve a empezar.",
+  "Run the CLI in a terminal on that machine to see why, then start again.": "Ejecuta el CLI en una terminal de esa máquina para ver por qué y vuelve a empezar.",
+  "The CLI exited as soon as it started with exit code {code}.": "El CLI terminó apenas se inició, con el código de salida {code}.",
+  "The CLI exited as soon as it started.": "El CLI terminó apenas se inició.",
+  "The CLI stopped with exit code {code} before its session finished. Read the session for what it did, then start again.": "El CLI se detuvo con el código de salida {code} antes de que terminara su sesión. Lee la sesión para ver qué hizo y vuelve a empezar.",
+  "The CLI stopped before its session finished. Read the session for what it did, then start again.": "El CLI se detuvo antes de que terminara su sesión. Lee la sesión para ver qué hizo y vuelve a empezar.",
+  "Why it stopped": "Por qué se detuvo"
 } };
 
 /** Host texts with a variable part (older runs and entries were stored in English). */

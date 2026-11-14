@@ -148,6 +148,29 @@ impl Drop for Session {
     }
 }
 impl Session {
+    /// Why the CLI's process stopped before its session ended: at once when the session had
+    /// reported nothing (`seen`), with the kind of its first stderr line, or mid-stream. Its
+    /// exit code and stderr are read within a short bound; the stderr text is not kept.
+    async fn stopped(&mut self, seen: bool) -> Failure {
+        let code = tokio::time::timeout(Duration::from_secs(2), self.child.wait())
+            .await
+            .ok()
+            .and_then(|status| status.ok())
+            .and_then(|status| status.code());
+        if seen {
+            return Failure {
+                exit_code: code,
+                ..Failure::of(Cause::StreamEnded)
+            };
+        }
+        let stderr = tokio::time::timeout(Duration::from_secs(2), &mut self.stderr)
+            .await
+            .ok()
+            .and_then(|read| read.ok())
+            .and_then(|read| read.ok())
+            .unwrap_or_default();
+        Failure::exited_at_start(code, &stderr)
+    }
     async fn send(&mut self, value: Value) -> Result<()> {
         let mut bytes = serde_json::to_vec(&value)?;
         bytes.push(b'\n');
@@ -326,7 +349,9 @@ async fn spawn(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    let mut child = command.spawn()?;
+    let mut child = command
+        .spawn()
+        .map_err(|_| Failed::with(Cause::CliMissing, "Coding process did not start."))?;
     Ok(Session {
         _tree: ProcessTree(
             child
@@ -483,9 +508,14 @@ async fn follow_session(
     // process tree ends.
     let mut offline = Disconnect((access.status == "connected").then(|| remote.clone()));
     session.autonomous = !planning;
-    session.send(json!({"type":"user","message":{"role":"user","content":prompt},"parent_tool_use_id":null,"session_id":id})).await?;
+    if session.send(json!({"type":"user","message":{"role":"user","content":prompt},"parent_tool_use_id":null,"session_id":id})).await.is_err() {
+        // Its input closed: the process has already ended.
+        return Err(Failed(session.stopped(false).await).into());
+    }
     let mut events = Events::default();
     let mut activity = Activity::default();
+    // The stream ended while the session still worked (`Failed` with the cause), or an
+    // observer refused the session.
     let followed = tokio::time::timeout(limit, async {
         while !activity.over() {
             let next = if activity.settling() {
@@ -500,9 +530,9 @@ async fn follow_session(
                 Ok(event) => event,
                 // The process exited after its turn: the session is over.
                 Err(_) if activity.ended() => break,
-                Err(error) => return Err(error),
+                Err(_) => return Err(Failed(session.stopped(events.seen).await).into()),
             };
-            events.event("claude", &event, observer, id)?;
+            events.read("claude", &event, session.lines.dropped(), observer, id)?;
             activity.event(&event);
         }
         Ok::<_, anyhow::Error>(())
@@ -520,10 +550,11 @@ async fn follow_session(
             keep_prompt(&mut prompts, &prompt);
         }
         let text = noted(text, session.skipped, planning);
-        return Outcome::redacted(false, &text, &prompts);
+        return Ok(Outcome::redacted(false, &text, &prompts)?.because(Failure::of(Cause::Timeout)));
     };
     followed?;
     let ok = !events.failed && !events.text.trim().is_empty();
+    let failure = events.failure();
     // After the delegated session the retained connection belongs to the person's mobile app.
     session.autonomous = false;
     for prompt in std::mem::take(&mut session.prompts) {
@@ -538,7 +569,7 @@ async fn follow_session(
     } else {
         let _ = session.child.kill().await;
     }
-    Outcome::redacted(ok, &text, &events.prompts)
+    Ok(Outcome::redacted(ok, &text, &events.prompts)?.because(failure))
 }
 
 pub(crate) async fn reconnect(
@@ -952,6 +983,14 @@ printf '{{"type":"system","subtype":"init","session_id":"%s"}}\n' "$session"
         root: &std::path::Path,
         limits: (Duration, Duration),
     ) -> Outcome {
+        try_session(binary, root, limits).await.unwrap()
+    }
+    #[cfg(unix)]
+    async fn try_session(
+        binary: &std::path::Path,
+        root: &std::path::Path,
+        limits: (Duration, Duration),
+    ) -> Result<Outcome> {
         let args = arguments("claude", "synthetic-model", "low", &[root.into()], false).unwrap();
         follow_session(
             binary,
@@ -965,7 +1004,94 @@ printf '{{"type":"system","subtype":"init","session_id":"%s"}}\n' "$session"
             limits,
         )
         .await
-        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_session_that_stops_early_records_why_and_never_what_its_cli_wrote() {
+        use super::super::failure::Stderr;
+        use super::super::{Cause, Failure, of_error};
+        let limits = (Duration::from_secs(20), Duration::from_secs(5));
+        // A CLI that exits with code 1 before emitting anything, saying on stderr that a
+        // system variable is missing.
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("claude-fixture");
+        crate::llm::agent::install_fake_cli(
+            &binary,
+            "#!/bin/sh\necho 'Error: the SystemRoot environment variable is not set (C:\\Users\\someone, token sk-synthetic)' >&2\nexit 1\n",
+        );
+        let error = try_session(&binary, root.path(), limits).await.unwrap_err();
+        assert_eq!(
+            of_error(&error, Cause::Unknown),
+            Failure {
+                cause: Cause::CliExitedAtStart,
+                exit_code: Some(1),
+                stderr: Some(Stderr::MissingVariable),
+            }
+        );
+        let text = format!("{error:#}");
+        assert!(text.contains("exit code 1"), "{text}");
+        for leaked in ["someone", "sk-synthetic", "SystemRoot environment"] {
+            assert!(!text.contains(leaked), "{text}");
+        }
+        // A CLI that is not there.
+        let error = try_session(&root.path().join("missing"), root.path(), limits)
+            .await
+            .unwrap_err();
+        assert_eq!(of_error(&error, Cause::Unknown).cause, Cause::CliMissing);
+        // A stream that ends while the session still works.
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_session(root.path(), "exit 3");
+        let error = try_session(&binary, root.path(), limits).await.unwrap_err();
+        assert_eq!(
+            of_error(&error, Cause::Unknown),
+            Failure {
+                cause: Cause::StreamEnded,
+                exit_code: Some(3),
+                stderr: None,
+            }
+        );
+        // A turn the CLI reports as an error, one without a report, and a report too large to
+        // read.
+        for (body, cause) in [
+            (
+                r#"printf '%s\n' '{"type":"result","is_error":true,"result":"Synthetic API error."}'"#,
+                Cause::AgentError,
+            ),
+            (
+                r#"printf '%s\n' '{"type":"result","is_error":false,"result":""}'"#,
+                Cause::NoReport,
+            ),
+            (
+                r#"printf '{"type":"result","is_error":false,"result":"%s"}\n' "$(head -c 300000 /dev/zero | tr '\0' R)""#,
+                Cause::OutputLimit,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let binary = fake_session(root.path(), body);
+            let outcome = run_session(&binary, root.path(), limits).await;
+            assert!(!outcome.ok, "{body}");
+            assert_eq!(outcome.failure, Some(Failure::of(cause)), "{body}");
+        }
+        // A session at its time limit.
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_session(root.path(), "while :; do sleep 1; done");
+        let outcome = run_session(
+            &binary,
+            root.path(),
+            (Duration::from_millis(500), Duration::from_secs(5)),
+        )
+        .await;
+        assert_eq!(outcome.failure, Some(Failure::of(Cause::Timeout)));
+        // A session that ends with its answer has no failure.
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_session(
+            root.path(),
+            r#"printf '%s\n' '{"type":"result","is_error":false,"result":"Done."}'"#,
+        );
+        let outcome = run_session(&binary, root.path(), limits).await;
+        assert!(outcome.ok);
+        assert_eq!(outcome.failure, None);
     }
 
     #[cfg(unix)]

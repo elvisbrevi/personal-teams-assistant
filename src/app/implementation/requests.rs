@@ -133,6 +133,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
             let mut runs = state.db.history()?;
             let registry = state.registry.lock().await;
             for run in &mut runs {
+                with_failure(run);
                 mark_session(run, &registry.id).await;
                 run["online"] = json!(
                     run["machine"] == registry.id
@@ -274,7 +275,12 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
             super::remote_observer(host, &request.id),
         )
         .await?;
-        validate_child(&draft)?;
+        validate_child(&draft).map_err(|error| {
+            crate::llm::implementation::Failed::or(
+                error,
+                crate::llm::implementation::Cause::InvalidAnswer,
+            )
+        })?;
         authority::require_execution(&host.state)?;
         // Recheck catalog membership after generation: a model cannot authorize a destination.
         let available = targets(host, provider, request.target["source"].as_str()).await?;
@@ -333,8 +339,26 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
         Ok::<_, anyhow::Error>(())
     }
     .await;
-    if result.is_err() && authority::invocation(&host.state).is_ok_and(|i| i.scope.owner) {
+    if let Err(error) = &result
+        && authority::invocation(&host.state).is_ok_and(|i| i.scope.owner)
+    {
+        // Why the session did not give its draft, when its error says (`Failed`); a failure
+        // after the draft (the destination, the provider's write) is not the session's.
+        let failure = error
+            .chain()
+            .any(|e| e.is::<crate::llm::implementation::Failed>())
+            .then(|| {
+                crate::llm::implementation::of_error(
+                    error,
+                    crate::llm::implementation::Cause::Unknown,
+                )
+            });
         let _ = LocalImplementation::new(db).finish_request(&request.id, &mut |record| {
+            if let Some(failure) = failure
+                && record["state"] != "sending"
+            {
+                record["failure"] = json!(failure);
+            }
             record["state"] = json!(if record["state"] == "sending" { "uncertain" } else { "failed" });
             record["output"] = json!("Request creation did not complete. Check the agent login and destination access. Inspect the provider before starting another request.");
             record["finished_at"] = json!(chrono::Utc::now().to_rfc3339()); Ok(())

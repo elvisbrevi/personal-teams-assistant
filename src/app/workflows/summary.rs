@@ -332,6 +332,23 @@ fn failed(text: &str) -> String {
     format!("[not_ready] {}", redactor.redact(text))
 }
 
+/// A summary that failed says why on its run (`error`, a fixed text with the cause's
+/// sentence), so `workflow_run_status` shows it.
+async fn note_failure(host: &Arc<Host>, id: &str, text: &str) {
+    let state = &host.state;
+    let lock = state.workflows.lock(id);
+    let _guard = lock.lock().await;
+    if let Ok(mut run) = found(state, id) {
+        let redactor =
+            security::Redactor::new(&[], Vec::new()).expect("built-in redaction patterns");
+        run.error = Some(format!(
+            "The progress summary failed: {}",
+            redactor.redact(text)
+        ));
+        let _ = state.workflows.db.save(&run);
+    }
+}
+
 /// `workflow_summary`: ask the director for a progress summary of the run and store it.
 async fn summarize(host: &Arc<Host>, args: SummaryArgs) -> Result<Value, String> {
     let state = &host.state;
@@ -381,8 +398,14 @@ async fn summarize(host: &Arc<Host>, args: SummaryArgs) -> Result<Value, String>
             item: &item,
         },
     ))
-    .await
-    .map_err(|error| failed(&error.to_string()))?;
+    .await;
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(error) => {
+            note_failure(host, &run.id, &error.to_string()).await;
+            return Err(failed(&error.to_string()));
+        }
+    };
     let session = &answer.run;
     let _ = implementation::director::annotate(host, session, "workflow_run", json!(run.id));
     let problem = match (
@@ -397,7 +420,18 @@ async fn summarize(host: &Arc<Host>, args: SummaryArgs) -> Result<Value, String>
     if let Some(problem) = problem {
         let _ = implementation::director::annotate(host, session, "state", json!("failed"));
         let _ = implementation::director::annotate(host, session, "output", json!(problem));
-        return Err(failed(&format!("{problem} No summary was stored.")));
+        // Why, from the fixed vocabulary: the session's own cause, or an answer that is not
+        // the summary asked for.
+        let failure = answer
+            .direction
+            .failure
+            .unwrap_or(crate::llm::implementation::Failure::of(
+                crate::llm::implementation::Cause::InvalidAnswer,
+            ));
+        let _ = implementation::director::annotate(host, session, "failure", json!(failure));
+        let text = format!("{problem} {} No summary was stored.", failure.sentence());
+        note_failure(host, &run.id, &text).await;
+        return Err(failed(&text));
     }
     let text = compose(
         written(answer.direction.answer.as_ref()).unwrap_or_default(),

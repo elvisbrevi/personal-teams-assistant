@@ -8,6 +8,7 @@ import { busy, fail, notify } from './notices.js';
 import { copy } from './markdown.js';
 import { loadAgentHistory } from './todo-request.js';
 import { providerNames } from './home.js';
+import { failureText } from './run-states.js';
 
 // ---------------------------------------------------------------- implementation
 function sessionDestination(session, mobile, native = false) {
@@ -121,6 +122,7 @@ async function loadWorkItemSessions() {
       return el('article', { class: 'implementation-run', 'data-run-id': session.id }, el('strong', { textContent: `${providerNames[session.provider] || session.provider} · ${session.model}` }),
         badge(session.online === false ? t('Machine offline. Last reported state: {state}', { state: tx(session.state) }) : tx(session.state), session.state === 'done' ? 'ok' : session.state === 'permission_prompt' ? 'warn' : 'info'), sessionLifeBadge(session),
         el('code', { textContent: session.session_id || t('The agent has not reported its session ID yet.') }),
+        session.failure ? el('p', { class: 'hint run-failure', textContent: failureText(session.failure) }) : null,
         el('dl', { class: 'todo-fields' }, ...[[t('Started at'), session.started_at], [t('Finished at'), session.finished_at]].map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value ? new Date(value).toLocaleString(uiLocale()) : t('Not recorded') })))), open);
     }));
   }

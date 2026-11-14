@@ -172,6 +172,10 @@ pub(in crate::app) struct Implementation {
     /// Its state as the engine last read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// Why it did not end with its answer, as its machine reported it (`unknown` from one that
+    /// predates causes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<crate::llm::implementation::Failure>,
 }
 
 /// A child the run codes (for a task-category item, the item itself).
