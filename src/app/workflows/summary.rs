@@ -396,6 +396,7 @@ async fn summarize(host: &Arc<Host>, args: SummaryArgs) -> Result<Value, String>
             instructions: &instructions,
             input: json_input,
             item: &item,
+            seconds: None,
         },
     ))
     .await;

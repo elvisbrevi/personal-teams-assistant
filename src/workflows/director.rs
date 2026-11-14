@@ -34,6 +34,19 @@ pub const MAX_READY_PROJECTS: usize = 50;
 pub const MAX_READY_STATES: usize = 20;
 /// The director's reason is one line of at most this many characters.
 pub const MAX_REASON: usize = 300;
+/// The supervisor's bounds: automatic looks in 24 hours, minutes between two looks of one
+/// run, hours a run waits before it is looked at, minutes a machine is unseen before the runs
+/// it affects are, and the seconds one look's session may take.
+pub const DEFAULT_LOOKS_PER_DAY: u32 = 24;
+pub const LOOKS_PER_DAY: std::ops::RangeInclusive<u32> = 1..=100;
+pub const DEFAULT_MIN_INTERVAL_MINUTES: u32 = 30;
+pub const MIN_INTERVAL_MINUTES: std::ops::RangeInclusive<u32> = 10..=1440;
+pub const DEFAULT_WAIT_HOURS: u32 = 3;
+pub const WAIT_HOURS: std::ops::RangeInclusive<u32> = 1..=48;
+pub const DEFAULT_OFFLINE_MINUTES: u32 = 15;
+pub const OFFLINE_MINUTES: std::ops::RangeInclusive<u32> = 5..=240;
+pub const DEFAULT_SESSION_SECONDS: u32 = 180;
+pub const SESSION_SECONDS: std::ops::RangeInclusive<u32> = 60..=600;
 
 /// `[workflow_settings]`: what the watcher, the run engine and the director read.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -54,6 +67,9 @@ pub struct Settings {
     /// The director of one project, before its workflows' agent and the account's director.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub project_directors: Vec<ProjectDirector>,
+    /// The workflow supervisor: off, without an agent, until the user turns it on.
+    #[serde(skip_serializing_if = "Supervisor::is_default")]
+    pub supervisor: Supervisor,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -64,12 +80,87 @@ impl Default for Settings {
             director: None,
             ready_states: Vec::new(),
             project_directors: Vec::new(),
+            supervisor: Supervisor::default(),
         }
     }
 }
 impl Settings {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+}
+
+/// The workflow supervisor: on or off, the installed CLI, model and effort on one machine of
+/// the account (all four, or none), and the bounds on how often it looks. Off by default; a
+/// map without it, and an update, leave it off.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Supervisor {
+    pub enabled: bool,
+    /// The machine's ID (the coordinator's own ID for the coordinator).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub machine: String,
+    /// `codex`, `claude` or `opencode`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub provider: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub effort: String,
+    pub looks_per_day: u32,
+    pub min_interval_minutes: u32,
+    pub wait_hours: u32,
+    pub offline_minutes: u32,
+    pub session_seconds: u32,
+}
+impl Default for Supervisor {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            machine: String::new(),
+            provider: String::new(),
+            model: String::new(),
+            effort: String::new(),
+            looks_per_day: DEFAULT_LOOKS_PER_DAY,
+            min_interval_minutes: DEFAULT_MIN_INTERVAL_MINUTES,
+            wait_hours: DEFAULT_WAIT_HOURS,
+            offline_minutes: DEFAULT_OFFLINE_MINUTES,
+            session_seconds: DEFAULT_SESSION_SECONDS,
+        }
+    }
+}
+impl Supervisor {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+    /// Its agent, once all four fields are set.
+    pub fn agent(&self) -> Option<Director> {
+        [&self.machine, &self.provider, &self.model, &self.effort]
+            .iter()
+            .all(|f| !f.is_empty())
+            .then(|| Director {
+                machine: self.machine.clone(),
+                provider: self.provider.clone(),
+                model: self.model.clone(),
+                effort: self.effort.clone(),
+            })
+    }
+    /// The agent of a supervisor that is on.
+    pub fn active(&self) -> Option<Director> {
+        self.agent().filter(|_| self.enabled)
+    }
+    /// The agent fields missing, by name.
+    pub fn missing(&self) -> Vec<&'static str> {
+        [
+            ("machine", &self.machine),
+            ("provider", &self.provider),
+            ("model", &self.model),
+            ("effort", &self.effort),
+        ]
+        .into_iter()
+        .filter(|(_, v)| v.is_empty())
+        .map(|(n, _)| n)
+        .collect()
     }
 }
 
@@ -277,7 +368,49 @@ pub fn validate(settings: &Settings) -> Result<()> {
         );
         validate_director(&own.director, &format!("The director of {}", own.project))?;
     }
-    Ok(())
+    validate_supervisor(&settings.supervisor)
+}
+
+/// The supervisor's bounds and agent: all four agent fields or none, and all four to be on.
+fn validate_supervisor(supervisor: &Supervisor) -> Result<()> {
+    let within = |name: &str, value: u32, range: std::ops::RangeInclusive<u32>, unit: &str| {
+        ensure!(
+            range.contains(&value),
+            "supervisor.{name} is between {} and {} {unit}.",
+            range.start(),
+            range.end()
+        );
+        Ok(())
+    };
+    within("looks_per_day", supervisor.looks_per_day, LOOKS_PER_DAY, "looks")?;
+    within(
+        "min_interval_minutes",
+        supervisor.min_interval_minutes,
+        MIN_INTERVAL_MINUTES,
+        "minutes",
+    )?;
+    within("wait_hours", supervisor.wait_hours, WAIT_HOURS, "hours")?;
+    within(
+        "offline_minutes",
+        supervisor.offline_minutes,
+        OFFLINE_MINUTES,
+        "minutes",
+    )?;
+    within(
+        "session_seconds",
+        supervisor.session_seconds,
+        SESSION_SECONDS,
+        "seconds",
+    )?;
+    let missing = supervisor.missing();
+    match supervisor.agent() {
+        Some(agent) => validate_director(&agent, "The workflow supervisor"),
+        None if missing.len() == 4 && !supervisor.enabled => Ok(()),
+        None => anyhow::bail!(
+            "The workflow supervisor needs its {}.",
+            missing.join(", ")
+        ),
+    }
 }
 
 /// A director's fields: its machine's ID and an agent of a known provider.
@@ -460,6 +593,86 @@ mod tests {
     use serde_json::json;
 
     const MACHINE: &str = "5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d";
+
+    #[test]
+    fn the_supervisor_is_off_by_default_left_out_and_needs_its_whole_agent() {
+        let settings = Settings::default();
+        assert!(!settings.supervisor.enabled);
+        assert!(settings.supervisor.active().is_none());
+        assert_eq!(settings.supervisor.looks_per_day, 24);
+        assert_eq!(settings.supervisor.session_seconds, 180);
+        // A map without it loads off; one with it written only once something changed.
+        let loaded: Settings = toml::from_str("concurrency = 2").unwrap();
+        assert_eq!(loaded.supervisor, Supervisor::default());
+        assert!(!toml::to_string(&settings).unwrap().contains("supervisor"));
+        let agent = Supervisor {
+            machine: MACHINE.into(),
+            provider: "claude".into(),
+            model: "sonnet".into(),
+            effort: "high".into(),
+            ..Default::default()
+        };
+        let with = Settings {
+            supervisor: agent.clone(),
+            ..Default::default()
+        };
+        assert!(validate(&with).is_ok());
+        assert!(with.supervisor.active().is_none(), "chosen but off");
+        let on = Settings {
+            supervisor: Supervisor {
+                enabled: true,
+                ..agent.clone()
+            },
+            ..Default::default()
+        };
+        assert!(validate(&on).is_ok());
+        assert_eq!(on.supervisor.active().unwrap().provider, "claude");
+        let written = toml::to_string(&on).unwrap();
+        let back: Settings = toml::from_str(&written).unwrap();
+        assert_eq!(back, on);
+        // On without an agent, or with part of one, is refused naming what is missing.
+        let bare = Settings {
+            supervisor: Supervisor {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let error = validate(&bare).unwrap_err().to_string();
+        assert!(error.contains("machine, provider, model, effort"), "{error}");
+        let partial = Settings {
+            supervisor: Supervisor {
+                model: String::new(),
+                ..agent.clone()
+            },
+            ..Default::default()
+        };
+        assert!(validate(&partial).unwrap_err().to_string().contains("model"));
+        for (field, value) in [
+            ("looks_per_day", 0),
+            ("looks_per_day", 101),
+            ("min_interval_minutes", 9),
+            ("wait_hours", 49),
+            ("offline_minutes", 4),
+            ("session_seconds", 601),
+        ] {
+            let mut changed = agent.clone();
+            match field {
+                "looks_per_day" => changed.looks_per_day = value,
+                "min_interval_minutes" => changed.min_interval_minutes = value,
+                "wait_hours" => changed.wait_hours = value,
+                "offline_minutes" => changed.offline_minutes = value,
+                _ => changed.session_seconds = value,
+            }
+            let error = validate(&Settings {
+                supervisor: changed,
+                ..Default::default()
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(field), "{error}");
+        }
+    }
 
     #[test]
     fn defaults_are_left_out_and_bounds_are_refused() {

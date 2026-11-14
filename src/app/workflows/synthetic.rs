@@ -14,6 +14,8 @@ pub(in crate::app) struct Catalog {
     items: Mutex<BTreeMap<u64, Detail>>,
     assigned: Mutex<BTreeSet<u64>>,
     pulls: Mutex<BTreeMap<(String, String), Vec<PullRequest>>>,
+    /// The branches that exist, by repository (lowercased) and name.
+    branches: Mutex<BTreeSet<(String, String)>>,
     /// Every request, as `GET what`.
     pub requests: Mutex<Vec<String>>,
     /// The items whose reads fail, as during an outage.
@@ -92,6 +94,38 @@ impl Catalog {
             .lock()
             .unwrap()
             .insert((repository.to_lowercase(), branch.to_owned()), pulls);
+    }
+    /// A branch that exists in a repository, as the next read returns it.
+    #[cfg(unix)]
+    pub(in crate::app) fn set_branch(&self, repository: &str, branch: &str) {
+        self.branches
+            .lock()
+            .unwrap()
+            .insert((repository.to_lowercase(), branch.to_owned()));
+    }
+    pub(in crate::app) fn branch_exists(&self, repository: &str, branch: &str) -> bool {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(format!("GET refs {repository} heads/{branch}"));
+        self.branches
+            .lock()
+            .unwrap()
+            .contains(&(repository.to_lowercase(), branch.to_owned()))
+    }
+    /// Add a comment to an item, as its next read returns it.
+    #[cfg(unix)]
+    pub(in crate::app) fn comment(&self, id: u64, author: &str, text: &str) {
+        if let Some(detail) = self.items.lock().unwrap().get_mut(&id) {
+            detail.comments.push(crate::tools::todo::Comment {
+                author: author.into(),
+                created_at: Some("2026-11-10T10:00:00Z".into()),
+                modified_at: None,
+                text: text.into(),
+                format: "markdown".into(),
+                content: None,
+            });
+        }
     }
     pub(in crate::app) fn item(&self, id: u64) -> Result<Detail, String> {
         self.requests

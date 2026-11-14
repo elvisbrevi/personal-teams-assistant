@@ -853,6 +853,7 @@ pub(super) async fn classify_item(
             instructions: &instructions,
             input,
             item,
+            seconds: None,
         },
     ))
     .await

@@ -88,6 +88,10 @@ struct Machine {
     /// Whether its last poll said it summarizes its agent sessions (`agent_sessions_local`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     agent_sessions: bool,
+    /// Whether its last poll said it runs the workflow supervisor's looks (`workflow_direct`
+    /// with `task: "supervise"` and its own session bound).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    workflow_supervise: bool,
 }
 impl Machine {
     /// Trusted and seen in its last polls (a worker polls every two seconds).
@@ -586,6 +590,10 @@ pub(super) struct MachineFacts {
     pub inspect: bool,
     /// It runs the workflow director (`workflow_direct`).
     pub direct: bool,
+    /// It runs the workflow supervisor's looks (`workflow_supervise_support`).
+    pub supervise: bool,
+    /// When it was last seen (Unix seconds); now for this installation.
+    pub seen: i64,
 }
 /// The machine `id` of this account, or none when it is unknown, revoked or another account's.
 pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<MachineFacts>> {
@@ -600,6 +608,8 @@ pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<M
             roots: own_roots,
             inspect: true,
             direct: true,
+            supervise: true,
+            seen: now(),
         }));
     }
     Ok(data
@@ -613,6 +623,8 @@ pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<M
             roots: m.roots.clone(),
             inspect: m.checkout_inspect,
             direct: m.workflow_direct,
+            supervise: m.workflow_supervise,
+            seen: m.seen,
         }))
 }
 /// The one-shot calls a workflow save makes on its machine: its installed CLIs and a checkout.
@@ -2093,6 +2105,7 @@ mod tests {
                     instructions: "Choose.",
                     input: "{}".into(),
                     item: &item,
+                    seconds: None,
                 },
             )
             .await
