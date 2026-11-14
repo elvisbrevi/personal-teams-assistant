@@ -118,7 +118,7 @@ async function loadWorkflowRuns() {
     $('#run-rows').replaceChildren(...(runs.length ? runs.map(runRow) : [el('p', { class: 'hint', textContent: state || workflow ? t('No run matches these filters.') : t('No workflow run yet. Start one from a To-Do item\'s Implement, or let the watcher start them for items in a ready state.') })]));
     if (list.partial) $('#run-rows').append(el('p', { class: 'hint', textContent: t('Showing the most recent runs.') }));
     ensureWorkflowSettings();
-    renderAudit($('#runs-audit'), Boolean(workflowSettings?.settings?.supervisor?.enabled), { twice, when });
+    renderAudit($('#runs-audit'), Boolean(workflowSettings?.settings?.supervisor?.enabled), { when });
   } catch (error) {
     if (generation !== runsData.listGeneration) return;
     problem.hidden = false; problem.textContent = message(error);
