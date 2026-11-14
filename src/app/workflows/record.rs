@@ -327,9 +327,10 @@ pub(in crate::app) struct Run {
     pub children: Vec<Child>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub block_outcomes: Vec<BlockOutcome>,
-    /// Progress summaries the director wrote (`summary::Summary`: `id`, `text`, `created_at`,
+    /// Progress summaries the director wrote, and the supervisor's drafts posted through it (`by:
+    /// "supervisor"`) (`summary::Summary`: `id`, `text`, `created_at`,
     /// `provider`, `model`, `session_id`), oldest first, at most `summary::MAX_SUMMARIES`.
-    /// A notification block's `{summary}` is rendered from the latest entry (the last).
+    /// A notification block's `{summary}` is rendered from the latest the director wrote.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub summaries: Vec<Value>,
     /// One record per send of a summary to a chat (`summary::Send`), oldest first.

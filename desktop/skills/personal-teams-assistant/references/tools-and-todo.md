@@ -731,7 +731,7 @@ by default and an update never turns it on.
   hours; nothing while a pause covers the run's project. A look that fails is never retried.
   `pta workflows supervise RUN` (MCP `workflow_supervise`, local, no confirmation; it runs a
   model on the supervisor's machine and uses its quota) asks for one now; it returns at once with
-  the look queued or running.
+  the look queued or running, and is refused within five minutes of that run's previous look.
 - **What a look holds:** `pta workflows supervision RUN` (MCP `workflow_supervision`; also
   `supervision` in `workflow_run_status`, and the latest in each `workflow_runs` entry) gives
   each look's `assessment` (`done`, `left`, `recommendation`), `checks` (each claim of the final
@@ -748,13 +748,15 @@ by default and an update never turns it on.
 - **Carry out a proposal:** `pta workflows act RUN LOOK ACTION [--note TEXT | --note-file PATH]
   [--chat ID] [--mention NAME…] --confirmed` (MCP `workflow_supervision_act`, needs
   confirmation: show the user the action and its exact draft first). `restart` restarts with the
-  drafted note, or the person's edited one (an unedited draft reaches the coding runs as the
-  supervisor's text); `resume`, `cancel` and `pause_project` run those operations;
+  drafted note when no `note` is given (it reaches the coding runs as the supervisor's text),
+  with the person's edited `note`, or without any note when `note` is empty; `resume`, `cancel` and `pause_project` run those operations;
   `post_summary` posts the drafted summary to the chat the person chose (`teams_chats`), once,
   never retried; `create_work_item` returns the draft for Create request
   (`implementation_request_start`, with its own confirmation and the type's work item guide).
-  Each runs once (`executed`, `refused` or `uncertain`); an action of a run that moved on since
-  the look is `expired`. `pta workflows dismiss RUN LOOK ACTION` (MCP
+  Each runs once, even when confirmed twice at once (`executed`, `refused` or `uncertain`; one
+  the operation refused before acting stays `proposed`; one a stopped host left `attempting`
+  becomes `uncertain`); an action of a run that moved on since the look is `expired`. The
+  confirmation of a post names its chat and every mention. `pta workflows dismiss RUN LOOK ACTION` (MCP
   `workflow_supervision_dismiss`) sets one aside.
 
 It never changes code, merges, deploys, writes to Azure DevOps or posts to Teams by itself.

@@ -568,6 +568,7 @@ pub(super) async fn update(
     }
     let map = state.settings.map().map_err(fail)?;
     let stored = map.workflow_settings.clone();
+    let stored_supervisor = stored.supervisor.clone();
     let (clearing, wanted): (Vec<ReadyChange>, Vec<ReadyChange>) = args
         .ready_states
         .iter()
@@ -716,6 +717,23 @@ pub(super) async fn update(
         && let Some(agent) = supervisor.agent()
     {
         warnings.extend(verify_agent(host, &agent, Role::Supervisor).await?);
+    }
+    // An older installation of the account refuses a map whose supervisor is not the default.
+    if let Some(supervisor) = &resolved.supervisor
+        && !supervisor.is_default()
+        && *supervisor != stored_supervisor
+    {
+        let older = implementation::machines_before_supervisor(host)
+            .await
+            .map_err(fail)?;
+        if !older.is_empty() {
+            warnings.push(format!(
+                "{} {} a version that predates the workflow supervisor: until updated, {} the account's configuration with these settings.",
+                older.join(", "),
+                if older.len() == 1 { "runs" } else { "run" },
+                if older.len() == 1 { "it refuses" } else { "they refuse" }
+            ));
+        }
     }
     let saved = change(host, |map| {
         apply(&mut map.workflow_settings, &args, &resolved);

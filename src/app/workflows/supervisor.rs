@@ -37,6 +37,8 @@ pub(in crate::app) const METHODS: [&str; 5] = [
     "workflow_run_requeue",
 ];
 
+/// A request for a look of a run waits this long after its previous look started.
+pub(in crate::app) const REQUEST_SECONDS: i64 = 300;
 /// At most this many looks are kept on a run; the oldest is dropped.
 pub(in crate::app) const MAX_LOOKS: usize = 20;
 /// How long the reads before a look's session may take, all of them side by side.
@@ -350,6 +352,10 @@ pub(in crate::app) struct Supervision {
     pub(in crate::app) looks: Looks,
     running: AtomicBool,
     suspects: std::sync::Mutex<HashSet<String>>,
+    /// The actions being carried out in this process (`run/look/action`).
+    acting: std::sync::Mutex<HashSet<String>>,
+    /// The actions left attempting by a host that stopped were swept once.
+    swept: AtomicBool,
 }
 impl Supervision {
     /// Open the looks; one left running by a host that stopped failed with it and is never
@@ -366,6 +372,8 @@ impl Supervision {
             looks,
             running: AtomicBool::new(false),
             suspects: std::sync::Mutex::new(HashSet::new()),
+            acting: std::sync::Mutex::new(HashSet::new()),
+            swept: AtomicBool::new(false),
         })
     }
     /// Whether a look's session runs now (the updater waits).
@@ -528,6 +536,16 @@ pub(in crate::app) async fn tick(host: &Arc<Host>, azure: &Azure, now: i64) -> R
     if !engine::may_run(state) {
         return Ok(());
     }
+    // Once after a start, even with the supervisor off: an action a stopped host left
+    // attempting becomes uncertain.
+    if !state
+        .workflows
+        .supervision
+        .swept
+        .swap(true, Ordering::SeqCst)
+    {
+        sweep(host, now)?;
+    }
     let settings = state.settings.map()?.workflow_settings.supervisor;
     let Some(agent) = settings.active() else {
         return Ok(());
@@ -640,7 +658,9 @@ async fn start_next_now(
     // Every pending event of that run joins this look.
     let keys: Vec<Row> = pending
         .iter()
-        .filter(|r| r.run == first.run && (r.requested == first.requested || !r.requested))
+        // A requested look covers the requests only, so it never spends the automatic budget;
+        // an automatic one covers the run's pending events.
+        .filter(|r| r.run == first.run && r.requested == first.requested)
         .cloned()
         .collect();
     let look = uuid::Uuid::new_v4().to_string();
@@ -705,10 +725,13 @@ pub(in crate::app) struct Read {
     pub implementations: Vec<Value>,
     pub reports: Vec<(String, String)>,
     pub sessions: Vec<Value>,
-    pub pulls: Vec<crate::ado::workflow::PullRequest>,
+    /// The pull requests read, each with the branch it was read for.
+    pub pulls: Vec<(String, crate::ado::workflow::PullRequest)>,
     pub branches: Vec<(crate::workflows::Repository, String, Option<bool>)>,
     pub machines: Vec<Value>,
     pub unread: Vec<String>,
+    /// The reads did not answer within their bound.
+    pub timed_out: bool,
 }
 
 /// Read everything a look needs, side by side, within `READ_SECONDS`; what fails or does not
@@ -763,7 +786,7 @@ async fn gather(host: &Arc<Host>, azure: &Azure, run: &Run) -> Read {
         for child in &run.children {
             for (repository, branch) in child.delivered() {
                 match azure.branch_pulls(state, run, &repository, &branch).await {
-                    Ok(pulls) => found.extend(pulls),
+                    Ok(pulls) => found.extend(pulls.into_iter().map(|p| (branch.clone(), p))),
                     Err(_) => failed = true,
                 }
                 let exists = azure
@@ -780,8 +803,19 @@ async fn gather(host: &Arc<Host>, azure: &Azure, run: &Run) -> Read {
     let Ok((item, children, implementations, pulls, sessions)) =
         tokio::time::timeout(std::time::Duration::from_secs(READ_SECONDS), all).await
     else {
-        read.unread
-            .push("everything: the reads did not answer in time".into());
+        // Nothing answered in time: every check that needs a read says it could not be read.
+        read.unread.extend(
+            [
+                "the work item",
+                "some child work items",
+                "the implementation runs",
+                "some pull requests",
+                "some branches",
+                "the session summaries",
+            ]
+            .map(String::from),
+        );
+        read.timed_out = true;
         return read;
     };
     match item {
@@ -939,8 +973,8 @@ pub(in crate::app) fn input(
         "item": detail.map(|d| json!({"id": d.item.id, "type": d.item.kind, "state": d.item.state, "project": d.item.project})),
         "children": read.children.iter().map(|(id, state)| json!({"id": id, "state": state})).collect::<Vec<_>>(),
         "implementation_runs": read.implementations,
-        "pull_requests": read.pulls.iter().take(50).map(|p| json!({
-            "id": p.id, "repository": p.repository, "status": p.status,
+        "pull_requests": read.pulls.iter().take(50).map(|(branch, p)| json!({
+            "id": p.id, "repository": p.repository, "branch": branch, "status": p.status,
             "created_at": p.created_at, "closed_at": p.closed_at,
         })).collect::<Vec<_>>(),
         "branches": read.branches.iter().map(|(r, b, e)| json!({"repository": r.name, "branch": b, "exists": e})).collect::<Vec<_>>(),
@@ -1035,7 +1069,7 @@ pub(in crate::app) fn input(
     }
 }
 
-/// The supervisor's answer, exactly the closed schema (eight properties, nothing else).
+/// The supervisor's answer, exactly the closed schema (seven properties, nothing else).
 fn shaped(answer: Option<&Value>) -> Option<&serde_json::Map<String, Value>> {
     let object = answer?.as_object()?;
     let keys = [
@@ -1095,7 +1129,7 @@ fn check(kind: &str, reference: &str, claim: String, from: &str, run: &Run, read
     let (outcome, reference) = match kind {
         "pull_request" => match pull_number(reference) {
             Some(number) => {
-                let fact = match read.pulls.iter().find(|p| p.id == number) {
+                let fact = match read.pulls.iter().map(|(_, p)| p).find(|p| p.id == number) {
                     Some(pull) if claims_merge(&claim) => result(
                         pull.status == "completed",
                         format!("Pull request !{number} is {}.", pull.status),
@@ -1130,9 +1164,11 @@ fn check(kind: &str, reference: &str, claim: String, from: &str, run: &Run, read
                         format!("Branch {name} exists in {}.", repository.name),
                     ),
                     Some((repository, _, Some(false))) => {
-                        // A merged branch may be deleted: a completed pull request from it counts.
-                        let merged = read.pulls.iter().any(|p| {
-                            p.status == "completed"
+                        // A merged branch may be deleted: a completed pull request read for that
+                        // very branch and repository counts, never another branch's.
+                        let merged = read.pulls.iter().any(|(branch, p)| {
+                            branch == name
+                                && p.status == "completed"
                                 && p.repository.eq_ignore_ascii_case(&repository.id)
                         }) && run
                             .children
@@ -1151,6 +1187,9 @@ fn check(kind: &str, reference: &str, claim: String, from: &str, run: &Run, read
                         )
                     }
                     Some((_, _, None)) => {
+                        result(false, format!("Branch {name} could not be read."))
+                    }
+                    None if read.unread.iter().any(|u| u.contains("branches")) => {
                         result(false, format!("Branch {name} could not be read."))
                     }
                     None => result(
@@ -1193,7 +1232,8 @@ fn check(kind: &str, reference: &str, claim: String, from: &str, run: &Run, read
             } else if let Some((id, state)) = states.first() {
                 (
                     result(false, format!("Work item #{id} is in state {state}.")),
-                    wanted.to_owned(),
+                    // What the model wrote, cleaned like any of its text.
+                    crate::workflows::director::one_line(&super::summary::clean(wanted, 100), 100),
                 )
             } else {
                 (
@@ -1207,6 +1247,11 @@ fn check(kind: &str, reference: &str, claim: String, from: &str, run: &Run, read
             String::new(),
         ),
     };
+    // A claim reaches the record cleaned, whether the model or a report wrote it.
+    let claim = crate::workflows::director::one_line(
+        &super::summary::clean(&claim, LINE_CHARS * 2),
+        LINE_CHARS,
+    );
     Check {
         claim,
         kind: if matches!(kind, "pull_request" | "branch" | "item_state") && !reference.is_empty() {
@@ -1374,7 +1419,10 @@ pub(in crate::app) fn judge(
             && !look
                 .actions
                 .iter()
-                .any(|a| a.action == action && a.work_item == work_item)
+                // Each action once; a work item once per draft.
+                .any(|a| {
+                    a.action == action && (action != "create_work_item" || a.work_item == work_item)
+                })
             && match action {
                 "pause_project" => matches!(sessions, "stop" | "finish"),
                 "create_work_item" => work_item.is_some(),
@@ -1678,6 +1726,21 @@ async fn supervise(host: &Arc<Host>, args: SuperviseArgs, azure: &Azure) -> Resu
         )));
     }
     let now = now();
+    if let Some(at) = state
+        .workflows
+        .supervision
+        .looks
+        .last_started(&run.id)
+        .map_err(fail)?
+        .filter(|at| now - at < REQUEST_SECONDS)
+    {
+        return Err(conflict(format!(
+            "The supervisor looked at workflow run {} {} seconds ago; ask again in {} seconds.",
+            run.id,
+            now - at,
+            REQUEST_SECONDS - (now - at)
+        )));
+    }
     let key = format!("{}:requested:{}", run.id, uuid::Uuid::new_v4());
     state
         .workflows
@@ -1737,24 +1800,58 @@ impl<'a> About<'a> {
     }
 }
 
+/// The note a restart uses, as the person gave it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in crate::app) enum NoteChoice<'a> {
+    /// No note given: the supervisor's draft, which the coding runs read as the supervisor's.
+    Draft,
+    /// The person's own note (an edited draft).
+    Edited(&'a str),
+    /// The person emptied the note: the run restarts without one.
+    Empty,
+}
+impl<'a> NoteChoice<'a> {
+    /// From the `note` argument: absent is the draft, blank is none, the draft unchanged is the
+    /// draft, anything else is the person's.
+    pub(in crate::app) fn of(note: Option<&'a str>, draft: &str) -> Self {
+        match note.map(str::trim) {
+            None => Self::Draft,
+            Some("") => Self::Empty,
+            Some(text) if text == draft.trim() => Self::Draft,
+            Some(text) => Self::Edited(text),
+        }
+    }
+}
+
 /// What a person confirms for an action, with its draft: the action, the run and the exact
-/// note or text it uses.
+/// note or text it uses, and for a post its chat and mentions.
 pub(in crate::app) fn describe_action(
     about: &About,
     look: &Look,
     action: &Action,
-    note: Option<&str>,
+    note: NoteChoice,
     chat: Option<&str>,
+    mentions: &[String],
 ) -> String {
     let run = about.run;
     match action.action.as_str() {
         "restart" => {
-            let note = note.unwrap_or(&look.handover);
-            format!(
-                "Restart workflow run {run} with this handover note ({} characters): its active implementation run is cancelled, every live session it started is stopped, and a new run of the same workflow starts for work item {} from its first stage. The note:\n\n{note}",
-                note.chars().count(),
+            let start = format!(
+                "Restart workflow run {run}: its active implementation run is cancelled, every live session it started is stopped, and a new run of the same workflow starts for work item {} from its first stage",
                 about.item
-            )
+            );
+            match note {
+                NoteChoice::Draft => format!(
+                    "{start}, with the supervisor's drafted handover note ({} characters), which its coding runs read as the supervisor's untrusted text. The note:\n\n{}",
+                    look.handover.chars().count(),
+                    look.handover
+                ),
+                NoteChoice::Edited(text) => format!(
+                    "{start}, with your handover note ({} characters). The note:\n\n{text}",
+                    text.chars().count()
+                ),
+                NoteChoice::Empty => format!("{start}, without a handover note."),
+            }
         }
         "resume" => format!(
             "Resume workflow run {run} from {}, accepting what stopped it.",
@@ -1773,8 +1870,13 @@ pub(in crate::app) fn describe_action(
             }
         ),
         "post_summary" => format!(
-            "Post the supervisor's summary of workflow run {run} to the Teams chat {}, as you: one message, never retried. The text posted is:\n\n{}",
+            "Post the supervisor's summary of workflow run {run} to the Teams chat {}, as you, mentioning {}: one message, never retried. The text posted is:\n\n{}",
             chat.unwrap_or("you choose"),
+            if mentions.is_empty() {
+                "nobody".to_owned()
+            } else {
+                mentions.join(", ")
+            },
             look.summary
         ),
         "create_work_item" => {
@@ -1794,29 +1896,144 @@ pub(in crate::app) fn describe_act(status: &Value, args: &Value) -> Option<Strin
         .iter()
         .find(|l| l["id"] == args["look"])
         .and_then(|l| serde_json::from_value(l.clone()).ok())?;
+    let wanted = args["action"].as_str().unwrap_or_default();
     let action = look
         .actions
         .iter()
-        .find(|a| {
-            a.id == args["action"].as_str().unwrap_or_default()
-                || a.action == args["action"].as_str().unwrap_or_default()
-        })?
+        .find(|a| a.id == wanted || a.action == wanted)?
         .clone();
-    let note = args["note"]
-        .as_str()
-        .map(str::trim)
-        .filter(|n| !n.is_empty());
+    let mentions: Vec<String> = args["mentions"]
+        .as_array()
+        .map(|m| {
+            m.iter()
+                .filter_map(|n| n.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
     Some(describe_action(
         &About::shown(run),
         &look,
         &action,
-        note,
+        NoteChoice::of(args["note"].as_str(), &look.handover),
         args["chat"].as_str(),
+        &mentions,
     ))
 }
 
+/// Fixed texts of what became of an action; an operation's own error goes to the caller only.
+const NOT_ACTED: &str = "The operation refused it before acting; it is still proposed.";
+const REFUSED: &str =
+    "The operation refused it after the run had changed; read the run before acting again.";
+const UNCERTAIN: &str = "Its result is unknown: check Teams (or the run) before doing it again.";
+const CUT: &str =
+    "The host stopped while it was carried out; check what it did before doing it again.";
+
+/// Move one action of a look from one of `from` to `to`, under the run's lock: the compare and
+/// the write are one step, so two confirmations at once never both carry it out. Refused, with
+/// the state it is in, when it is not in `from`.
+async fn transition(
+    host: &Arc<Host>,
+    id: &str,
+    look: &str,
+    action: &str,
+    from: &[&str],
+    to: &str,
+    outcome: Option<&str>,
+) -> Result<(), String> {
+    let state = &host.state;
+    let lock = state.workflows.lock(id);
+    let _guard = lock.lock().await;
+    let mut run = found(state, id)?;
+    let entry = run
+        .supervision
+        .iter_mut()
+        .find(|l| l.id == look)
+        .and_then(|l| l.actions.iter_mut().find(|a| a.id == action))
+        .ok_or_else(|| invalid(format!("Look {look} proposed no action {action}.")))?;
+    if !from.contains(&entry.state.as_str()) {
+        return Err(conflict(format!(
+            "Action {action} of look {look} is already {}.",
+            entry.state
+        )));
+    }
+    entry.state = to.into();
+    entry.by = (to != "proposed").then(|| "person".into());
+    entry.at = Some(now());
+    entry.outcome = outcome.map(str::to_owned);
+    state.workflows.db.save(&run).map_err(fail)
+}
+
+/// An action carried out now in this process: the sweep after a restart leaves it alone.
+struct Acting(Arc<Host>, String);
+impl Drop for Acting {
+    fn drop(&mut self) {
+        self.0
+            .state
+            .workflows
+            .supervision
+            .acting
+            .lock()
+            .unwrap()
+            .remove(&self.1);
+    }
+}
+
+/// After a start, an action left `attempting` by a host that stopped is `uncertain`: it may
+/// have happened, and it is never carried out again.
+pub(in crate::app) fn sweep(host: &Arc<Host>, now: i64) -> Result<()> {
+    let state = &host.state;
+    let acting = state.workflows.supervision.acting.lock().unwrap().clone();
+    for listed in state.workflows.db.list(&[], None, -1)? {
+        let stale = |r: &Run| {
+            r.supervision.iter().any(|l| {
+                l.actions.iter().any(|a| {
+                    a.state == "attempting"
+                        && !acting.contains(&format!("{}/{}/{}", r.id, l.id, a.id))
+                })
+            })
+        };
+        if !stale(&listed) {
+            continue;
+        }
+        let lock = state.workflows.lock(&listed.id);
+        let Ok(_guard) = lock.try_lock() else {
+            continue;
+        };
+        let Some(mut run) = state.workflows.db.get(&listed.id)? else {
+            continue;
+        };
+        let id = run.id.clone();
+        for look in &mut run.supervision {
+            for action in &mut look.actions {
+                if action.state == "attempting"
+                    && !acting.contains(&format!("{id}/{}/{}", look.id, action.id))
+                {
+                    action.state = "uncertain".into();
+                    action.at = Some(now);
+                    action.outcome = Some(CUT.into());
+                }
+            }
+        }
+        state.workflows.db.save(&run)?;
+    }
+    Ok(())
+}
+
+/// The sends recorded for a summary.
+fn sends_of(host: &Arc<Host>, id: &str, summary: &str) -> Vec<Value> {
+    found(&host.state, id)
+        .map(|r| {
+            r.summary_sends
+                .into_iter()
+                .filter(|s| s["summary"] == summary)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// `workflow_supervision_act`: run one proposed action through the operation that does it, as
-/// the person confirmed it.
+/// the person confirmed it. Nothing is written before the confirmation; the action moves from
+/// `proposed` to `attempting` in one step under the run's lock, so it runs once.
 async fn act(host: &Arc<Host>, args: ActArgs, azure: &Azure) -> Result<Value, String> {
     let state = &host.state;
     require_engine(state)?;
@@ -1852,13 +2069,14 @@ async fn act(host: &Arc<Host>, args: ActArgs, azure: &Azure) -> Result<Value, St
             action.id, look.id, action.state
         )));
     }
-    let note = match args.note.as_deref().map(str::trim) {
-        Some(note) if action.action == "restart" && !note.is_empty() => Some(note.to_owned()),
-        Some(_) if action.action != "restart" => {
-            return Err(invalid("Only a restart takes a note."));
-        }
-        _ => None,
-    };
+    // Everything that can be refused before acting is refused here, and leaves it proposed.
+    if args.note.is_some() && action.action != "restart" {
+        return Err(invalid("Only a restart takes a note."));
+    }
+    if let Some(note) = &args.note {
+        super::runs::handover_note(Some(note))?;
+    }
+    let note = NoteChoice::of(args.note.as_deref(), &look.handover);
     if action.action != "post_summary" && (args.chat.is_some() || !args.mentions.is_empty()) {
         return Err(invalid(
             "Only posting the summary takes a chat and mentions.",
@@ -1869,21 +2087,52 @@ async fn act(host: &Arc<Host>, args: ActArgs, azure: &Azure) -> Result<Value, St
             "Choose the chat to post the summary to (teams_chats).",
         ));
     }
+    if !args.confirmed {
+        return Err(invalid(format!(
+            "Confirm with the user, then act with confirmed: true. {}",
+            describe_action(
+                &About::of(&run),
+                &look,
+                &action,
+                note,
+                args.chat.as_deref(),
+                &args.mentions
+            )
+        )));
+    }
     let pauses = state.workflows.db.pauses().map_err(fail)?;
     if marker(&run, &pauses) != look.marker {
-        settle(host, &run.id, &look.id, &action.id, "expired", None).await?;
+        let _ = transition(
+            host,
+            &run.id,
+            &look.id,
+            &action.id,
+            &["proposed"],
+            "expired",
+            None,
+        )
+        .await;
         return Err(conflict(format!(
             "Workflow run {} moved on since look {}: its proposal expired. Ask for a new look (workflow_supervise).",
             run.id, look.id
         )));
     }
     if action.action == "create_work_item" {
+        transition(
+            host,
+            &run.id,
+            &look.id,
+            &action.id,
+            &["proposed"],
+            "opened",
+            None,
+        )
+        .await?;
         let draft = action
             .work_item
             .and_then(|i| look.work_items.get(i))
             .cloned()
             .unwrap_or_default();
-        settle(host, &run.id, &look.id, &action.id, "opened", None).await?;
         return Ok(json!({
             "run": run.id, "look": look.id, "action": action.id, "state": "opened",
             "create_request": {
@@ -1893,32 +2142,52 @@ async fn act(host: &Arc<Host>, args: ActArgs, azure: &Azure) -> Result<Value, St
             },
         }));
     }
-    if !args.confirmed {
-        return Err(invalid(format!(
-            "Confirm with the user, then act with confirmed: true. {}",
-            describe_action(
-                &About::of(&run),
-                &look,
-                &action,
-                note.as_deref(),
-                args.chat.as_deref()
-            )
-        )));
-    }
-    // Recorded before it acts: an interruption never reads as an action that did not happen.
-    settle(host, &run.id, &look.id, &action.id, "attempting", None).await?;
+    // Recorded before it acts, in one step with the check: an interruption never reads as an
+    // action that did not happen, and a second confirmation finds it attempting.
+    transition(
+        host,
+        &run.id,
+        &look.id,
+        &action.id,
+        &["proposed"],
+        "attempting",
+        None,
+    )
+    .await?;
+    let key = format!("{}/{}/{}", run.id, look.id, action.id);
+    state
+        .workflows
+        .supervision
+        .acting
+        .lock()
+        .unwrap()
+        .insert(key.clone());
+    let _acting = Acting(host.clone(), key);
+    let summary = format!("supervisor-{}", look.id);
+    let sent_before = sends_of(host, &run.id, &summary).len();
     let result = match action.action.as_str() {
-        "restart" => match &note {
-            Some(note) if note != &look.handover => {
+        "restart" => match note {
+            NoteChoice::Draft => {
+                super::runs::restart_drafted(host, &run.id, &look.handover, azure).await
+            }
+            NoteChoice::Edited(text) => {
                 super::runs::operation(
                     host,
                     "workflow_run_restart",
-                    &json!({"run": run.id, "note": note, "confirmed": true}),
+                    &json!({"run": run.id, "note": text, "confirmed": true}),
                     azure,
                 )
                 .await
             }
-            _ => super::runs::restart_drafted(host, &run.id, &look.handover, azure).await,
+            NoteChoice::Empty => {
+                super::runs::operation(
+                    host,
+                    "workflow_run_restart",
+                    &json!({"run": run.id, "confirmed": true}),
+                    azure,
+                )
+                .await
+            }
         },
         "resume" => {
             super::runs::operation(
@@ -1957,35 +2226,54 @@ async fn act(host: &Arc<Host>, args: ActArgs, azure: &Azure) -> Result<Value, St
         }
         _ => Err(invalid("This action is not one a person confirms.")),
     };
+    let attempting = ["attempting"];
     match result {
         Ok(reply) => {
-            let uncertain = reply["outcome"] == "uncertain";
-            settle(
+            let uncertain =
+                reply["outcome"] == "uncertain" || reply["send"]["outcome"] == "uncertain";
+            let word = if uncertain { "uncertain" } else { "executed" };
+            transition(
                 host,
                 &run.id,
                 &look.id,
                 &action.id,
-                if uncertain { "uncertain" } else { "executed" },
-                None,
+                &attempting,
+                word,
+                uncertain.then_some(UNCERTAIN),
             )
             .await?;
             Ok(
-                json!({"run": run.id, "look": look.id, "action": action.id, "state": if uncertain { "uncertain" } else { "executed" }, "result": reply}),
+                json!({"run": run.id, "look": look.id, "action": action.id, "state": word, "result": reply}),
             )
         }
         Err(error) => {
-            // A send whose result is unknown stays uncertain; anything else was refused.
-            let uncertain = error.contains("uncertain");
-            let redactor =
-                security::Redactor::new(&[], Vec::new()).expect("built-in redaction patterns");
-            let reason = cut(&redactor.redact(&error), LINE_CHARS);
-            settle(
+            // What happened decides, never the error's words: a post that left a send record
+            // was refused by Teams or is uncertain; any other action whose run is as it was
+            // refused before acting and is proposed again.
+            let (word, outcome) = if action.action == "post_summary" {
+                match sends_of(host, &run.id, &summary).get(sent_before) {
+                    Some(send) if send["outcome"] == "refused" => ("refused", REFUSED),
+                    Some(_) => ("uncertain", UNCERTAIN),
+                    None => ("proposed", NOT_ACTED),
+                }
+            } else {
+                let now_marker = found(state, &run.id)
+                    .ok()
+                    .map(|r| marker(&r, &state.workflows.db.pauses().unwrap_or_default()));
+                if now_marker.as_deref() == Some(look.marker.as_str()) {
+                    ("proposed", NOT_ACTED)
+                } else {
+                    ("refused", REFUSED)
+                }
+            };
+            transition(
                 host,
                 &run.id,
                 &look.id,
                 &action.id,
-                if uncertain { "uncertain" } else { "refused" },
-                Some(reason),
+                &attempting,
+                word,
+                Some(outcome),
             )
             .await?;
             Err(error)
@@ -1993,7 +2281,8 @@ async fn act(host: &Arc<Host>, args: ActArgs, azure: &Azure) -> Result<Value, St
     }
 }
 
-/// Store the look's drafted summary on the run and post it with `workflow_summary_send`.
+/// Store the look's drafted summary on the run, marked as the supervisor's (a notification
+/// block's `{summary}` never reads it), and post it with `workflow_summary_send`.
 async fn post_summary(
     host: &Arc<Host>,
     id: &str,
@@ -2027,33 +2316,6 @@ async fn post_summary(
     .await
 }
 
-/// Record what became of one action of a look.
-async fn settle(
-    host: &Arc<Host>,
-    id: &str,
-    look: &str,
-    action: &str,
-    state_word: &str,
-    outcome: Option<String>,
-) -> Result<(), String> {
-    let state = &host.state;
-    let lock = state.workflows.lock(id);
-    let _guard = lock.lock().await;
-    let mut run = found(state, id)?;
-    if let Some(entry) = run
-        .supervision
-        .iter_mut()
-        .find(|l| l.id == look)
-        .and_then(|l| l.actions.iter_mut().find(|a| a.id == action))
-    {
-        entry.state = state_word.into();
-        entry.by = Some("person".into());
-        entry.at = Some(now());
-        entry.outcome = outcome;
-    }
-    state.workflows.db.save(&run).map_err(fail)
-}
-
 /// `workflow_supervision_dismiss`: set a proposed action aside.
 async fn dismiss(host: &Arc<Host>, args: DismissArgs) -> Result<Value, String> {
     let state = &host.state;
@@ -2075,13 +2337,16 @@ async fn dismiss(host: &Arc<Host>, args: DismissArgs) -> Result<Value, String> {
                 args.look, args.action
             ))
         })?;
-    if action.state != "proposed" {
-        return Err(conflict(format!(
-            "Action {} is already {}.",
-            action.id, action.state
-        )));
-    }
-    settle(host, &run.id, &args.look, &action.id, "dismissed", None).await?;
+    transition(
+        host,
+        &run.id,
+        &args.look,
+        &action.id,
+        &["proposed"],
+        "dismissed",
+        None,
+    )
+    .await?;
     Ok(json!({"run": run.id, "look": args.look, "action": action.id, "state": "dismissed"}))
 }
 

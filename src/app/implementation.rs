@@ -627,6 +627,21 @@ pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<M
             seen: m.seen,
         }))
 }
+/// The account's other machines whose last poll did not say they run the workflow supervisor
+/// (`workflow_supervise_support`), by name: a version that predates it, which refuses the
+/// account's map once the supervisor's settings are not their defaults.
+pub(in crate::app) async fn machines_before_supervisor(host: &Arc<Host>) -> Result<Vec<String>> {
+    let version = management::version(host)?;
+    let data = host.state.implementation.registry.lock().await;
+    Ok(data
+        .machines
+        .iter()
+        .filter(|m| {
+            !m.revoked && m.id != data.id && m.account_version == version && !m.workflow_supervise
+        })
+        .map(|m| m.name.clone())
+        .collect())
+}
 /// The one-shot calls a workflow save makes on its machine: its installed CLIs and a checkout.
 pub(super) async fn machine_call(
     host: &Arc<Host>,
@@ -982,6 +997,23 @@ pub(super) async fn test_creation(host: &Host, plan: &str, record: Value) {
 pub(super) fn test_directories(host: &Host, id: &str) -> Vec<PathBuf> {
     let run = host.state.implementation.db.get(id).unwrap().unwrap();
     run.launch.request.directories
+}
+/// A machine of the account that polled once, saying whether it runs the workflow supervisor
+/// (tests).
+#[cfg(test)]
+pub(in crate::app) async fn test_worker(host: &Arc<Host>, name: &str, supervise: bool) -> String {
+    let worker = uuid::Uuid::new_v4().to_string();
+    let registration = fleet::register(host, &json!({"id":worker,"name":name,"os":"macos"}))
+        .await
+        .unwrap();
+    let token = registration["token"].as_str().unwrap().to_owned();
+    fleet::protocol(
+        host,
+        &json!({"id":worker,"token":token,"action":"poll","workflow_supervise_support":supervise}),
+    )
+    .await
+    .unwrap();
+    worker
 }
 /// End an in-flight run in `state` as its machine would record it (tests).
 #[cfg(all(test, unix))]

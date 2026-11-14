@@ -517,7 +517,8 @@
       }
       if (!args.confirmed) throw new Error('[invalid_input] Confirm with the user, then act with confirmed: true.');
       let result = {};
-      if (action.action === 'restart') result = workflowHandlers.workflow_run_restart({ run: run.id, note: args.note ?? look.handover, confirmed: true });
+      // No note given is the draft; an empty note restarts without one.
+      if (action.action === 'restart') result = workflowHandlers.workflow_run_restart({ run: run.id, ...('note' in args ? (args.note.trim() ? { note: args.note } : {}) : { note: look.handover }), confirmed: true });
       if (action.action === 'post_summary') {
         if (!args.chat) throw new Error('[invalid_input] Choose the chat to post the summary to (teams_chats).');
         run.summaries.push({ id: `supervisor-${look.id}`, text: look.summary, created_at: secs(Date.now()), provider: 'claude', model: 'claude-sonnet-5-5', by: 'supervisor' });

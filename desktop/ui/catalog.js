@@ -2679,7 +2679,7 @@ const UI_CATALOG = { es: {
   "Move ahead": "Adelantar",
   "The run is back in its place in the queue.": "La ejecución volvió a su lugar en la cola.",
   "The run goes ahead in the queue.": "La ejecución se adelanta en la cola.",
-  "The supervisor drafted this note. Left as it is, the coding runs read it as the supervisor's; edited, it is yours.": "El supervisor redactó esta nota. Tal como está, las ejecuciones de código la leen como del supervisor; si la editas, es tuya.",
+  "The supervisor drafted this note. Left as it is, the coding runs read it as the supervisor's; edited, it is yours; emptied, the run restarts without a note.": "El supervisor redactó esta nota. Tal como está, las ejecuciones de código la leen como del supervisor; si la editas, es tuya; si la vacías, la ejecución se reinicia sin nota.",
   "Restart with the drafted note": "Reiniciar con la nota redactada",
   "Resume the run": "Reanudar la ejecución",
   "Cancel the run": "Cancelar la ejecución",

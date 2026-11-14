@@ -460,3 +460,223 @@ async fn a_waiting_run_is_moved_ahead_only_by_its_own_look_and_the_person_can_pu
     assert_eq!(back["ahead"], false);
     bench.release();
 }
+
+/// A failed run with one look that proposes `actions`, and the look's ID.
+async fn proposing(bench: &Bench, handover: &str, actions: Value) -> (String, String) {
+    bench.supervisor(true);
+    bench.answer(assessment(handover, actions));
+    let id = failed_run(bench).await;
+    let run = bench.wait_look(&id, 1).await;
+    let look = run.supervision[0].id.clone();
+    (id, look)
+}
+fn action_state(bench: &Bench, id: &str, action: &str) -> Action {
+    bench.run(id).supervision[0]
+        .actions
+        .iter()
+        .find(|a| a.action == action)
+        .cloned()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn two_confirmations_at_once_carry_out_an_action_once() {
+    let bench = Bench::new().await;
+    let (id, look) = proposing(
+        &bench,
+        "x",
+        json!([{"action":"cancel","run":"","sessions":"","work_item":-1,"reason":"Stuck."}]),
+    )
+    .await;
+    let body = json!({"run": id, "look": look, "action": "cancel", "confirmed": true});
+    let (first, second) = tokio::join!(bench.act(body.clone()), bench.act(body.clone()));
+    let results = [first, second];
+    assert_eq!(
+        results.iter().filter(|r| r.is_ok()).count(),
+        1,
+        "{results:?}"
+    );
+    let refused = results.iter().find_map(|r| r.as_ref().err()).unwrap();
+    assert!(refused.contains("is already"), "{refused}");
+    assert_eq!(action_state(&bench, &id, "cancel").state, "executed");
+    assert_eq!(bench.run(&id).state, Phase::Cancelled);
+}
+
+#[tokio::test]
+async fn an_emptied_note_restarts_without_one_and_the_confirmation_says_so() {
+    let bench = Bench::new().await;
+    let (id, look) = proposing(
+        &bench,
+        "The model's draft.",
+        json!([{"action":"restart","run":"","sessions":"","work_item":-1,"reason":"Cut."}]),
+    )
+    .await;
+    let asked = bench
+        .act(json!({"run": id, "look": look, "action": "restart", "note": "  "}))
+        .await
+        .unwrap_err();
+    assert!(asked.contains("without a handover note"), "{asked}");
+    assert!(!asked.contains("The model's draft."), "{asked}");
+    bench
+        .act(json!({"run": id, "look": look, "action": "restart", "note": "", "confirmed": true}))
+        .await
+        .unwrap();
+    let next = bench.run(bench.run(&id).restarted_as.as_deref().unwrap());
+    assert_eq!(next.handover, None);
+    assert!(!next.handover_drafted);
+}
+
+#[tokio::test]
+async fn a_refusal_before_acting_leaves_the_proposal_and_nothing_unconfirmed_is_written() {
+    let bench = Bench::new().await;
+    let (id, look) = proposing(
+        &bench,
+        "x",
+        json!([
+            {"action":"post_summary","run":"","sessions":"","work_item":-1,"reason":"Tell them."},
+            {"action":"restart","run":"","sessions":"","work_item":-1,"reason":"Cut."}
+        ]),
+    )
+    .await;
+    // Without the confirmation nothing is written, not even for a work item or an expiry.
+    let unconfirmed = bench
+        .act(
+            json!({"run": id, "look": look, "action": "post_summary", "chat": "19:team@thread.v2"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(unconfirmed.contains("Confirm with the user"));
+    assert_eq!(action_state(&bench, &id, "post_summary").state, "proposed");
+    // An overlong note is refused before anything is written.
+    let long = bench
+        .act(json!({"run": id, "look": look, "action": "restart", "note": "n".repeat(4001), "confirmed": true}))
+        .await
+        .unwrap_err();
+    assert!(long.contains("at most"), "{long}");
+    assert_eq!(action_state(&bench, &id, "restart").state, "proposed");
+    // The chat cannot be read (no Microsoft session here): the post is refused before any
+    // request, no send is recorded, and the proposal is still there.
+    let refused = bench
+        .act(json!({"run": id, "look": look, "action": "post_summary", "chat": "19:team@thread.v2", "confirmed": true}))
+        .await;
+    assert!(refused.is_err());
+    let post = action_state(&bench, &id, "post_summary");
+    assert_eq!(post.state, "proposed");
+    assert_eq!(post.outcome.as_deref(), Some(NOT_ACTED));
+    assert!(bench.run(&id).summary_sends.is_empty());
+}
+
+#[tokio::test]
+async fn an_action_a_stopped_host_left_attempting_becomes_uncertain() {
+    let bench = Bench::new().await;
+    let (id, _) = proposing(
+        &bench,
+        "x",
+        json!([{"action":"cancel","run":"","sessions":"","work_item":-1,"reason":"Stuck."}]),
+    )
+    .await;
+    let mut run = bench.run(&id);
+    run.supervision[0].actions[0].state = "attempting".into();
+    bench.save(&run);
+    super::super::sweep(&bench.host, bench.now()).unwrap();
+    let cut = action_state(&bench, &id, "cancel");
+    assert_eq!(cut.state, "uncertain");
+    assert_eq!(cut.outcome.as_deref(), Some(CUT));
+    let again = bench
+        .act(json!({"run": id, "look": run.supervision[0].id, "action": "cancel", "confirmed": true}))
+        .await
+        .unwrap_err();
+    assert!(again.contains("already uncertain"), "{again}");
+}
+
+#[tokio::test]
+async fn a_requested_look_never_spends_the_automatic_budget_nor_comes_too_soon() {
+    let bench = Bench::new().await;
+    bench.supervisor(true);
+    bench.answer(assessment("x", json!([])));
+    let id = failed_run(&bench).await;
+    // An automatic event is pending (the interval holds it), then the person asks.
+    let looks = &bench.host.state.workflows.supervision.looks;
+    looks
+        .insert(&Row {
+            key: format!("{id}:run_waiting:1"),
+            run: id.clone(),
+            event: "run_waiting".into(),
+            state: "pending".into(),
+            requested: false,
+            created_at: bench.now(),
+            updated_at: bench.now(),
+            payload: json!({}),
+        })
+        .unwrap();
+    looks
+        .insert(&Row {
+            key: format!("{id}:requested:x"),
+            run: id.clone(),
+            event: "requested".into(),
+            state: "pending".into(),
+            requested: true,
+            created_at: bench.now(),
+            updated_at: bench.now(),
+            payload: json!({}),
+        })
+        .unwrap();
+    let mut settings = bench
+        .host
+        .state
+        .settings
+        .map()
+        .unwrap()
+        .workflow_settings
+        .supervisor;
+    settings.looks_per_day = 1;
+    let agent = settings.agent().unwrap();
+    super::super::start_next(&bench.host, &bench.azure, &agent, &settings, bench.now())
+        .await
+        .unwrap();
+    let run = bench.wait_look(&id, 1).await;
+    assert!(run.supervision[0].requested);
+    assert_eq!(run.supervision[0].keys, [format!("{id}:requested:x")]);
+    assert_eq!(looks.automatic_since(bench.now() - 86_400).unwrap(), 0);
+    assert!(
+        looks
+            .in_state("pending")
+            .unwrap()
+            .iter()
+            .any(|r| r.key == format!("{id}:run_waiting:1"))
+    );
+    // A second request right after is refused with when it can be asked again (with nothing
+    // queued for the run).
+    for row in looks.in_state("pending").unwrap() {
+        looks.set(&row.key, "skipped", &json!({}), bench.now()).unwrap();
+    }
+    let soon = super::super::operation(
+        &bench.host,
+        "workflow_supervise",
+        &json!({"run": id}),
+        &bench.azure,
+    )
+    .await
+    .unwrap_err();
+    assert!(soon.contains("ask again in"), "{soon}");
+}
+
+#[tokio::test]
+async fn saving_the_supervisor_warns_about_machines_that_predate_it() {
+    let bench = Bench::new().await;
+    implementation::test_worker(&bench.host, "Old laptop", false).await;
+    implementation::test_worker(&bench.host, "New desktop", true).await;
+    let reply = crate::app::workflows::director::update(
+        &bench.host,
+        &json!({"supervisor": {"looks_per_day": 12}}),
+        &crate::app::workflows::director::Process::Azure,
+    )
+    .await
+    .unwrap();
+    let warnings = reply["warnings"].to_string();
+    assert!(
+        warnings.contains("Old laptop") && warnings.contains("predates the workflow supervisor"),
+        "{warnings}"
+    );
+    assert!(!warnings.contains("New desktop"), "{warnings}");
+}

@@ -430,9 +430,10 @@ function showRestart(run, area, refresh, proposed = null) {
   const counted = () => { count.textContent = t('{n} of {max} characters', { n: String(note.value.length), max: String(MAX_HANDOVER) }); };
   note.oninput = counted; counted();
   const restart = twice(t('Restart'), t('Confirm restart'), async () => {
+    // With a proposal: unchanged is the supervisor's draft, emptied is no note, edited is the person's.
     const edited = note.value.trim() !== draft.trim();
     const reply = proposed
-      ? (await act(run, proposed, edited && note.value.trim() ? { note: note.value } : {})).result
+      ? (await act(run, proposed, edited ? { note: note.value.trim() ? note.value : '' } : {})).result
       : await invoke('workflow_run_restart', { run: run.id, ...(note.value.trim() ? { note: note.value } : {}), confirmed: true });
     if (reply.warning) notify(tx(reply.warning), 'warn');
     else done(reply.paused ? t('Run restarted; the new run waits for the pause to end.') : t('Run restarted; the new run starts from its first stage.'));
@@ -445,7 +446,7 @@ function showRestart(run, area, refresh, proposed = null) {
   area.replaceChildren(el('div', { class: 'panel', id: 'run-restart' },
     el('h3', { textContent: t('Restart with a handover note') }),
     el('p', { class: 'hint', textContent: t('This run is cancelled, its live sessions stop and the file changes stay; a new run of the same workflow starts for this work item from its first stage. Each of its coding runs gets your note, which is posted nowhere: not to Teams, not to the work item.') }),
-    proposed ? el('p', { class: 'hint', textContent: t('The supervisor drafted this note. Left as it is, the coding runs read it as the supervisor\'s; edited, it is yours.') }) : null,
+    proposed ? el('p', { class: 'hint', textContent: t('The supervisor drafted this note. Left as it is, the coding runs read it as the supervisor\'s; edited, it is yours; emptied, the run restarts without a note.') }) : null,
     el('label', {}, t('Handover note'), note), count,
     el('div', { class: 'actions' }, restart, close)));
   note.focus();
@@ -506,7 +507,7 @@ function children(run, sessionButton, sessions) {
 function blocks(run) {
   const names = Object.fromEntries((run.blocks ?? []).map(b => [b.id, b.name]));
   const rows = (run.block_outcomes ?? []).map(o => el('div', { class: 'resource run-block' },
-    el('div', { class: 'resource-head' }, badge(tx(o.outcome), ['sent', 'succeeded'].includes(o.outcome) ? 'ok' : ['attempting', 'skipped'].includes(o.outcome) ? 'muted' : ['refused', 'failed', 'timed_out', 'uncertain'].includes(o.outcome) ? 'warn' : 'info'),
+    el('div', { class: 'resource-head' }, badge(tx(o.outcome), ['sent', 'succeeded'].includes(o.outcome) ? 'ok' : ['attempting', 'skipped'].includes(o.outcome) ? 'muted' : ['refused', 'failed', 'timed_out', 'stopped', 'uncertain'].includes(o.outcome) ? 'warn' : 'info'),
       el('strong', { textContent: names[o.block] ?? o.block }), o.stage ? badge(STAGE_NAMES[o.stage] ?? o.stage, 'muted') : null),
     el('p', { class: 'resource-facts' }, el('small', { textContent: [when(o.at), o.reason ? tx(o.reason) : null, o.exit_code != null ? t('Exit code {code}', { code: String(o.exit_code) }) : null, o.duration_ms != null ? t('{n} ms', { n: String(o.duration_ms) }) : null].filter(Boolean).join(' · ') }))));
   if (!rows.length) return el('div', {});

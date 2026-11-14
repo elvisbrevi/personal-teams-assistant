@@ -180,14 +180,18 @@ fn read_with(pull_status: &str, report: &str) -> Read {
             7, "Task", "task", "Item 7", "Body",
         )),
         reports: vec![("r".into(), report.into())],
-        pulls: vec![PullRequest {
-            id: 7,
-            repository: API.into(),
-            title: "PR 7".into(),
-            status: pull_status.into(),
-            url: "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/7".into(),
-            ..Default::default()
-        }],
+        pulls: vec![(
+            "feature/7".into(),
+            PullRequest {
+                id: 7,
+                repository: API.into(),
+                title: "PR 7".into(),
+                status: pull_status.into(),
+                url: "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/7"
+                    .into(),
+                ..Default::default()
+            },
+        )],
         branches: vec![(
             Repository {
                 id: API.into(),
@@ -389,6 +393,218 @@ fn the_input_holds_third_party_text_under_untrusted_and_stays_within_its_bound()
         truncated.iter().any(|t| t == "the oldest comments"),
         "{truncated:?}"
     );
+}
+
+/// Text that, with one piece removed, would join into a mention, a URL or a tag.
+const REBUILT: &str = "@[[Ana]] http:<i></i>//evil.example/x <<b>a href=x>click</a>";
+
+fn rebuilt(text: &str) -> bool {
+    text.contains("@[")
+        || text.contains("evil.example")
+        || text.contains("<a")
+        || text.contains('<')
+}
+
+#[test]
+fn removing_a_piece_never_rebuilds_a_mention_a_url_or_a_tag() {
+    let run = coding(10, 1_800_000_000, "10101010-1010-4010-8010-101010101010");
+    let read = read_with("active", &format!("PR !7 merged. {REBUILT}"));
+    let look = judge(
+        &full(json!({
+            "assessment": {"done": REBUILT, "left": REBUILT, "recommendation": REBUILT},
+            "claims": [{"text": REBUILT, "kind": "item_state", "ref": "@[[Done]]"}],
+            "unverified": [REBUILT],
+            "handover": REBUILT,
+            "work_items": [{"type": "bug", "title": REBUILT, "description": REBUILT, "repository": "", "reason": REBUILT}],
+            "summary": REBUILT,
+        })),
+        &run,
+        &read,
+        crate::config::Language::En,
+    );
+    let assessment = look.assessment.as_ref().unwrap();
+    let draft = &look.work_items[0];
+    let mut texts = vec![
+        &assessment.done,
+        &assessment.left,
+        &assessment.recommendation,
+        &look.handover,
+        &draft.title,
+        &draft.description,
+        &draft.reason,
+    ];
+    texts.extend(look.unverified.iter());
+    texts.extend(look.checks.iter().map(|c| &c.claim));
+    texts.extend(look.checks.iter().map(|c| &c.reference));
+    for text in texts {
+        assert!(!rebuilt(text), "{text}");
+    }
+    // The summary keeps only the links code builds.
+    let body = look.summary.split("**Links**").next().unwrap();
+    assert!(!rebuilt(body), "{}", look.summary);
+    assert!(look.summary.contains(&run.item.url));
+}
+
+#[test]
+fn a_deleted_branch_is_verified_only_by_a_completed_pull_request_of_that_branch() {
+    let mut run = coding(11, 1_800_000_000, "11111111-0000-4000-8000-000000000011");
+    let repository = Repository {
+        id: API.into(),
+        name: "payments-api".into(),
+    };
+    run.children[0].branch = Some("feature/merged".into());
+    run.children.push(record::Child {
+        id: 12,
+        title: "Never pushed".into(),
+        url: "https://dev.azure.com/example/Payments/_workitems/edit/12".into(),
+        repository: Some(repository.clone()),
+        branch: Some("feature/never-pushed".into()),
+        ..Default::default()
+    });
+    let pull = |id: u64| PullRequest {
+        id,
+        repository: API.into(),
+        title: format!("PR {id}"),
+        status: "completed".into(),
+        url: format!("https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/{id}"),
+        ..Default::default()
+    };
+    let read = Read {
+        pulls: vec![("feature/merged".into(), pull(7))],
+        branches: vec![
+            (repository.clone(), "feature/merged".into(), Some(false)),
+            (repository, "feature/never-pushed".into(), Some(false)),
+        ],
+        ..Default::default()
+    };
+    let look = judge(&full(json!({})), &run, &read, crate::config::Language::En);
+    let of = |name: &str| look.checks.iter().find(|c| c.reference == name).unwrap();
+    assert_eq!(of("feature/merged").result, "verified");
+    assert_eq!(of("feature/never-pushed").result, "not_verified");
+    assert_eq!(
+        of("feature/never-pushed").fact,
+        "Branch feature/never-pushed does not exist in payments-api."
+    );
+}
+
+#[test]
+fn reads_that_did_not_answer_in_time_are_not_read_rather_than_not_reported() {
+    let mut run = coding(13, 1_800_000_000, "13131313-1313-4313-8313-131313131313");
+    run.children[0].branch = Some("feature/13".into());
+    let read = Read {
+        reports: vec![("r".into(), "PR !5 merged.".into())],
+        unread: [
+            "the work item",
+            "some child work items",
+            "the implementation runs",
+            "some pull requests",
+            "some branches",
+            "the session summaries",
+        ]
+        .map(String::from)
+        .to_vec(),
+        timed_out: true,
+        ..Default::default()
+    };
+    let look = judge(&full(json!({})), &run, &read, crate::config::Language::En);
+    for check in &look.checks {
+        assert_eq!(check.result, "not_verified");
+        assert!(check.fact.contains("could not be read"), "{}", check.fact);
+    }
+    assert_eq!(look.checks.len(), 2);
+}
+
+#[test]
+fn each_action_is_proposed_once() {
+    let mut run = coding(14, 1_800_000_000, "14141414-1414-4414-8414-141414141414");
+    run.stop(Phase::NeedsAttention, 1_800_000_050, "Stopped.".into());
+    let read = read_with("active", "");
+    let look = judge(
+        &full(json!({
+            "handover": "Pick up from the branch.",
+            "actions": [
+                {"action": "restart", "run": "", "sessions": "", "work_item": -1, "reason": "One."},
+                {"action": "restart", "run": "", "sessions": "", "work_item": 0, "reason": "Twice."},
+            ],
+        })),
+        &run,
+        &read,
+        crate::config::Language::En,
+    );
+    assert_eq!(look.actions.len(), 1);
+    assert_eq!(look.dropped, 1);
+}
+
+#[test]
+fn the_confirmation_names_the_note_the_chat_and_every_mention() {
+    let run = coding(15, 1_800_000_000, "15151515-1515-4515-8515-151515151515");
+    let look = Look {
+        handover: "Drafted note.".into(),
+        summary: "Summary text.".into(),
+        ..Default::default()
+    };
+    let action = |name: &str| Action {
+        id: "a1".into(),
+        action: name.into(),
+        state: "proposed".into(),
+        ..Default::default()
+    };
+    let about = About::of(&run);
+    let post = describe_action(
+        &about,
+        &look,
+        &action("post_summary"),
+        NoteChoice::Draft,
+        Some("19:team@thread.v2"),
+        &["Ana Pérez".into(), "Luis".into()],
+    );
+    assert!(
+        post.contains("19:team@thread.v2") && post.contains("mentioning Ana Pérez, Luis"),
+        "{post}"
+    );
+    assert!(post.contains("Summary text."));
+    let alone = describe_action(
+        &about,
+        &look,
+        &action("post_summary"),
+        NoteChoice::Draft,
+        Some("19:x"),
+        &[],
+    );
+    assert!(alone.contains("mentioning nobody"), "{alone}");
+    // No note given is the draft; the draft unchanged too; blank is none; anything else is yours.
+    assert_eq!(NoteChoice::of(None, "Drafted note."), NoteChoice::Draft);
+    assert_eq!(
+        NoteChoice::of(Some(" Drafted note. "), "Drafted note."),
+        NoteChoice::Draft
+    );
+    assert_eq!(
+        NoteChoice::of(Some("  "), "Drafted note."),
+        NoteChoice::Empty
+    );
+    assert_eq!(
+        NoteChoice::of(Some("Mine."), "Drafted note."),
+        NoteChoice::Edited("Mine.")
+    );
+    let restart = |note| describe_action(&about, &look, &action("restart"), note, None, &[]);
+    assert!(restart(NoteChoice::Draft).contains("supervisor's drafted handover note"));
+    assert!(restart(NoteChoice::Edited("Mine.")).contains("your handover note"));
+    assert!(restart(NoteChoice::Empty).contains("without a handover note"));
+}
+
+#[test]
+fn a_notification_block_never_posts_a_summary_the_supervisor_drafted() {
+    let mut run = coding(16, 1_800_000_000, "16161616-1616-4616-8616-161616161616");
+    run.summaries = vec![
+        json!({"id": "d1", "text": "Director's summary."}),
+        json!({"id": "supervisor-l1", "text": "Supervisor's draft.", "by": "supervisor"}),
+    ];
+    assert_eq!(
+        super::super::acting::latest_summary(&run),
+        "Director's summary."
+    );
+    run.summaries.remove(0);
+    assert_eq!(super::super::acting::latest_summary(&run), "");
 }
 
 #[cfg(unix)]
