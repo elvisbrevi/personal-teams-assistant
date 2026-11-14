@@ -615,6 +615,32 @@ pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<M
             direct: m.workflow_direct,
         }))
 }
+/// The account's trusted machines whose host runs `until` or an older release, or reports no
+/// version (hosts older than the reports), as `name (version)`.
+pub(super) async fn machines_until(host: &Arc<Host>, until: &str) -> Result<Vec<String>> {
+    use crate::maintenance::Version;
+    let version = management::version(host)?;
+    let until = Version::parse(until).context("Invalid release.")?;
+    let data = host.state.implementation.registry.lock().await;
+    Ok(data
+        .machines
+        .iter()
+        .filter(|m| !m.revoked && m.account_version == version)
+        .filter(|m| {
+            m.host_version
+                .as_deref()
+                .and_then(Version::parse)
+                .is_none_or(|v| v <= until)
+        })
+        .map(|m| {
+            format!(
+                "{} ({})",
+                m.name,
+                m.host_version.as_deref().unwrap_or("unknown version")
+            )
+        })
+        .collect())
+}
 /// The one-shot calls a workflow save makes on its machine: its installed CLIs and a checkout.
 pub(super) async fn machine_call(
     host: &Arc<Host>,
@@ -886,8 +912,10 @@ pub(super) struct Planned {
 pub(super) async fn launch_planned(host: &Arc<Host>, planned: Planned) -> Result<Value> {
     uuid(&planned.id)?;
     uuid(&planned.machine)?;
+    // A workflow's context is whole (`engine::fitted`); a worker reads it without a limit of
+    // its own, older ones included.
     ensure!(
-        planned.context.len() <= 32_000,
+        planned.context.chars().count() <= crate::workflows::MAX_CONTEXT,
         "Implementation context is too long."
     );
     let request = Start {

@@ -392,7 +392,8 @@ workflow settings.
    `implementation_catalog`.
 3. Save blocks first if the workflow uses any: `pta workflows blocks save` (MCP
    `workflow_block_save`), JSON on stdin with `id`, `name`, `kind` and that kind's fields:
-   - `instruction`: `text` (at most 8000 characters), no stage; saved without confirmation.
+   - `instruction`: `text` (at most 8000 characters), no stage; saved without confirmation, and
+     refused when a workflow that lists it would no longer fit its run's context (below).
    - `teams_notification`: `stage` (`before_planning`, `plan_ready`, `children_created`,
      `coding_started`, `child_done`, `pull_requests_completed`, `done`, `failed`), `chat` `{id, name}` from
      `teams_chats`, `mentions` (member display names of at most 100 characters without `]`, at most 20) and `template` (at most 4000
@@ -411,8 +412,8 @@ workflow settings.
    `description` (what the director will read to choose it), `enabled`, `auto_start`,
    `organization` (`https://dev.azure.com/NAME`), `project`, `repositories` `[{id, name}]` as
    listed, `machine`, `checkouts` `{REPOSITORY_ID: DIRECTORY}` (one per repository),
-   `agent` `{provider: codex|claude|opencode, model, effort}`, `instructions` (at most 8000
-   characters), `blocks` (existing block IDs, at most 10, in order) and `allow`: what the
+   `agent` `{provider: codex|claude|opencode, model, effort}`, `instructions` (at most 20000
+   characters), `blocks` (existing block IDs, at most 20, in order) and `allow`: what the
    workflow's coding runs may do that the fixed rules otherwise forbid, each at most once:
    `work_items` (create and change work items and issues: state, fields, comments), `teams`
    (send Teams messages, e.g. with `pta teams send`), `merge` (complete and merge pull requests),
@@ -426,7 +427,17 @@ workflow settings.
    directory the refusal names), two checkouts for one repository (keys are compared without
    letter case), a directory that is not a Git checkout, an origin naming another repository, an agent, model or
    effort the machine does not have, a missing block and anything over the limits (50
-   workflows, 100 blocks, 20 repositories). The reply's `warnings` list what could not be
+   workflows, 100 blocks, 20 repositories), each refusal with the limit and the count. A run
+   gets the instructions and instruction blocks whole, never cut, in a context of at most
+   100000 characters: a workflow whose largest run context (its instructions and instruction
+   blocks plus the fixed sentences, its checkouts, the item and the longest handover note) would
+   exceed it is refused with that size, the part that is its instructions and blocks and how
+   many characters to take out. The reply's `usage` says how much of each limit it uses (as
+   `show` does). Over 10 blocks or 8000 characters of instructions the save succeeds with a
+   warning: computers of the account on release 0.12.22 or older cannot take the account's
+   configuration until they are updated (`pta update`, or `pta update --machine NAME`), and
+   the warning names the account's machines that report such a version or none. Relay it.
+   The reply's `warnings` list what could not be
    verified or was adjusted: an offline machine or one whose version cannot inspect checkouts
    (its directories are then checked only against the roots it last reported), a checkout
    without a readable origin, an agent catalog the machine did not return, a directory saved as
@@ -434,7 +445,10 @@ workflow settings.
    again before a run.
 5. `pta workflows enable ID` / `disable ID` (MCP `workflow_save` with `id` and `enabled` only)
    change nothing else. `pta workflows list|show ID` and `pta workflows blocks list` (with
-   `used_by`) read them. `pta workflows remove ID --confirmed` (MCP `workflow_remove`, needs
+   `used_by`) read them; `show` (and `list`, by workflow ID) has `usage`: `instructions`,
+   `blocks` and `context`, each `{used, limit}`, `context.used` being the largest context a run
+   of it can get and `context.fixed` the part that is not its instructions or instruction
+   blocks. `pta workflows remove ID --confirmed` (MCP `workflow_remove`, needs
    confirmation) cannot be undone; `pta workflows blocks remove ID` is refused while a workflow
    uses the block. A workflow with a run that is not done or cancelled cannot be removed.
 

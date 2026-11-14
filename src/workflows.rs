@@ -28,8 +28,22 @@ use std::{
 pub const MAX_WORKFLOWS: usize = 50;
 pub const MAX_BLOCKS: usize = 100;
 pub const MAX_REPOSITORIES: usize = 20;
-pub const MAX_WORKFLOW_BLOCKS: usize = 10;
-pub const MAX_INSTRUCTIONS: usize = 8000;
+/// Blocks one workflow lists, of every kind.
+pub const MAX_WORKFLOW_BLOCKS: usize = 20;
+/// Characters of a workflow's own instructions.
+pub const MAX_INSTRUCTIONS: usize = 20_000;
+/// Characters of an instruction block's text.
+pub const MAX_BLOCK_TEXT: usize = 8000;
+/// Characters of the context a workflow's planning or coding run is given: the fixed sentences,
+/// the checkouts, the item, a restart's handover note, the instructions and every instruction
+/// block, whole. A save that could build a longer one is refused (`engine::largest_context`);
+/// nothing is ever cut.
+pub const MAX_CONTEXT: usize = 100_000;
+/// The last release whose hosts accept only 10 blocks and 8000 characters of instructions per
+/// workflow: a map holding a larger workflow does not load there.
+pub const OLDER_LIMITS_UNTIL: &str = "0.12.22";
+pub const OLDER_MAX_WORKFLOW_BLOCKS: usize = 10;
+pub const OLDER_MAX_INSTRUCTIONS: usize = 8000;
 pub const MAX_MENTIONS: usize = 20;
 /// The longest display name a mention can carry: a mention is written `@[Name]` and read back
 /// by the Teams post, which takes up to 100 characters and no closing bracket.
@@ -308,8 +322,8 @@ pub fn validate_block(block: &Block) -> Result<()> {
                 "Instruction block {id} has no stage: the agents read it while they plan and implement."
             );
             ensure!(
-                !block.text.trim().is_empty() && plain(&block.text, MAX_INSTRUCTIONS),
-                "Instruction block {id} needs a text of at most {MAX_INSTRUCTIONS} characters."
+                !block.text.trim().is_empty() && plain(&block.text, MAX_BLOCK_TEXT),
+                "Instruction block {id} needs a text of at most {MAX_BLOCK_TEXT} characters."
             );
             ensure!(
                 block.chat.is_none()
@@ -399,7 +413,8 @@ pub fn validate_workflow(workflow: &Workflow) -> Result<()> {
     );
     ensure!(
         plain(&workflow.instructions, MAX_INSTRUCTIONS),
-        "The instructions of workflow {id} take at most {MAX_INSTRUCTIONS} characters."
+        "The instructions of workflow {id} take at most {MAX_INSTRUCTIONS} characters, without control characters other than line breaks and tabs (they have {}).",
+        workflow.instructions.chars().count()
     );
     ensure!(
         organization_name(&workflow.organization).is_some(),
@@ -468,7 +483,8 @@ pub fn validate_workflow(workflow: &Workflow) -> Result<()> {
     );
     ensure!(
         workflow.blocks.len() <= MAX_WORKFLOW_BLOCKS,
-        "Workflow {id} has at most {MAX_WORKFLOW_BLOCKS} blocks."
+        "Workflow {id} has at most {MAX_WORKFLOW_BLOCKS} blocks (it lists {}).",
+        workflow.blocks.len()
     );
     ensure!(
         workflow.blocks.iter().collect::<BTreeSet<_>>().len() == workflow.blocks.len(),
@@ -1052,6 +1068,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_map_at_the_older_limits_loads_and_is_written_back_unchanged() {
+        let mut map = crate::knowledge::KnowledgeMap::parse("").unwrap();
+        map.workflow_blocks = (0..OLDER_MAX_WORKFLOW_BLOCKS)
+            .map(|n| {
+                let mut block = instruction(&format!("rule-{n}"));
+                block.text = "r".repeat(MAX_BLOCK_TEXT);
+                block
+            })
+            .collect();
+        let mut w = workflow("payments");
+        w.instructions = "x".repeat(OLDER_MAX_INSTRUCTIONS);
+        w.blocks = map.workflow_blocks.iter().map(|b| b.id.clone()).collect();
+        map.workflows = vec![w];
+        // As an older host wrote it: the same text, read and written again, is the same text.
+        let text = toml::to_string(&map).unwrap();
+        let back = crate::knowledge::KnowledgeMap::parse(&text).unwrap();
+        assert_eq!(toml::to_string(&back).unwrap(), text);
+        assert_eq!(back.workflows, map.workflows);
+    }
+
+    #[test]
     fn allow_takes_each_known_action_once_and_is_left_out_while_empty() {
         let mut w = workflow("payments");
         assert!(!toml::to_string(&w).unwrap().contains("allow"));
@@ -1101,8 +1138,15 @@ pub(crate) mod tests {
         let blocks = vec![instruction("base")];
         let mut w = workflow("payments");
         assert!(validate(std::slice::from_ref(&w), &blocks).is_ok());
+        assert_eq!((MAX_INSTRUCTIONS, MAX_WORKFLOW_BLOCKS), (20_000, 20));
         w.instructions = "x".repeat(MAX_INSTRUCTIONS + 1);
-        assert!(validate(std::slice::from_ref(&w), &blocks).is_err());
+        let error = validate(std::slice::from_ref(&w), &blocks)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("20000") && error.contains("20001"),
+            "{error}"
+        );
         w.instructions = "x".repeat(MAX_INSTRUCTIONS);
         assert!(validate(std::slice::from_ref(&w), &blocks).is_ok());
         w.blocks = vec!["missing".into()];
@@ -1112,9 +1156,19 @@ pub(crate) mod tests {
         assert!(error.contains("missing"), "{error}");
         w.blocks = (0..=MAX_WORKFLOW_BLOCKS).map(|n| format!("b{n}")).collect();
         let many: Vec<Block> = w.blocks.iter().map(|b| instruction(b)).collect();
-        assert!(validate(std::slice::from_ref(&w), &many).is_err());
+        let error = validate(std::slice::from_ref(&w), &many)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("at most 20 blocks (it lists 21)"), "{error}");
         w.blocks.pop();
         assert!(validate(std::slice::from_ref(&w), &many).is_ok());
+        // A block's text keeps its own limit.
+        let mut long = instruction("long");
+        long.text = "x".repeat(MAX_BLOCK_TEXT);
+        assert!(validate_block(&long).is_ok());
+        long.text.push('x');
+        let error = validate_block(&long).unwrap_err().to_string();
+        assert!(error.contains("8000"), "{error}");
         w.blocks.clear();
         w.repositories = (0..=MAX_REPOSITORIES)
             .map(|_| Repository {

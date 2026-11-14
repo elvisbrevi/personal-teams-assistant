@@ -439,19 +439,24 @@ Knowledge
                            Azure task type with the bugs). The implementation agents follow them.
   prompts list | prompts show ID         The implementation agents' instructions (plan, code, request, direct).
   prompts edit ID | prompts reset ID     JSON on stdin: {\"instructions\": TEXT}; reset restores the default.
-  workflows list | workflows show ID     Workflows: recipes for implementing the items of one Azure DevOps project.
+  workflows list | workflows show ID     Workflows: recipes for implementing the items of one Azure DevOps project,
+                           with how much of each limit they use (usage: instructions, blocks, context).
   workflows save [--confirmed]   JSON on stdin: id, name, description, enabled, auto_start, organization
                            (https://dev.azure.com/NAME), project, repositories [{id, name}], machine (ID),
                            checkouts {REPOSITORY_ID: DIRECTORY}, agent {provider, model, effort},
-                           instructions (at most 8000 characters), blocks (IDs) and allow: what its coding
-                           runs may do that the fixed rules forbid (work_items, teams, merge, deploy;
-                           empty by default; any of them needs --confirmed). Checked against the
-                           project's catalog, the machine's roots and checkouts and its installed CLIs;
-                           what cannot be verified comes back as warnings. Saved on the coordinator only.
+                           instructions (at most 20000 characters), blocks (IDs, at most 20) and allow:
+                           what its coding runs may do that the fixed rules forbid (work_items, teams,
+                           merge, deploy; empty by default; any of them needs --confirmed). A run gets
+                           its instructions and instruction blocks whole: a workflow whose largest run
+                           context would exceed 100000 characters is refused with the numbers. Checked
+                           against the project's catalog, the machine's roots and checkouts and its
+                           installed CLIs; what cannot be verified comes back as warnings. Saved on the
+                           coordinator only.
   workflows enable ID | workflows disable ID   Changes only whether the workflow is enabled.
   workflows remove ID --confirmed        Removes a workflow (its definition cannot be recovered).
   workflows blocks list                  Blocks and the workflows that use them.
-  workflows blocks save [--confirmed]    JSON on stdin: id, name, kind (instruction: text; teams_notification:
+  workflows blocks save [--confirmed]    JSON on stdin: id, name, kind (instruction: text of at most 8000
+                           characters, refused when a workflow that lists it would no longer fit; teams_notification:
                            stage, chat {id, name}, mentions, template with {item} {id} {title} {link}
                            {pull_requests} {summary} {state}, needs --confirmed and a chat you belong to; launcher: stage, launcher
                            {id, digest}, only from the local page or the owner's portal, never here).
