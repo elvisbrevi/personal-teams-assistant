@@ -278,12 +278,20 @@ pub(crate) mod contract {
                 .unwrap()
                 .len()
         };
+        // `since` includes its second and `until` excludes its own, whether or not the messages
+        // were received in the same second.
+        let oldest = all.iter().map(|e| e.created_at).min().unwrap();
+        let earlier = all
+            .iter()
+            .filter(|e| e.created_at < newest.created_at)
+            .count();
         assert_eq!(window(Some(newest.created_at + 1), None), 0);
-        assert_eq!(window(None, Some(newest.created_at)), 0);
+        assert_eq!(window(None, Some(newest.created_at)), earlier);
         assert_eq!(
             window(Some(newest.created_at), Some(newest.created_at + 1)),
-            all.len()
+            all.len() - earlier
         );
+        assert_eq!(window(Some(oldest), Some(newest.created_at + 1)), all.len());
     }
 
     fn in_flight_statuses_are_refused(store: &dyn AuditStore) {
