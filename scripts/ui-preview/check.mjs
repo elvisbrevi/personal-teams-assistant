@@ -2408,6 +2408,7 @@ for (const [label, viewport] of [['desktop', { width: 1280, height: 900 }], ['ph
   await page.waitForSelector('#workflow-watcher-state p');
   const watching = await page.locator('#workflow-watcher-state').innerText();
   check(`automatic starts ${label}: Settings shows the interval and the last poll`, /revisa cada 5 minutos/.test(watching) && /Última revisión a las .*: 1 ejecución iniciada/.test(watching), watching);
+  check(`automatic starts ${label}: Settings shows the items the last poll saw by category`, /HU 0, bugs 1, tareas 1/.test(watching), watching);
   await page.evaluate(() => { window.__ptaWatcher = { state: 'idle', reason: '', interval_minutes: 5, last_poll: null, next_poll_at: null }; });
   await page.click('#workflow-settings-refresh');
   await page.waitForFunction(() => /inactiva/.test(document.querySelector('#workflow-watcher-state')?.textContent || ''));

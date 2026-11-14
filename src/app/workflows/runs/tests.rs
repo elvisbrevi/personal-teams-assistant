@@ -958,6 +958,98 @@ async fn at_most_concurrency_runs_advance_and_a_disabled_workflow_finishes_its_r
     assert_eq!(bench.count("starts"), 2);
 }
 
+/// A fake Claude CLI whose coding session ends its first turn while a background task is
+/// pending, and finishes in a later turn once `release` exists.
+const CLAUDE: &str = r#"#!/bin/sh
+LOG='{log}'
+echo x >> "$LOG/starts"
+n=$(wc -l < "$LOG/starts" | tr -d ' ')
+read -r initialize
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-initialize","response":{}}}'
+read -r remote
+printf '%s\n' '{"type":"control_response","response":{"subtype":"error","request_id":"pta-remote","error":"not eligible"}}'
+read -r prompt
+printf '%s\n' "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"00000000-0000-4000-8000-00000000000$n\"}"
+printf '%s\n' '{"type":"system","subtype":"task_started","task_id":"pipeline","description":"Pipeline"}'
+printf '%s\n' '{"type":"result","is_error":false,"result":"The pipeline is running; I will be notified when it finishes."}'
+printf '%s\n' '{"type":"system","subtype":"session_state_changed","state":"idle"}'
+echo x >> "$LOG/first_turns"
+while [ ! -f "$LOG/release" ]; do sleep 0.05; done
+printf '%s\n' '{"type":"system","subtype":"task_notification","task_id":"pipeline","status":"completed","output_file":"","summary":"Passed"}'
+printf '%s\n' '{"type":"system","subtype":"session_state_changed","state":"running"}'
+printf '%s\n' "{\"type\":\"result\",\"is_error\":false,\"result\":\"Opened the pull request.\\nBranch: feature/child-$n\"}"
+printf '%s\n' '{"type":"system","subtype":"session_state_changed","state":"idle"}'
+"#;
+
+#[tokio::test]
+async fn a_coding_run_holds_its_slot_and_directories_until_the_session_ends_not_its_first_turn() {
+    let bench = Bench::new().await;
+    let cli = bench.log.join("claude");
+    crate::llm::agent::install_fake_cli(
+        &cli,
+        &CLAUDE.replace("{log}", &bench.log.display().to_string()),
+    );
+    crate::llm::implementation::use_test_cli(Some(cli));
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflow_settings.concurrency = 1;
+    map.workflows[0].agent = Agent {
+        provider: "claude".into(),
+        model: "synthetic-model".into(),
+        effort: "low".into(),
+    };
+    bench.host.state.settings.save_map(&map).unwrap();
+    bench.catalog.add(
+        synthetic::detail(201, "Task", "task", "Second task", "In payments-web."),
+        true,
+    );
+    let first = bench.start(TASK).await;
+    let second = bench.start(201).await;
+    let run = bench
+        .until(&first, |r| {
+            r.children[0].coding.as_ref().is_some_and(|c| c.started)
+        })
+        .await;
+    let coding = run.children[0].coding.clone().unwrap().id;
+    while bench.count("first_turns") == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    // Its first turn ended with the pipeline pending: the run is still coding and holds the
+    // only slot.
+    for _ in 0..3 {
+        bench.tick().await;
+    }
+    let run = bench.run(&first);
+    assert_eq!(run.state, Phase::Coding, "{:?}", run.attention);
+    assert_eq!(bench.implementation(&coding).await, "running");
+    let waiting = bench.run(&second);
+    assert!(!waiting.admitted);
+
+    // With a second slot the next run is admitted, but its launch on the same checkout is
+    // refused as busy and it waits.
+    map.workflow_settings.concurrency = 2;
+    bench.host.state.settings.save_map(&map).unwrap();
+    let waiting = bench
+        .until(&second, |r| {
+            r.error
+                .as_deref()
+                .is_some_and(|e| e.contains("Another run is using these directories"))
+        })
+        .await;
+    assert!(!waiting.children[0].coding.as_ref().unwrap().started);
+    assert_eq!(bench.count("starts"), 1);
+
+    // The later turn finishes the work: the run ends done with that turn's branch.
+    bench.release();
+    let run = bench.state(&first, Phase::PullRequests).await;
+    assert_eq!(run.children[0].outcome.as_deref(), Some("done"));
+    assert_eq!(run.children[0].branch.as_deref(), Some("feature/child-1"));
+    bench
+        .until(&second, |r| {
+            r.children[0].coding.as_ref().is_some_and(|c| c.started)
+        })
+        .await;
+}
+
 #[test]
 fn the_line_for_a_slot_is_creation_order_and_a_retrying_run_keeps_its_place() {
     let item = |id: u64| Item {
@@ -1445,11 +1537,19 @@ async fn a_failed_pull_request_read_waits_for_the_poll_interval_and_a_success_cl
     bench.state(&id, Phase::PullRequests).await;
     bench.catalog.failing_pulls.store(true, Ordering::SeqCst);
     bench.offset.store(301, Ordering::SeqCst);
+    // The tick reads the clock itself: a second may pass between it and these reads.
+    let before = bench.now();
     bench.tick_with(300).await;
+    let after = bench.now();
     let run = bench.run(&id);
     assert_eq!(run.state, Phase::PullRequests);
     assert!(run.error.unwrap().contains("could not be read"));
-    assert_eq!(run.checked_at, Some(bench.now()));
+    assert!(
+        run.checked_at
+            .is_some_and(|t| (before..=after).contains(&t)),
+        "{:?} not in {before}..={after}",
+        run.checked_at
+    );
     let reads = bench.reads("pullrequests");
     bench.tick_with(300).await;
     bench.tick_with(300).await;

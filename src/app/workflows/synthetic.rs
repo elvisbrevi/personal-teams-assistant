@@ -27,6 +27,9 @@ pub(in crate::app) struct Catalog {
     /// The most items a listing may return, whatever the limit asked (a catalog larger than
     /// the read's bound).
     pub list_cap: Mutex<Option<usize>>,
+    /// The task-category types whose work item guide lists them with the bugs (a development
+    /// bug): the To-Do list without a kind holds them, its `task` kind does not.
+    pub listed_with_bugs: Mutex<BTreeSet<String>>,
 }
 
 #[cfg(unix)]
@@ -137,15 +140,19 @@ impl Catalog {
     }
     /// The items assigned to the user in a state of a project, newest ID first, at most
     /// `limit` (with `has_more` when there are others): the To-Do read the watcher makes.
+    /// Without a kind it holds the HUs, the bugs and the task types listed with them; the
+    /// `task` kind holds every other task-category type, as the To-Do list groups them.
     pub(in crate::app) fn ready_items(
         &self,
         source: Option<&str>,
         project: &str,
         state: &str,
+        kind: Option<&str>,
         limit: usize,
     ) -> Result<crate::tools::todo::List, String> {
+        let asked = kind.map(|k| format!(" kind {k}")).unwrap_or_default();
         self.requests.lock().unwrap().push(format!(
-            "GET list {project} {state} limit {limit} source {}",
+            "GET list {project} {state}{asked} limit {limit} source {}",
             source.unwrap_or("-")
         ));
         if self.failing_state.lock().unwrap().as_deref() == Some(state) {
@@ -154,6 +161,12 @@ impl Catalog {
         if self.failing_lists.load(std::sync::atomic::Ordering::SeqCst) {
             return Err("[network] Azure work items could not be read.".into());
         }
+        let listed = self.listed_with_bugs.lock().unwrap().clone();
+        let group = |item: &Item| match item.category.as_str() {
+            "requirement" => "hu",
+            "task" if !listed.contains(&item.kind) => "task",
+            _ => "bug",
+        };
         let assigned = self.assigned.lock().unwrap().clone();
         let mut items: Vec<Item> = self
             .items
@@ -162,6 +175,7 @@ impl Catalog {
             .values()
             .filter(|d| {
                 assigned.contains(&d.item.id)
+                    && kind.map_or(group(&d.item) != "task", |k| group(&d.item) == k)
                     && d.item.state == state
                     && d.item.project.eq_ignore_ascii_case(project)
             })

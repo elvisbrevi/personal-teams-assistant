@@ -495,7 +495,7 @@
         // The ready-state watcher on this computer (src/app/workflows/watcher.rs `view`).
         watcher: window.__ptaWatcher ?? (workflowSettings.ready_states.some(r => r.states.length)
           ? { state: 'watching', reason: null, interval_minutes: workflowSettings.watch_interval_minutes,
-            last_poll: { at: secs(NOW - 120_000), started: 1, partial: false, projects: [{ organization: org, project: 'Payments', states: ['Ready for development'], complete: true, seen: 2, started: 1, already_seen: 1, deferred: 0, errors: [] }] },
+            last_poll: { at: secs(NOW - 120_000), started: 1, seen_by_category: { requirement: 0, bug: 1, task: 1 }, partial: false, projects: [{ organization: org, project: 'Payments', states: ['Ready for development'], complete: true, seen: 2, seen_by_category: { requirement: 0, bug: 1, task: 1 }, started: 1, already_seen: 1, deferred: 0, errors: [] }] },
             next_poll_at: secs(NOW + 180_000) }
           : { state: 'idle', reason: 'No ready state is configured; choose one for a project in Settings › Workflows.', interval_minutes: workflowSettings.watch_interval_minutes, last_poll: null, next_poll_at: null }) };
       if (args.project) {

@@ -2670,6 +2670,7 @@ const UI_CATALOG = { es: {
   "The watcher checks every {n} minutes.": "La vigilancia revisa cada {n} minutos.",
   "No check yet since the host started.": "Aún no hay revisión desde que arrancó el host.",
   "Last check at {time}: nothing new.": "Última revisión a las {time}: nada nuevo.",
+  "Items seen in that check: HUs {hu}, bugs {bug}, tasks {task}.": "Elementos vistos en esa revisión: HU {hu}, bugs {bug}, tareas {task}.",
   "Part of what it reads was not covered in that check; it continues at the next one.": "Parte de lo que lee no se cubrió en esa revisión; continúa en la siguiente.",
   "Last check at {time}: 1 run started.": "Última revisión a las {time}: 1 ejecución iniciada.",
   "Last check at {time}: {n} runs started.": "Última revisión a las {time}: {n} ejecuciones iniciadas.",
