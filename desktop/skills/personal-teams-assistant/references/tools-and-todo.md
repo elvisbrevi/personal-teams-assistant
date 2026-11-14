@@ -623,8 +623,10 @@ run (any state but `done` and `cancelled`).
   refusal from Teams records `refused` with the reason and the run goes on; a failure after the
   request left is `uncertain` and nothing is ever retried. A launcher block runs the approved
   launcher of the coordinator only while it is still approved with the digest the block stored
-  (otherwise `not_started`, with the reason), never shows or keeps its output, and when it
-  `failed`, `timed_out` or ended `uncertain` stops the run in `needs_attention`. `status` shows every outcome in
+  (otherwise `not_started`, with the reason), never shows or keeps its output, waits with nothing
+  recorded while that launcher is already running or three launchers run on the coordinator, and
+  when it `failed`, `timed_out`, was `stopped` by the owner or ended `uncertain` stops the run in
+  `needs_attention`. `status` shows every outcome in
   `block_outcomes` (`block`, `stage`, `occurrence`, `outcome`, `reason`, `exit_code`,
   `duration_ms`, `message_id`; `skipped` marks a stage that had already happened when a run of an
   older version was first seen); an `attempting` outcome that a restart interrupted reads

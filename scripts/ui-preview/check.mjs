@@ -1753,7 +1753,7 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await consumers.getByRole('button', { name: /^Probar clave/ }).click();
   await consumers.getByText('aceptó la clave').waitFor();
   check(`${label}: a test shows only a status sentence`, JSON.stringify(await consumerCalls()) === '["bind","check"]' && await consumers.innerText().then(text => !text.includes('rotated-synthetic') && !text.includes('release.example.test')));
-  check(`${label}: a proposed launcher is listed as text with its command, folder and variables, waiting for approval`, await page.locator('#launchers').innerText().then(text => text.includes('release-tool') && text.includes('/usr/local/bin/release --fixed') && text.includes('/home/user/work') && text.includes('RELEASE_URL desde DEPLOY_ENDPOINT') && text.includes('<b>not markup</b>') && text.includes('Esperando tu aprobación')) && await page.locator('#launcher-list b').count() === 0);
+  check(`${label}: a proposed launcher is listed as text with its command, folder and variables, waiting for approval`, await page.locator('#launchers').innerText().then(text => text.includes('release-tool') && text.includes('/usr/local/bin/release --fixed') && text.includes('/home/user/work') && text.includes('RELEASE_URL desde DEPLOY_ENDPOINT') && text.includes('Límite de tiempo: 1 minuto') && text.includes('<b>not markup</b>') && text.includes('Esperando tu aprobación')) && await page.locator('#launcher-list b').count() === 0);
   await page.evaluate(axeSource);
   check(`${label}: consumers pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   check(`${label}: consumers keep the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
@@ -1764,15 +1764,28 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await page.evaluate(async () => { window.__ptaLaunchersHere = true; await loadConsumers(); });
   await page.locator('#launcher-list').getByRole('button', { name: 'Aprobar el lanzador release-tool' }).click();
   await page.locator('#launcher-list .badge', { hasText: 'Aprobado' }).waitFor();
-  check(`${label}: approving sends the digest of the definition shown and hides the button`, await page.evaluate(() => {
+  check(`${label}: approving sends the digest and time limit of the definition shown and hides the button`, await page.evaluate(() => {
     const call = window.__ptaConsumerCalls.at(-1);
-    return call.method === 'approve' && call.id === 'release-tool' && call.digest === 'd'.repeat(64);
+    return call.method === 'approve' && call.id === 'release-tool' && call.digest === 'd'.repeat(64) && call.timeout_seconds === 60;
   }) && await page.locator('#launcher-list').getByRole('button', { name: /^Aprobar/ }).count() === 0);
+  // A running launcher shows when it started and when its limit stops it; only this machine stops it.
+  await page.evaluate(async now => { window.__ptaSetLauncherRunning({ started_at: now - 120, stops_at: now + 3480, seconds_left: 3480 }); window.__ptaLaunchersHere = false; await loadConsumers(); }, Math.floor(Date.now() / 1000));
+  check(`${label}: in the portal a running launcher is listed without Stop`, await page.locator('#launcher-list .badge', { hasText: 'En ejecución' }).count() === 1
+    && await page.locator('#launcher-list').innerText().then(text => text.includes('En ejecución desde las') && text.includes('su límite de tiempo lo detiene a las'))
+    && await page.locator('#launcher-list').getByRole('button', { name: /^Detener/ }).count() === 0);
+  await page.evaluate(async () => { window.__ptaLaunchersHere = true; await loadConsumers(); });
+  check(`${label}: a running launcher passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await page.locator('#launcher-list').getByRole('button', { name: 'Detener el lanzador release-tool' }).click();
+  await page.locator('#launcher-list .badge', { hasText: 'Aprobado' }).waitFor();
+  check(`${label}: stopping names the launcher and it is no longer listed as running`, await page.evaluate(() => {
+    const call = window.__ptaConsumerCalls.at(-1);
+    return call.method === 'stop' && call.id === 'release-tool';
+  }) && await page.locator('#launcher-list').getByRole('button', { name: /^Detener/ }).count() === 0);
   await consumers.getByRole('button', { name: 'Dejar de usar' }).click();
   await consumers.locator('.badge', { hasText: 'Ninguna variable elegida' }).waitFor();
   await page.locator('#launcher-list').getByRole('button', { name: /^Eliminar/ }).click();
   await page.locator('#launchers').waitFor({ state: 'hidden' });
-  check(`${label}: approving, stopping and removing call only their own operations`, JSON.stringify(await consumerCalls()) === '["bind","check","approve","unbind","remove"]');
+  check(`${label}: approving, stopping and removing call only their own operations`, JSON.stringify(await consumerCalls()) === '["bind","check","approve","stop","unbind","remove"]');
   // Delivery destinations: a person approves exactly what is shown; a delivery asks twice and reports only a status.
   const deliveries = page.locator('#deliveries');
   check(`${label}: a proposed destination shows its address, headers, body, credential and variables as text`, await deliveries.innerText().then(text => text.includes('PUT https://editor.example.test/api/import/secrets/OPENAI_API_KEY')

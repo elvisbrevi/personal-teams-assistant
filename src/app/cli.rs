@@ -301,19 +301,27 @@ Account variables
                            --settings also replaces this computer's portable settings with the account's (backed up).
                            Repeat the same command to resume an interrupted migration; originals are never changed.
   variables migrate status    The durable outcome of the migration for the signed-in account.
-  variables launcher list     Local launchers, proposed and approved (owner's trusted machine only).
+  variables launcher list     Local launchers, proposed and approved, with each one's time limit and, while it runs,
+                           when it started, when its limit stops it and the seconds left (owner's trusted machine
+                           only).
   variables launcher define NAME --description TEXT --program PATH --directory DIR --env ENV=ID [--env ...]
                            [--arg ARG ...] [--timeout SECONDS] --confirmed
+                           --timeout is its time limit, 1 to 3600 seconds (60 by default); the limit is part of
+                           what the owner approves.
                            Proposes a program to receive the named variables as environment variables of that one
                            process (never arguments). Protected settings such as PATH or LD_* are refused. It runs
                            nothing until the owner approves it (launcher approve, or Settings › Credentials in the
                            application pta app open shows, or the owner's portal).
   variables launcher approve NAME [--digest SHA256] --confirmed
                            The owner approves a proposed launcher on this machine. Without --confirmed it shows the
-                           program, its SHA-256, arguments, folder and variables to review; --digest pins the
-                           reviewed SHA-256, so a definition that changed since is refused.
+                           program, its SHA-256, arguments, folder, variables and time limit to review; --digest
+                           pins the reviewed SHA-256, so a definition that changed since is refused.
   variables launcher run NAME [--pin ENV=VERSION ...] --confirmed
-                           Runs it with the values resolved now; prints status and references, never output or values.
+                           Runs it with the values resolved now and waits for it to end; prints status and
+                           references, never output or values. Launchers with different names run side by side
+                           (up to 3 at a time); the same launcher never runs twice at once.
+  variables launcher stop NAME
+                           Stops a running launcher and everything it started; its run ends as stopped.
   variables launcher remove NAME [--confirmed]
                            Removes a launcher (proposed or approved); it needs no confirmation, and --confirmed is
                            accepted so the same command line as define and run works.
@@ -2021,6 +2029,9 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
             )
             .await
         }
+        ("launcher", Some("stop")) => {
+            call("variable_launcher_stop", json!({"id":word(3)?}), None, true).await
+        }
         ("launcher", Some("define")) => {
             let env = pairs(options(args, "--env"), |v| Some(v.to_owned()), "--env")?;
             let program = option(args, "--program").context("--program is required")?;
@@ -2121,21 +2132,23 @@ where
             )
         })
         .collect();
+    let limit = launcher["timeout_seconds"].as_u64();
     if let Some(reply) = unconfirmed(
         args,
         format!(
-            "Approve launcher {name}: program {} (SHA-256 {digest}) with arguments {} in {}, receiving the variables {} as environment variables whenever it runs?",
+            "Approve launcher {name}: program {} (SHA-256 {digest}) with arguments {} in {}, receiving the variables {} as environment variables whenever it runs, and stopped after {} seconds at the latest?",
             launcher["program"],
             launcher["args"],
             launcher["directory"],
-            serde_json::to_string(&variables)?
+            serde_json::to_string(&variables)?,
+            launcher["timeout_seconds"]
         ),
     ) {
         return Ok(reply);
     }
     send(
         "variable_launcher_approve",
-        json!({"id":name,"digest":digest}),
+        json!({"id":name,"digest":digest,"timeout_seconds":limit}),
     )
     .await
 }
@@ -2439,7 +2452,7 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | [
                 "variables",
                 "launcher",
-                "define" | "approve" | "remove" | "run",
+                "define" | "approve" | "remove" | "run" | "stop",
                 _
             ]
             | [

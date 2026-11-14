@@ -700,7 +700,7 @@ async fn a_failed_or_timed_out_launcher_ends_the_run_in_needs_attention() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn one_launcher_runs_at_a_time_and_another_run_waits_for_it() {
+async fn a_launcher_runs_once_at_a_time_and_a_run_waits_for_it_or_for_a_free_slot() {
     let bench = Bench::new().await;
     bench.merged();
     let release = bench.launcher("release", "exit 0", 30);
@@ -710,8 +710,10 @@ async fn one_launcher_runs_at_a_time_and_another_run_waits_for_it() {
         Stage::PullRequestsCompleted,
         &release,
     )]);
-    // Another launcher is running: this run waits, with nothing recorded, then goes on.
-    let busy = consumers::busy_guard(&bench.host.state);
+    // Another launcher running leaves room for it.
+    let mut others = vec![consumers::busy_guard(&bench.host.state, "other-1")];
+    // The same launcher is running: this run waits, with nothing recorded, then goes on.
+    let busy = consumers::busy_guard(&bench.host.state, "release");
     let id = bench.start(TASK).await;
     bench.state(&id, Phase::Blocks).await;
     assert_eq!(
@@ -721,9 +723,23 @@ async fn one_launcher_runs_at_a_time_and_another_run_waits_for_it() {
         Progress::Waiting
     );
     assert!(bench.run(&id).block_outcomes.is_empty());
+    // As many other launchers as the bound allows are running: it still waits.
     drop(busy);
+    while others.len() < crate::consumers::MAX_RUNNING {
+        let name = format!("other-{}", others.len() + 1);
+        others.push(consumers::busy_guard(&bench.host.state, &name));
+    }
+    assert_eq!(
+        acting::execute(&bench.host, &id, bench.now())
+            .await
+            .unwrap(),
+        Progress::Waiting
+    );
+    assert!(bench.run(&id).block_outcomes.is_empty());
+    others.pop();
     bench.state(&id, Phase::Done).await;
     assert_eq!(bench.ran("release"), 1);
+    drop(others);
 }
 
 #[cfg(unix)]
@@ -757,7 +773,7 @@ async fn the_engines_authority_reaches_only_its_two_paths_and_no_other_caller_ho
                 &bench.host,
                 "release",
                 &release.digest,
-                consumers::busy_guard(&bench.host.state),
+                consumers::busy_guard(&bench.host.state, "release"),
             ),
         )
         .await;
@@ -780,7 +796,7 @@ async fn the_engines_authority_reaches_only_its_two_paths_and_no_other_caller_ho
             &bench.host,
             "release",
             &release.digest,
-            consumers::busy_guard(&bench.host.state)
+            consumers::busy_guard(&bench.host.state, "release")
         )
         .await
         .is_err()
@@ -821,7 +837,7 @@ async fn the_engines_authority_reaches_only_its_two_paths_and_no_other_caller_ho
             &bench.host,
             "release",
             &release.digest,
-            consumers::busy_guard(&bench.host.state),
+            consumers::busy_guard(&bench.host.state, "release"),
         ),
     )
     .await;
@@ -1054,7 +1070,7 @@ async fn a_run_recorded_by_an_older_version_never_acts_on_what_already_happened(
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_failed_runs_launcher_waits_while_another_launcher_runs_and_then_runs() {
+async fn a_failed_runs_launcher_waits_while_it_is_running_elsewhere_and_then_runs() {
     let bench = Bench::new().await;
     let release = bench.launcher("release", "exit 0", 30);
     bench.define(&release);
@@ -1063,7 +1079,7 @@ async fn a_failed_runs_launcher_waits_while_another_launcher_runs_and_then_runs(
     let mut run = bench.run(&id);
     run.definition.as_mut().unwrap().checkouts.clear();
     bench.save(&run);
-    let busy = consumers::busy_guard(&bench.host.state);
+    let busy = consumers::busy_guard(&bench.host.state, "release");
     bench.state(&id, Phase::Failed).await;
     for _ in 0..3 {
         bench.tick().await;

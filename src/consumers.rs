@@ -16,8 +16,10 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
 };
+use tokio_util::sync::CancellationToken;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -131,7 +133,9 @@ pub const MAX_ENV: usize = 8;
 pub const MAX_ARGS: usize = 32;
 pub const MAX_ARG: usize = 2048;
 pub const DEFAULT_TIMEOUT: u64 = 60;
-pub const MAX_TIMEOUT: u64 = 600;
+pub const MAX_TIMEOUT: u64 = 3600;
+/// How many launchers, each with a different name, run at the same time on a machine.
+pub const MAX_RUNNING: usize = 3;
 
 /// Environment names a variable can never be injected as: runtime and loader controls, search
 /// paths, proxy and certificate settings, tool configuration that runs code, and the
@@ -422,7 +426,9 @@ pub fn define(definition: Definition, now: i64) -> Result<Launcher> {
     }
     let timeout_seconds = definition.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT);
     if !(1..=MAX_TIMEOUT).contains(&timeout_seconds) {
-        return Err(input("The timeout is between 1 and 600 seconds."));
+        return Err(input(format!(
+            "The timeout is between 1 and {MAX_TIMEOUT} seconds."
+        )));
     }
     Ok(Launcher {
         digest: digest(&program)?,
@@ -562,16 +568,25 @@ impl Launchers {
         file.launchers.push(launcher);
         self.save(&file)
     }
-    /// Records a person's approval of the definition they saw, identified by its program digest;
-    /// a definition that changed since is not approved.
-    pub fn approve(&self, id: &str, digest: &str, now: i64) -> Result<Launcher> {
+    /// Records a person's approval of the definition they saw, identified by its program digest
+    /// and, when the caller showed it, its time limit; a definition that changed since is not
+    /// approved.
+    pub fn approve(
+        &self,
+        id: &str,
+        digest: &str,
+        timeout_seconds: Option<u64>,
+        now: i64,
+    ) -> Result<Launcher> {
         let mut file = self.load()?;
         let launcher = file
             .launchers
             .iter_mut()
             .find(|l| l.id == id)
             .ok_or_else(|| input("There is no launcher with that name on this machine."))?;
-        if launcher.digest != digest {
+        if launcher.digest != digest
+            || timeout_seconds.is_some_and(|limit| limit != launcher.timeout_seconds)
+        {
             return Err(Error::Conflict(
                 "This launcher changed since it was shown. Review it again before approving."
                     .into(),
@@ -594,19 +609,127 @@ impl Launchers {
     }
 }
 
+/// The launchers running now on a machine, by name: the same launcher never runs twice at once,
+/// and at most `MAX_RUNNING` run together. Only times are kept, never an environment or output.
+#[derive(Clone, Default)]
+pub struct Running {
+    runs: Arc<Mutex<BTreeMap<String, Arc<Control>>>>,
+}
+
+/// One running launcher: when it was claimed and started, when its limit ends it, and the stop
+/// its owner can ask for.
+struct Control {
+    claimed_at: i64,
+    /// When the process started and when its time limit ends it.
+    started: Mutex<Option<(i64, i64)>>,
+    stop: CancellationToken,
+}
+
+/// The right to run one launcher, held for the whole run and given back when dropped.
+pub struct Slot {
+    running: Running,
+    id: String,
+    control: Arc<Control>,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut runs = self.running.runs.lock().unwrap_or_else(|e| e.into_inner());
+        if runs
+            .get(&self.id)
+            .is_some_and(|control| Arc::ptr_eq(control, &self.control))
+        {
+            runs.remove(&self.id);
+        }
+    }
+}
+
+/// What the listing shows of a running launcher: times only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RunningView {
+    pub started_at: i64,
+    /// When its time limit ends it; `None` while it is still being checked, before it starts.
+    pub stops_at: Option<i64>,
+    pub seconds_left: Option<i64>,
+}
+
+impl Running {
+    /// Take the right to run launcher `id` now, without waiting: refused while that launcher is
+    /// running, or while `MAX_RUNNING` launchers are.
+    pub fn claim(&self, id: &str, now: i64) -> Result<Slot> {
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        if runs.contains_key(id) {
+            return Err(Error::Conflict(
+                "This launcher is already running. Wait for it to end, or stop it first.".into(),
+            ));
+        }
+        if runs.len() >= MAX_RUNNING {
+            return Err(Error::Conflict(format!(
+                "{MAX_RUNNING} launchers are already running on this computer. Wait for one to end, or stop one first."
+            )));
+        }
+        let control = Arc::new(Control {
+            claimed_at: now,
+            started: Mutex::new(None),
+            stop: CancellationToken::new(),
+        });
+        runs.insert(id.to_owned(), control.clone());
+        Ok(Slot {
+            running: self.clone(),
+            id: id.to_owned(),
+            control,
+        })
+    }
+    /// Ask the running launcher `id` to stop; whether one was running.
+    pub fn stop(&self, id: &str) -> bool {
+        let runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        runs.get(id).map(|control| control.stop.cancel()).is_some()
+    }
+    /// The running launcher `id`, if it is running.
+    pub fn view(&self, id: &str, now: i64) -> Option<RunningView> {
+        let runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        let control = runs.get(id)?;
+        let started = *control.started.lock().unwrap_or_else(|e| e.into_inner());
+        Some(match started {
+            Some((started_at, stops_at)) => RunningView {
+                started_at,
+                stops_at: Some(stops_at),
+                seconds_left: Some((stops_at - now).max(0)),
+            },
+            None => RunningView {
+                started_at: control.claimed_at,
+                stops_at: None,
+                seconds_left: None,
+            },
+        })
+    }
+}
+
 /// What a launcher run established. Output of the process is not captured.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RunResult {
-    /// `succeeded`, `failed`, `timed_out` or `not_started`.
+    /// `succeeded`, `failed`, `timed_out` (its time limit ended it), `stopped` (its owner
+    /// stopped it) or `not_started`.
     pub status: &'static str,
     pub exit_code: Option<i32>,
     pub duration_ms: u64,
 }
 
-/// Run the launcher's program with exactly the selected values. The program and its digest are
-/// checked again here; the environment is the vetted minimal one plus the selected variables.
-pub async fn run(launcher: &Launcher, values: Vec<(String, Secret)>) -> Result<RunResult> {
+/// Run the launcher's program with exactly the selected values, holding its slot. The program
+/// and its digest are checked again here; the environment is the vetted minimal one plus the
+/// selected variables. The process runs in a group of its own: when its time limit ends or its
+/// owner stops it, everything it started is ended with it.
+pub async fn run(
+    launcher: &Launcher,
+    values: Vec<(String, Secret)>,
+    slot: &Slot,
+) -> Result<RunResult> {
     ensure_approved(launcher)?;
+    if slot.id != launcher.id {
+        return Err(Error::Conflict(
+            "The launcher slot is for another launcher.".into(),
+        ));
+    }
     let program = launcher
         .program
         .canonicalize()
@@ -633,42 +756,69 @@ pub async fn run(launcher: &Launcher, values: Vec<(String, Secret)>) -> Result<R
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     for (name, value) in &values {
         command.env(name, value.expose());
     }
-    let Ok(mut child) = command.spawn() else {
-        return Ok(RunResult {
-            status: "not_started",
-            exit_code: None,
-            duration_ms: 0,
-        });
+    let not_started = RunResult {
+        status: "not_started",
+        exit_code: None,
+        duration_ms: 0,
     };
-    let waited =
-        tokio::time::timeout(Duration::from_secs(launcher.timeout_seconds), child.wait()).await;
+    if slot.control.stop.is_cancelled() {
+        return Ok(not_started);
+    }
+    let Ok(mut child) = command.spawn() else {
+        return Ok(not_started);
+    };
+    // Declared after the child, so it is dropped first: the group is ended while its leader is
+    // not reaped yet, also when this run is abandoned midway.
+    let mut tree = child.id().map(crate::llm::implementation::ProcessTree);
+    let now = chrono::Utc::now().timestamp();
+    *slot
+        .control
+        .started
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) =
+        Some((now, now.saturating_add_unsigned(launcher.timeout_seconds)));
+    enum Ended {
+        Exited(std::io::Result<std::process::ExitStatus>),
+        TimedOut,
+        Stopped,
+    }
+    let ended = tokio::select! {
+        waited = tokio::time::timeout(Duration::from_secs(launcher.timeout_seconds), child.wait()) => {
+            waited.map_or(Ended::TimedOut, Ended::Exited)
+        }
+        _ = slot.control.stop.cancelled() => Ended::Stopped,
+    };
     let duration_ms = started.elapsed().as_millis() as u64;
-    Ok(match waited {
-        Ok(Ok(status)) => RunResult {
-            status: if status.success() {
+    let (status, exit_code) = match &ended {
+        Ended::Exited(Ok(status)) => (
+            if status.success() {
                 "succeeded"
             } else {
                 "failed"
             },
-            exit_code: status.code(),
-            duration_ms,
-        },
-        Ok(Err(_)) => RunResult {
-            status: "failed",
-            exit_code: None,
-            duration_ms,
-        },
-        Err(_) => {
-            let _ = child.kill().await;
-            RunResult {
-                status: "timed_out",
-                exit_code: None,
-                duration_ms,
-            }
-        }
+            status.code(),
+        ),
+        Ended::Exited(Err(_)) => ("failed", None),
+        Ended::TimedOut => ("timed_out", None),
+        Ended::Stopped => ("stopped", None),
+    };
+    if matches!(ended, Ended::Exited(Ok(_))) {
+        // It ended by itself: what it left behind is not ended, as before.
+        std::mem::forget(tree.take());
+    } else {
+        // The whole group is ended before its leader is reaped.
+        drop(tree.take());
+        let _ = child.kill().await;
+    }
+    Ok(RunResult {
+        status,
+        exit_code,
+        duration_ms,
     })
 }
 
