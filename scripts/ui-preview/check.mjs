@@ -2654,9 +2654,17 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   // The run that needs attention: resume, then cancel, each on a second press.
   await page.click('#run-detail-back');
   await page.waitForSelector('#run-rows [data-run]');
+  await page.evaluate(() => window.__ptaDeliverTask('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e04'));
   await page.click('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e04"]');
   await page.waitForSelector('#run-attention');
   check(`runs ${label}: a run that needs attention says why`, /permission prompt/.test(await detailText()));
+  const taskFacts = await page.locator('#run-children .resource-facts').first().textContent();
+  check(`runs ${label}: a task's branches in other repositories, their pull requests and the ignored lines are shown`,
+    /Rama feature\/5012-rounding ·/.test(taskFacts ?? '') && /Rama feature\/5012-rounding-web en payments-web/.test(taskFacts ?? '')
+    && /payments-web\/pullrequest\/52/.test(await page.locator('#run-children .run-pulls').first().innerHTML())
+    && /repositorios que este workflow no tiene: billing/.test(await page.locator('.run-child-ignored').first().textContent() ?? ''), taskFacts);
+  const taskScan = await scan(page);
+  check(`runs ${label}: a task with branches in several repositories passes WCAG 2.2 AA`, taskScan.length === 0, JSON.stringify(taskScan));
   const stoppedWhy = await page.locator('#run-failure').textContent().catch(() => '');
   check(`runs ${label}: the cause its machine reported is shown in the user's language`, /^Por qué se detuvo .*solicitud de permiso/.test(stoppedWhy ?? '') && /solicitud de permiso/.test(await page.locator('.run-child-failure').first().textContent()), stoppedWhy);
   await page.locator('.run-actions button', { hasText: 'Reanudar' }).click();

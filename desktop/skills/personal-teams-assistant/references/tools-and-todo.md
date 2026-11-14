@@ -463,9 +463,12 @@ How a workflow takes an item from its ready state to its release, and where the 
    confirms them; only that `implementation_create` writes to Azure DevOps. Nothing passes the gate
    without it. A task has no plan and goes straight to coding.
 5. **Children are coded one by one** in the checkout of the repository each names, each with its
-   own guide; each coding agent opens its pull request and reports its branch.
-6. **Pull requests are read** (never merged) until all are completed; an abandoned one, a missing
-   branch or the wait (`pull_request_wait_days`) stops the run in `needs_attention`.
+   own guide; each coding agent opens its pull request and reports its branch. A task is coded in
+   the repository it names and is given every checkout of the workflow: it may change the others
+   too, each on its own branch with its own pull request, reported on one `Branch REPOSITORY: NAME`
+   line each after its `Branch: NAME`.
+6. **Pull requests are read** (never merged) until all are completed, one for each reported branch;
+   an abandoned one, a missing branch or the wait (`pull_request_wait_days`) stops the run in `needs_attention`.
 7. **Blocks act at their stage**: a launcher (an approved program of the coordinator, by digest)
    when the pull requests are completed, notifications with mentions when the run is done or fails.
 8. **Report on request**: `workflow_summary` asks the director for a summary of the record, and
@@ -561,7 +564,17 @@ run (any state but `done` and `cancelled`).
   `implementation_runs`). Then each created child is coded in turn, with full permissions on that
   machine and no prompts, in the checkout of the workflow repository it names (or the first), and
   the run waits until the pull request of the branch each session reported is completed. A task
-  (or a development bug listed with the bugs) is coded directly, with no plan or children. Refused:
+  (or a development bug listed with the bugs) is coded directly, with no plan or children: its
+  working directory is the checkout of the repository it names first (or the first), where its
+  pull request goes, and the run is given every other checkout of the workflow too (at most 16
+  directories), so it may change those repositories when the item needs it, each on its own branch
+  with its own pull request. Its report ends with `Branch: NAME` for its own repository and one
+  `Branch REPOSITORY: NAME` line for each other repository it pushed a branch in (the workflow's
+  name for it); the run waits for a pull request of every reported branch. A line for a repository
+  the workflow does not have (or has no checkout of) is ignored and listed in the child's
+  `ignored_branches`. Because every task run of a workflow holds all its checkouts, two of them
+  never run at once on its machine: the second waits (`Another run is using these directories`).
+  Refused:
   a disabled or unknown workflow, one of another project, an item that is not assigned to the user,
   and an item that already has an active run (the refusal names it). With `--director`, a run the
   director finds no workflow for (or without a director) waits `unassigned`:
@@ -575,8 +588,9 @@ run (any state but `done` and `cancelled`).
   classification is retrying keeps its place once its retry is due. `pta workflows status RUN` (MCP `workflow_run_status`) is the
   whole record: the stage timeline with times and outcomes, the planning run and each child's
   coding run (`implementation_runs` with the machine and ID shows them), the creation ledger entry
-  (`implementation_creation`), every child's verified link, branch and pull requests with their
-  links and status, and `attention` (what to look at) or `error`. A planning or coding run that
+  (`implementation_creation`), every child's verified link, branch (a task's branches in other
+  repositories in `branches`, `{repository, branch}`, and the repositories of ignored lines in
+  `ignored_branches`) and pull requests with their links, status and repository, and `attention` (what to look at) or `error`. A planning or coding run that
   did not end with its answer has its machine's cause in `planning.failure` or the child's
   `coding.failure`, and a classification without an answer in `classification.failure`
   (`{cause, exit_code?, stderr?}`, the vocabulary of `implementation_runs`). Report links as they are.

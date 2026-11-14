@@ -1069,25 +1069,136 @@ pub(in crate::app) fn named_repository(
 /// The branch a coding session reported: the last line of its report that starts with
 /// `Branch:`, as a plain branch name.
 pub(in crate::app) fn reported_branch(output: &str) -> Option<String> {
-    output.lines().rev().find_map(|line| {
-        // A list marker or emphasis may open the line.
-        let line = line.trim_start_matches(|c: char| c.is_whitespace() || "-*>`".contains(c));
-        let rest = line
-            .get(..BRANCH.len())
-            .filter(|p| p.eq_ignore_ascii_case(BRANCH))
-            .map(|_| &line[BRANCH.len()..])?;
-        let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || "*`\"'".contains(c));
-        let token = rest.split_whitespace().next()?;
-        // Only a remark may follow the name («(pushed)», «— with tests»), never more words.
-        let after = rest[token.len()..].trim_start();
-        if !(after.is_empty() || after.starts_with(['(', '-', '\u{2013}', '\u{2014}'])) {
+    output
+        .lines()
+        .rev()
+        .find_map(|line| match branch_line(line)? {
+            (None, branch) => Some(branch),
+            (Some(_), _) => None,
+        })
+}
+
+/// The other repositories' branches a coding session reported: for each repository named by a
+/// `Branch REPOSITORY: NAME` line, the last such line's branch, as the report names them.
+pub(in crate::app) fn reported_repository_branches(output: &str) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = Vec::new();
+    for line in output.lines().rev() {
+        if let Some((Some(repository), branch)) = branch_line(line)
+            && !found
+                .iter()
+                .any(|(r, _)| r.eq_ignore_ascii_case(&repository))
+        {
+            found.push((repository, branch));
+        }
+    }
+    found.reverse();
+    found
+}
+
+/// One branch line of a report: `Branch: NAME` (no repository) or `Branch REPOSITORY: NAME`,
+/// with a valid branch name and, when one is named, a repository of at most 100 characters
+/// without control characters (what it names is checked against the workflow before use).
+fn branch_line(line: &str) -> Option<(Option<String>, String)> {
+    // A list marker or emphasis may open the line.
+    let line = line.trim_start_matches(|c: char| c.is_whitespace() || "-*>`".contains(c));
+    let word = "Branch";
+    let rest = line
+        .get(..word.len())
+        .filter(|p| p.eq_ignore_ascii_case(word))
+        .map(|_| &line[word.len()..])?;
+    let (repository, rest) = if let Some(rest) = rest.strip_prefix(':') {
+        (None, rest)
+    } else if rest.starts_with(char::is_whitespace) {
+        let (named, rest) = rest.split_once(':')?;
+        let named = named.trim_matches(|c: char| c.is_whitespace() || "*`\"'".contains(c));
+        if named.is_empty() || named.chars().count() > 100 || named.chars().any(char::is_control) {
             return None;
         }
-        // Sentence punctuation and quoting after the name; a trailing hyphen is the name's.
-        let branch = token.trim_end_matches(|c: char| ".,;:)`\"'*".contains(c));
-        let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
-        crate::ado::workflow::valid_branch(branch).then(|| branch.to_owned())
-    })
+        (Some(named.to_owned()), rest)
+    } else {
+        return None;
+    };
+    let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || "*`\"'".contains(c));
+    let token = rest.split_whitespace().next()?;
+    // Only a remark may follow the name («(pushed)», «— with tests»), never more words.
+    let after = rest[token.len()..].trim_start();
+    if !(after.is_empty() || after.starts_with(['(', '-', '\u{2013}', '\u{2014}'])) {
+        return None;
+    }
+    // Sentence punctuation and quoting after the name; a trailing hyphen is the name's.
+    let branch = token.trim_end_matches(|c: char| ".,;:)`\"'*".contains(c));
+    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+    crate::ado::workflow::valid_branch(branch).then(|| (repository, branch.to_owned()))
+}
+
+/// The checkouts a task's coding run is given: its own repository's first (its working
+/// directory), then the workflow's other checkouts in order, at most sixteen.
+fn task_checkouts(
+    workflow: &crate::workflows::Workflow,
+    primary: &crate::workflows::Repository,
+    directory: &Path,
+) -> Vec<(crate::workflows::Repository, PathBuf)> {
+    std::iter::once((primary.clone(), directory.to_path_buf()))
+        .chain(
+            checkouts(workflow)
+                .into_iter()
+                .filter(|(r, _)| !r.id.eq_ignore_ascii_case(&primary.id)),
+        )
+        .take(16)
+        .collect()
+}
+
+/// Record the branches a child's session reported. A task's lines for its other repositories
+/// count only for a repository whose checkout the run was given, by the workflow's own name for
+/// it; any other repository is noted as ignored, its name only when it is a plain one.
+fn record_branches(
+    child: &mut Child,
+    workflow: &crate::workflows::Workflow,
+    task: bool,
+    output: &str,
+) {
+    child.branch = reported_branch(output);
+    child.branches.clear();
+    child.ignored_branches.clear();
+    let (Some(primary), Some(directory)) = (child.repository.clone(), child.directory.clone())
+    else {
+        return;
+    };
+    if !task {
+        return;
+    }
+    let given = task_checkouts(workflow, &primary, &directory);
+    for (named, branch) in reported_repository_branches(output) {
+        let Some((repository, _)) = given
+            .iter()
+            .find(|(r, _)| r.name.eq_ignore_ascii_case(&named))
+        else {
+            let plain = named.len() <= 64
+                && named
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+            let note = if plain {
+                named
+            } else {
+                "(not a plain repository name)".to_owned()
+            };
+            if !child.ignored_branches.contains(&note) && child.ignored_branches.len() < 10 {
+                child.ignored_branches.push(note);
+            }
+            continue;
+        };
+        if repository.id.eq_ignore_ascii_case(&primary.id) {
+            // `Branch PRIMARY: NAME` is the primary's line when there is no plain one.
+            if child.branch.is_none() {
+                child.branch = Some(branch);
+            }
+            continue;
+        }
+        child.branches.push(record::RepositoryBranch {
+            repository: repository.clone(),
+            branch,
+        });
+    }
 }
 
 async fn coding(
@@ -1141,19 +1252,44 @@ async fn coding(
         let (repository, directory) =
             named_repository(workflow, &detail.item.title, &description(&detail))
                 .ok_or("The workflow has no checkout.")?;
-        let mut context = format!(
-            "You are implementing {} {} «{}» ({}){}, in the checkout of repository {} at {}. Open its pull request as the instructions ask. When you finish, end your report with one line `{BRANCH} NAME` naming the branch you pushed (without refs/heads/).\n",
-            child.kind,
-            child.id,
-            child.title,
-            child.url,
-            parent
-                .as_ref()
-                .map(|p| format!(", a child of {p}"))
-                .unwrap_or_default(),
-            repository.name,
-            directory.display()
-        );
+        // A task may need several of the workflow's repositories: its run is given every
+        // checkout, its own repository's first. A planned child stays in the one the plan named.
+        let given = if run.task() {
+            task_checkouts(workflow, &repository, &directory)
+        } else {
+            vec![(repository.clone(), directory.clone())]
+        };
+        let mut context = if given.len() > 1 {
+            let others: Vec<String> = given[1..]
+                .iter()
+                .map(|(r, d)| format!("{} at {}", r.name, d.display()))
+                .collect();
+            format!(
+                "You are implementing {} {} «{}» ({}). Your working directory is the checkout of repository {} at {}, where its pull request goes. This run is also given the checkouts of the workflow's other repositories ({}): when the item needs it, change them too, each on its own branch with its own pull request, opened as the instructions ask. When you finish, end your report with one line `{BRANCH} NAME` naming the branch you pushed in {} (without refs/heads/), and one line `Branch REPOSITORY: NAME` for each other repository you pushed a branch in, REPOSITORY being its name as listed here.\n",
+                child.kind,
+                child.id,
+                child.title,
+                child.url,
+                repository.name,
+                directory.display(),
+                others.join("; "),
+                repository.name,
+            )
+        } else {
+            format!(
+                "You are implementing {} {} «{}» ({}){}, in the checkout of repository {} at {}. Open its pull request as the instructions ask. When you finish, end your report with one line `{BRANCH} NAME` naming the branch you pushed (without refs/heads/).\n",
+                child.kind,
+                child.id,
+                child.title,
+                child.url,
+                parent
+                    .as_ref()
+                    .map(|p| format!(", a child of {p}"))
+                    .unwrap_or_default(),
+                repository.name,
+                directory.display()
+            )
+        };
         // The user's note on the run this one restarted, before anything that may be cut.
         if let Some(note) = &run.handover {
             context.push_str(&handover(note));
@@ -1167,7 +1303,7 @@ async fn coding(
                 provider: workflow.agent.provider.clone(),
                 model: workflow.agent.model.clone(),
                 effort: workflow.agent.effort.clone(),
-                directories: vec![directory.clone()],
+                directories: given.into_iter().map(|(_, d)| d).collect(),
                 context: bounded(context),
                 source: run.item.source.clone(),
                 detail,
@@ -1218,10 +1354,11 @@ async fn coding(
     match observed_state.as_str() {
         "running" => Ok(changed),
         "done" => {
-            let branch = reported_branch(observed["output"].as_str().unwrap_or_default());
+            let task = run.task();
             {
                 let child = &mut run.children[index];
-                child.branch = branch;
+                let output = observed["output"].as_str().unwrap_or_default();
+                record_branches(child, workflow, task, output);
                 child.outcome = Some("done".into());
                 child.finished_at = Some(now);
             }
@@ -1249,27 +1386,31 @@ async fn coding(
     }
 }
 
-/// Read the pull requests of a child's reported branch and record them, keeping what the user
-/// accepted; returns whether they changed.
+/// Read the pull requests of each branch a child reported and record them, keeping what the
+/// user accepted; returns whether they changed.
 async fn detect(
     host: &Arc<Host>,
     azure: &Azure,
     run: &mut Run,
     index: usize,
 ) -> std::result::Result<bool, String> {
-    let child = &run.children[index];
-    let (Some(repository), Some(branch)) = (child.repository.clone(), child.branch.clone()) else {
+    let delivered = run.children[index].delivered();
+    if delivered.is_empty() {
         return Ok(false);
-    };
-    let mut found = azure
-        .pull_requests(&host.state, run, &repository, &branch)
-        .await?;
+    }
+    let mut found = Vec::new();
+    for (repository, branch) in &delivered {
+        found.extend(
+            azure
+                .pull_requests(&host.state, run, repository, branch)
+                .await?,
+        );
+    }
     let child = &mut run.children[index];
     for pull in &mut found {
-        pull.accepted = child
-            .pull_requests
-            .iter()
-            .any(|p| p.id == pull.id && p.accepted);
+        pull.accepted = child.pull_requests.iter().any(|p| {
+            p.id == pull.id && p.repository.eq_ignore_ascii_case(&pull.repository) && p.accepted
+        });
     }
     if child.pull_requests == found {
         return Ok(false);
@@ -1289,7 +1430,7 @@ async fn pull_requests(
     if let Some(child) = run
         .children
         .iter()
-        .find(|c| c.outcome.as_deref() == Some("done") && c.branch.is_none())
+        .find(|c| c.outcome.as_deref() == Some("done") && !c.reported())
     {
         run.stop(
             Phase::NeedsAttention,
@@ -1344,9 +1485,11 @@ async fn pull_requests(
         run.stop(Phase::NeedsAttention, now, reason);
         return Ok(true);
     }
-    // Every coded child has its pull requests, each completed (or abandoned and accepted).
+    // Every branch of every coded child has its pull request, each completed (or abandoned and
+    // accepted).
     let settled = coded.iter().all(|c| {
         !c.pull_requests.is_empty()
+            && c.without_pull_request().is_empty()
             && c.pull_requests
                 .iter()
                 .all(|p| p.status == "completed" || p.accepted)
@@ -1370,10 +1513,18 @@ async fn pull_requests(
         .pull_request_wait_days;
     let since = run.waiting_since.unwrap_or(now);
     if now - since >= i64::from(days) * 86_400 {
-        let missing: Vec<&str> = coded
+        let missing: Vec<String> = coded
             .iter()
-            .filter(|c| c.pull_requests.is_empty())
-            .map(|c| c.url.as_str())
+            .filter_map(|c| {
+                let without = c.without_pull_request();
+                if c.pull_requests.is_empty() {
+                    Some(c.url.clone())
+                } else if !without.is_empty() {
+                    Some(format!("{} ({})", c.url, without.join(", ")))
+                } else {
+                    None
+                }
+            })
             .collect();
         let open: Vec<&str> = coded
             .iter()
@@ -1463,10 +1614,16 @@ pub(in crate::app) async fn resume(host: &Arc<Host>, run: &mut Run, now: i64) ->
                         Err(_) => (coding.state.clone(), None),
                     };
                 if ended.as_deref() != Some("running") {
+                    let (workflow, task) = (run.definition.clone(), run.task());
                     let child = &mut run.children[index];
                     child.outcome = Some("accepted".into());
                     child.finished_at = Some(now);
-                    child.branch = output.as_deref().and_then(reported_branch);
+                    match &workflow {
+                        Some(workflow) => {
+                            record_branches(child, workflow, task, output.as_deref().unwrap_or(""))
+                        }
+                        None => child.branch = output.as_deref().and_then(reported_branch),
+                    }
                     if let (Some(c), Some(ended)) = (child.coding.as_mut(), ended.clone()) {
                         c.state = Some(ended);
                     }
@@ -1477,7 +1634,7 @@ pub(in crate::app) async fn resume(host: &Arc<Host>, run: &mut Run, now: i64) ->
         }
         (Phase::PullRequests, _) => {
             for child in &mut run.children {
-                if child.outcome.as_deref() == Some("done") && child.branch.is_none() {
+                if child.outcome.as_deref() == Some("done") && !child.reported() {
                     child.outcome = Some("accepted".into());
                     accepted.push(json!({"child": child.url, "without": "pull_request"}));
                 }

@@ -2760,6 +2760,8 @@ const UI_CATALOG = { es: {
   "No stage yet.": "Aún no hay etapas.",
   "Starting": "Iniciando",
   "Branch {name}": "Rama {name}",
+  "Branch {name} in {repository}": "Rama {name} en {repository}",
+  "Ignored branch lines for repositories this workflow does not have: {names}": "Se ignoraron líneas de rama de repositorios que este workflow no tiene: {names}",
   "The children are created once you confirm the plan.": "Los hijos se crean cuando confirmes el plan.",
   "No child yet.": "Aún no hay hijos.",
   "Exit code {code}": "Código de salida {code}",

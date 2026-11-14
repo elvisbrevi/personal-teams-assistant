@@ -24,7 +24,8 @@ impl Shell for TestShell {
 
 /// The fake provider CLI: a director session prints `director.jsonl`, a planning session
 /// prints `plan.jsonl` (or waits while `plan_mode` is `block`), and a coding session counts
-/// itself in `starts` and then, by `mode`, reports its branch (`done`), waits for `release`
+/// itself in `starts` and then, by `mode`, reports its branch (`done`), its branches in two
+/// repositories and one the workflow does not have (`multi`), waits for `release`
 /// first (`block`), raises a permission prompt nobody answers (`prompt`), fails (`fail`) or
 /// exits at once with code 1, writing on stderr that a system variable is missing (`exit`,
 /// also a `director_mode`).
@@ -66,6 +67,7 @@ case "$(cat "$LOG/mode" 2>/dev/null)" in
   block) while [ ! -f "$LOG/release" ]; do sleep 0.05; done ;;
   prompt) printf '%s\n' '{"type":"permission.asked","data":{"action":"bash","resources":["git push"]}}' ;;
   fail) printf '%s\n' '{"type":"text","part":{"text":"Could not finish."}}'; exit 1 ;;
+  multi) printf '%s\n' "{\"type\":\"text\",\"part\":{\"text\":\"Changed both.\\nBranch payments-api: feature/old-$n\\nBranch: feature/child-$n\\n**Branch payments-api:** feature/api-$n\\nBranch billing: feature/billing-$n\\nBranch ../x tool: feature/odd\"}}"; exit 0 ;;
 esac
 printf '%s\n' "{\"type\":\"text\",\"part\":{\"text\":\"Implemented change $n.\\nBranch: feature/child-$n\"}}"
 "#;
@@ -526,6 +528,174 @@ async fn a_task_run_codes_the_item_itself_without_a_plan_or_children() {
     assert_eq!((bench.count("plans"), bench.count("starts")), (0, 1));
     assert!(run.planning.is_none() && run.ledger.is_none());
     assert!(bench.catalog.only_reads());
+}
+
+/// The directories the machine gave an implementation run, its working directory first.
+fn launched_directories(bench: &Bench, id: &str) -> Vec<PathBuf> {
+    implementation::test_directories(&bench.host, id)
+}
+
+#[tokio::test]
+async fn a_task_run_works_in_every_repository_of_its_workflow_and_waits_for_each_pull_request() {
+    let bench = Bench::new().await;
+    bench.mode("mode", "multi");
+    let id = bench.start(TASK).await;
+    let run = bench.state(&id, Phase::PullRequests).await;
+    let child = &run.children[0];
+    // Its own repository (the one the item names) is the working directory; the other
+    // checkout is given too.
+    let coding = child.coding.clone().unwrap();
+    assert_eq!(
+        launched_directories(&bench, &coding.id),
+        [bench.web.clone(), bench.api.clone()]
+    );
+    assert_eq!(child.directory.as_deref(), Some(bench.web.as_path()));
+    assert_eq!(child.repository.as_ref().unwrap().name, "payments-web");
+    let prompt = fs::read_to_string(bench.log.join("coding.1")).unwrap();
+    assert!(
+        prompt.contains(&format!(
+            "Your working directory is the checkout of repository payments-web at {}",
+            bench.web.display()
+        )),
+        "{prompt}"
+    );
+    assert!(prompt.contains(&format!("payments-api at {}", bench.api.display())));
+    assert!(prompt.contains("each on its own branch with its own pull request"));
+    assert!(prompt.contains("`Branch: NAME`") && prompt.contains("`Branch REPOSITORY: NAME`"));
+    // Its branches: the plain line is its own repository's, the last line of the other wins,
+    // and a repository the workflow does not have is ignored and noted.
+    assert_eq!(child.branch.as_deref(), Some("feature/child-1"));
+    assert_eq!(
+        child.branches,
+        [record::RepositoryBranch {
+            repository: Repository {
+                id: API.into(),
+                name: "payments-api".into()
+            },
+            branch: "feature/api-1".into(),
+        }]
+    );
+    assert_eq!(
+        child.ignored_branches,
+        ["billing", "(not a plain repository name)"]
+    );
+    assert_eq!(
+        bench.reads("feature/billing") + bench.reads("feature/odd"),
+        0
+    );
+
+    // The run waits for the pull request of each branch.
+    bench.pulls(WEB, "payments-web", "feature/child-1", 31, "completed");
+    for _ in 0..3 {
+        bench.tick().await;
+    }
+    let run = bench.run(&id);
+    assert_eq!(run.state, Phase::PullRequests);
+    assert_eq!(run.children[0].pull_requests.len(), 1);
+    assert_eq!(run.children[0].without_pull_request(), ["payments-api"]);
+    bench.pulls(API, "payments-api", "feature/api-1", 32, "active");
+    let run = bench
+        .until(&id, |r| r.children[0].pull_requests.len() == 2)
+        .await;
+    assert_eq!(run.state, Phase::PullRequests);
+    bench.pulls(API, "payments-api", "feature/api-1", 32, "completed");
+    let run = bench.state(&id, Phase::Done).await;
+    let urls: Vec<&str> = run.children[0]
+        .pull_requests
+        .iter()
+        .map(|p| p.url.as_str())
+        .collect();
+    assert_eq!(
+        urls,
+        [
+            "https://dev.azure.com/example/Payments/_git/payments-web/pullrequest/31",
+            "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/32"
+        ]
+    );
+    assert_eq!(
+        run.timeline
+            .iter()
+            .find(|s| s.stage == Phase::PullRequests)
+            .unwrap()
+            .outcome
+            .as_deref(),
+        Some("completed: 2 pull requests")
+    );
+    assert_eq!(bench.count("starts"), 1);
+    assert!(bench.catalog.only_reads());
+    // The record shows them in the status.
+    let shown = bench
+        .op("workflow_run_status", json!({"run":id}))
+        .await
+        .unwrap();
+    assert_eq!(
+        shown["run"]["children"][0]["branches"][0]["branch"],
+        "feature/api-1"
+    );
+    assert_eq!(
+        shown["run"]["children"][0]["ignored_branches"][0],
+        "billing"
+    );
+}
+
+#[tokio::test]
+async fn a_planned_child_keeps_its_one_repository_and_two_task_runs_of_a_workflow_never_overlap() {
+    let bench = Bench::new().await;
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflow_settings.concurrency = 2;
+    bench.host.state.settings.save_map(&map).unwrap();
+    // One task names payments-web, the other payments-api: each has its own working directory,
+    // but both are given both checkouts, so the second waits for the first.
+    bench.catalog.add(
+        synthetic::detail(201, "Task", "task", "Second task", "In payments-api."),
+        true,
+    );
+    bench.mode("mode", "block");
+    let first = bench.start(TASK).await;
+    let second = bench.start(201).await;
+    bench
+        .until(&first, |r| {
+            r.children[0].coding.as_ref().is_some_and(|c| c.started)
+        })
+        .await;
+    let waiting = bench
+        .until(&second, |r| {
+            r.error
+                .as_deref()
+                .is_some_and(|e| e.contains("Another run is using these directories"))
+        })
+        .await;
+    assert!(waiting.admitted);
+    assert!(!waiting.children[0].coding.as_ref().unwrap().started);
+    assert_eq!(bench.count("starts"), 1);
+    // A single `Branch:` line behaves as before: one branch, one pull request to wait for.
+    bench.mode("mode", "done");
+    bench.release();
+    let run = bench.state(&first, Phase::PullRequests).await;
+    assert_eq!(run.children[0].branch.as_deref(), Some("feature/child-1"));
+    assert!(run.children[0].branches.is_empty() && run.children[0].ignored_branches.is_empty());
+    bench.pulls(WEB, "payments-web", "feature/child-1", 41, "completed");
+    bench.state(&first, Phase::Done).await;
+    bench.state(&second, Phase::PullRequests).await;
+    assert_eq!(bench.count("starts"), 2);
+
+    // A planned child is coded in the one repository it names, with the single-branch prompt.
+    let _ = fs::remove_file(bench.log.join("release"));
+    bench.mode("mode", "multi");
+    let hu = bench.start(HU).await;
+    let run = bench.state(&hu, Phase::PlanReview).await;
+    bench.confirm(&run, "created", &[101]).await;
+    let run = bench.state(&hu, Phase::PullRequests).await;
+    let child = &run.children[0];
+    assert_eq!(
+        launched_directories(&bench, &child.coding.as_ref().unwrap().id),
+        [bench.web.clone()]
+    );
+    let prompt = fs::read_to_string(bench.log.join("coding.3")).unwrap();
+    assert!(prompt.contains("in the checkout of repository payments-web at"));
+    assert!(!prompt.contains("Branch REPOSITORY"));
+    assert_eq!(child.branch.as_deref(), Some("feature/child-3"));
+    assert!(child.branches.is_empty() && child.ignored_branches.is_empty());
 }
 
 #[tokio::test]
@@ -1571,6 +1741,19 @@ fn a_reported_branch_is_the_last_branch_line_and_a_child_names_its_repository() 
         }
     }
     assert_eq!(reported_branch("No branch here."), None);
+    // Lines for other repositories are not the primary's, and the last of each counts.
+    use super::engine::reported_repository_branches as others;
+    let report = "Branch api: feature/1\nBranch: feature/main\n- **Branch `api`:** `refs/heads/feature/2`\nBranch web: feature/3 (pushed)\nBranch notes: two words\nBranches: feature/x";
+    assert_eq!(reported_branch(report).as_deref(), Some("feature/main"));
+    assert_eq!(
+        others(report),
+        [
+            ("api".to_owned(), "feature/2".to_owned()),
+            ("web".to_owned(), "feature/3".to_owned())
+        ]
+    );
+    assert!(others("Branch: feature/1").is_empty());
+    assert!(others("Branch x: bad name").is_empty());
     let w = workflow(
         &uuid::Uuid::new_v4().to_string(),
         Path::new("/w/api"),
