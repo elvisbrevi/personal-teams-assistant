@@ -148,12 +148,17 @@ function slotBadge(run) {
   return run.waiting_for_slot ? badge(t('Waiting for a slot, position {n}', { n: run.queue_position }), 'muted') : null;
 }
 
+/** A run as a card, the same layout for every state: its badges, the item's number and title, its type, why it waits, then the facts. */
 function runRow(run) {
-  const row = el('button', { type: 'button', class: `resource run-row ${WAITING.includes(run.state) ? 'waits' : ''}`, 'data-run': run.id, 'data-state': run.state },
-    el('div', { class: 'resource-head' }, badge(runStateLabel(run.state), tone(run.state)), el('strong', { class: 'title', textContent: `#${run.item.id} · ${run.item.title}` }), el('span', { class: 'grow' }),
-      slotBadge(run), WAITING.includes(run.state) ? badge(t('Waits for you'), 'warn') : null),
-    el('p', { class: 'resource-facts' }, el('span', { textContent: run.attention ? tx(run.attention).slice(0, 160) : tx(run.item.kind) }),
-      el('small', { textContent: [workflowName(run.workflow), tn(run.children ?? 0, '1 child', '{n} children'), t('Updated {time}', { time: when(run.updated_at) })].join(' · ') })));
+  const waits = WAITING.includes(run.state);
+  const row = el('button', { type: 'button', class: `card run-row${waits ? ' waits' : ''}`, 'data-run': run.id, 'data-state': run.state },
+    el('span', { class: 'card-main' },
+      el('span', { class: 'card-meta' }, badge(runStateLabel(run.state), tone(run.state)), waits ? badge(t('Waits for you'), 'warn') : null, slotBadge(run)),
+      el('strong', { class: 'run-row-title', textContent: `#${run.item.id} · ${run.item.title}` }),
+      el('span', { class: 'run-row-kind', textContent: tx(run.item.kind) }),
+      run.attention ? el('span', { class: 'card-text', textContent: tx(run.attention).slice(0, 160) }) : null,
+      el('small', { class: 'run-row-facts', textContent: [workflowName(run.workflow), tn(run.children ?? 0, '1 child', '{n} children'), t('Updated {time}', { time: when(run.updated_at) })].join(' · ') })),
+    icon('arrow'));
   row.onclick = () => openWorkflowRun(run.id, row);
   return row;
 }

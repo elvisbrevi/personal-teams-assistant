@@ -70,7 +70,7 @@ The standard every change to `desktop/ui/` follows, so the owner's local page, t
 | Counts that open a filtered list | `.stat` tiles in a `.stat-grid` (number and label; the tone's soft fill only when the count is not zero) |
 | State of an item | `badge(text, tone)`: `ok`, `warn`, `error`, `info`, `active`, `muted`; the text always carries the meaning, the color only reinforces it |
 | Result or problem where it happened | `.callout` with a tone; global confirmations go to `notify()` (status) and failures to `fail()` (alert) |
-| Selectable item in a list | `button.card` / `.card` |
+| Selectable item in a list | `button.card` / `.card`: badges first, then the title wrapping inside the card, then its facts; never a bare `button` with a row's class, which takes the primary pill |
 | Unsaved form state | the save bar plus the edited section's flag; `markDirty(event)` records the section |
 
 - Buttons: outlined pills with a shadow in Stickers, rounded rectangles in the other styles. One primary action per panel or form (the next step, `--primary`: the palette's first section color, or ink in Minimalist, with `--on-primary` text); everything else `.secondary` (paper); destructive actions `.danger` and visually apart; navigation-like actions `.link-button`. An irreversible action (dismiss, send to Teams) asks for a second tap instead of a modal: the first tap changes the label to «Tap again to…» for about four seconds, and the account store's actions (Settings › Advanced › Cloud storage), which back up, upload or reseal the whole account, stay armed twelve seconds, each re-arm restarting the whole window.

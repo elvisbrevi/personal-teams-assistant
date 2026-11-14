@@ -369,6 +369,8 @@
     found.summary_sends.push({ id: crypto.randomUUID(), summary: latest.id, chat: { id: chat, topic: teamsChats.find(c => c.id === chat)?.topic, type: 'group' }, mentions: [], chars: latest.text.length, edited: false, outcome: 'uncertain', at: secs(Date.now()) }); };
   // A run in the line for one of the `concurrency` slots (its place, 1 next), or out of it with null.
   window.__ptaQueueRun = (run, position) => { workflowRuns.find(r => r.id === run).queue_position = position; };
+  // A run's item with another title (the list's long-title check).
+  window.__ptaRetitleRun = (run, title) => { workflowRuns.find(r => r.id === run).item.title = title; };
   window.__ptaWorkflowCalls = [];
   const workflowHandlers = {
     workflow_runs: args => {
