@@ -298,7 +298,15 @@ Mobile/PWA session access uses the provider's own login on the execution machine
 New implementation/request sessions try to enable it automatically. Codex uses its shared Remote
 Control daemon so the phone sees the same live thread. Claude publishes a real remote session
 whose `session_…` ID differs from the local UUID. The retained Claude process serves mobile for
-up to two hours (at most 16 per host); the original PTA run still ends with its initial result.
+up to two hours (at most 16 per host) after the PTA run ended.
+
+A coding run is finished when its agent's work is, not at its first turn end: a Claude session
+that ends a turn while a background task it started is still pending (a pipeline it watches, a
+subagent) stays `running` until a later turn finishes and the CLI reports it idle with nothing
+pending, or its process exits; a session that says nothing more ends five seconds after its last
+turn. The run's report and its `done` or `needs_attention` come from the last turn. While it runs
+it keeps its directories reserved and its workflow run's slot. A session still working after two
+hours is stopped and the run ends `needs_attention`, saying so, with its last report.
 Internal Teams model calls remain tool-less and ephemeral without remote access.
 
 Use `implementation_mobile_session` with `machine`, recorded run `id`, `action` (`connect`,

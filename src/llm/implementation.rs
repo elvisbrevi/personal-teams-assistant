@@ -227,6 +227,10 @@ pub(crate) struct Outcome {
     pub(crate) text: String,
     pub(crate) prompts: Vec<String>,
 }
+/// A session ends within this, still working or not; it is then stopped and its run records
+/// `LIMIT_REACHED`.
+const SESSION_LIMIT: Duration = Duration::from_secs(7200);
+const LIMIT_REACHED: &str = "The agent session was still working when it reached the two-hour limit of a run and was stopped; read its session for what it left unfinished.";
 /// At most this many prompts of this many characters are kept for a run.
 const PROMPTS: usize = 8;
 const PROMPT_CHARS: usize = 2000;
@@ -638,7 +642,8 @@ impl Events {
                     .as_object()
                     .map(|_| event["structured_output"].to_string())
                     .unwrap_or_else(|| event["result"].as_str().unwrap_or_default().into());
-                self.failed |= event["is_error"] != false;
+                // A session can end several turns: its last one is its report.
+                self.failed = event["is_error"] != false;
                 // A denied call is a prompt the run could not answer: recorded, not a stop.
                 for denial in event["permission_denials"].as_array().into_iter().flatten() {
                     keep_prompt(
@@ -846,7 +851,7 @@ async fn execute_allowing(
     let mut input = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(7200), async {
+    let result = tokio::time::timeout(SESSION_LIMIT, async {
         let (written, status, out, err) = tokio::join!(
             async move {
                 input.write_all(prompt.as_bytes()).await?;
@@ -860,7 +865,12 @@ async fn execute_allowing(
         let _ = written;
         Ok::<_, anyhow::Error>((status?.success(), out?, err?))
     })
-    .await??;
+    .await;
+    // The process tree is stopped when `_process` drops; the run records why.
+    let Ok(result) = result else {
+        return Outcome::redacted(false, LIMIT_REACHED, &[]);
+    };
+    let result = result?;
     let (status, mut events, stderr) = result;
     let stderr = String::from_utf8_lossy(&stderr);
     for line in stderr.lines() {

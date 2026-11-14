@@ -134,7 +134,7 @@ struct Session {
     _tree: ProcessTree,
     stderr: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
     remote_connected: bool,
-    /// While a delegated coding turn runs nobody answers: a prompt is recorded and refused at
+    /// While a delegated coding session runs nobody answers: a prompt is recorded and refused at
     /// once, even with a mobile connection, so the run never waits for a person.
     autonomous: bool,
     prompts: Vec<String>,
@@ -296,6 +296,8 @@ async fn spawn(
         .current_dir(directory)
         .env_clear()
         .envs(agent::child_env(binary))
+        // The CLI says when it is idle: the authoritative end of its work (`Activity`).
+        .env("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS", "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -319,7 +321,92 @@ async fn spawn(
     })
 }
 
-/// Run one Claude turn; a coding turn (`planning` false) is autonomous until its result.
+/// How long a session whose last turn ended with nothing pending is watched for another turn
+/// when the CLI has not said it is idle (a CLI that predates the signal, or a task that just
+/// finished and may wake a turn).
+const SETTLE: Duration = Duration::from_secs(5);
+
+/// What a Claude session is doing, read from its stream. In `stream-json` input mode a
+/// `result` ends a turn, not the session: a background task (a shell, a subagent, a monitor)
+/// that finishes later wakes another turn. The session is over when its last turn ended,
+/// nothing it started is pending and the CLI says it is idle; without that signal, after
+/// `SETTLE` with no new activity.
+#[derive(Default)]
+struct Activity {
+    /// A turn ended (`result`) and no turn started since.
+    turn_ended: bool,
+    /// The CLI said it is idle since the last turn ended and nothing finished since.
+    idle: bool,
+    /// Background tasks that started and have not finished, without the ambient ones (live
+    /// watchers the CLI marks as not activity).
+    pending: std::collections::HashSet<String>,
+}
+impl Activity {
+    fn event(&mut self, event: &Value) {
+        let task = || event["task_id"].as_str().unwrap_or_default().to_owned();
+        match (event["type"].as_str(), event["subtype"].as_str()) {
+            (Some("result"), _) => {
+                self.turn_ended = true;
+                self.idle = false;
+            }
+            (Some("assistant" | "user" | "stream_event"), _) => {
+                self.turn_ended = false;
+                self.idle = false;
+            }
+            (Some("system"), Some("session_state_changed")) => {
+                self.idle = event["state"] == "idle";
+                if !self.idle {
+                    self.turn_ended = false;
+                }
+            }
+            (Some("system"), Some("task_started")) if event["ambient"] != true => {
+                self.pending.insert(task());
+            }
+            (Some("system"), Some("task_notification")) => self.finished(&[task()]),
+            (Some("system"), Some("task_updated"))
+                if ["completed", "failed", "killed"]
+                    .contains(&event["patch"]["status"].as_str().unwrap_or_default()) =>
+            {
+                self.finished(&[task()])
+            }
+            // The full set of live tasks: it replaces what the edges said.
+            (Some("system"), Some("background_tasks_changed")) => {
+                let live: std::collections::HashSet<String> = event["tasks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|t| t["ambient"] != true)
+                    .filter_map(|t| t["task_id"].as_str().map(str::to_owned))
+                    .collect();
+                let gone: Vec<String> = self.pending.difference(&live).cloned().collect();
+                self.finished(&gone);
+                self.pending = live;
+            }
+            _ => {}
+        }
+    }
+    /// A task that finishes may wake a turn: the session is not idle until the CLI says so.
+    fn finished(&mut self, tasks: &[String]) {
+        for task in tasks {
+            if self.pending.remove(task) {
+                self.idle = false;
+            }
+        }
+    }
+    fn ended(&self) -> bool {
+        self.turn_ended
+    }
+    /// The last turn ended and nothing is pending: over once the CLI says idle, or after
+    /// `SETTLE` without activity.
+    fn settling(&self) -> bool {
+        self.turn_ended && self.pending.is_empty()
+    }
+    fn over(&self) -> bool {
+        self.settling() && self.idle
+    }
+}
+
+/// Run one Claude session; a coding session (`planning` false) is autonomous until it ends.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute(
     binary: &std::path::Path,
@@ -331,6 +418,34 @@ pub(super) async fn execute(
     observer: SessionObserver<'_>,
     remote: Observer,
 ) -> Result<Outcome> {
+    follow_session(
+        binary,
+        args,
+        directory,
+        prompt,
+        id,
+        planning,
+        observer,
+        remote,
+        (SESSION_LIMIT, SETTLE),
+    )
+    .await
+}
+
+/// `execute` within `(limit, settle)`: the run ends when the session does (`Activity`), when
+/// its process exits after a turn, or at `limit`, which stops it and records why.
+#[allow(clippy::too_many_arguments)]
+async fn follow_session(
+    binary: &std::path::Path,
+    args: &[OsString],
+    directory: &std::path::Path,
+    prompt: &str,
+    id: &str,
+    planning: bool,
+    observer: SessionObserver<'_>,
+    remote: Observer,
+    (limit, settle): (Duration, Duration),
+) -> Result<Outcome> {
     let mut session = spawn(binary, args, directory).await?;
     observer(None)?;
     let access = session
@@ -341,19 +456,45 @@ pub(super) async fn execute(
     session.autonomous = !planning;
     session.send(json!({"type":"user","message":{"role":"user","content":prompt},"parent_tool_use_id":null,"session_id":id})).await?;
     let mut events = Events::default();
-    let result = tokio::time::timeout(Duration::from_secs(7200), async {
-        loop {
-            let event = session.next().await?;
+    let mut activity = Activity::default();
+    let followed = tokio::time::timeout(limit, async {
+        while !activity.over() {
+            let next = if activity.settling() {
+                match tokio::time::timeout(settle, session.next()).await {
+                    Ok(next) => next,
+                    Err(_) => break,
+                }
+            } else {
+                session.next().await
+            };
+            let event = match next {
+                Ok(event) => event,
+                // The process exited after its turn: the session is over.
+                Err(_) if activity.ended() => break,
+                Err(error) => return Err(error),
+            };
             events.event("claude", &event, observer, id)?;
-            if event["type"] == "result" {
-                return Ok::<_, anyhow::Error>(());
-            }
+            activity.event(&event);
         }
+        Ok::<_, anyhow::Error>(())
     })
-    .await?;
-    result?;
+    .await;
+    let Ok(followed) = followed else {
+        // Dropping the session stops its process tree.
+        let mut text = LIMIT_REACHED.to_owned();
+        if !events.text.trim().is_empty() {
+            text.push_str("\n\nIts last report:\n");
+            text.push_str(&events.text);
+        }
+        let mut prompts = events.prompts;
+        for prompt in std::mem::take(&mut session.prompts) {
+            keep_prompt(&mut prompts, &prompt);
+        }
+        return Outcome::redacted(false, &text, &prompts);
+    };
+    followed?;
     let ok = !events.failed && !events.text.trim().is_empty();
-    // After the delegated turn the retained connection belongs to the person's mobile app.
+    // After the delegated session the retained connection belongs to the person's mobile app.
     session.autonomous = false;
     for prompt in std::mem::take(&mut session.prompts) {
         keep_prompt(&mut events.prompts, &prompt);
@@ -454,6 +595,7 @@ read -r prompt
 case "$prompt" in *'Synthetic mobile check'*) ;; *) exit 8;; esac
 printf '{"type":"system","session_id":"%s"}\n' "$session"
 printf '{"type":"result","session_id":"%s","is_error":false,"result":"Completed synthetic check."}\n' "$session"
+printf '%s\n' '{"type":"system","subtype":"session_state_changed","state":"idle"}'
 while read -r control; do :; done
 "##,
         );
@@ -556,5 +698,199 @@ printf '{"type":"result","session_id":"%s","is_error":false,"result":"Opened not
             launched.contains("--disallowedTools AskUserQuestion "),
             "{launched}"
         );
+    }
+
+    /// A fake Claude CLI whose session runs `body` after the prompt; Remote Control is refused,
+    /// so the session is not retained after the run.
+    #[cfg(unix)]
+    fn fake_session(root: &std::path::Path, body: &str) -> PathBuf {
+        let binary = root.join("claude-fixture");
+        crate::llm::agent::install_fake_cli(
+            &binary,
+            &format!(
+                r##"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '--session-id' ]; then shift; session="$1"; fi
+  shift
+done
+read -r initialize
+printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"pta-initialize","response":{{}}}}}}'
+read -r remote
+printf '%s\n' '{{"type":"control_response","response":{{"subtype":"error","request_id":"pta-remote","error":"not eligible"}}}}'
+read -r prompt
+printf '{{"type":"system","subtype":"init","session_id":"%s"}}\n' "$session"
+{body}
+"##
+            ),
+        );
+        binary
+    }
+    #[cfg(unix)]
+    async fn run_session(
+        binary: &std::path::Path,
+        root: &std::path::Path,
+        limits: (Duration, Duration),
+    ) -> Outcome {
+        let args = arguments("claude", "synthetic-model", "low", &[root.into()], false).unwrap();
+        follow_session(
+            binary,
+            &args,
+            root,
+            "Synthetic coding task",
+            &uuid::Uuid::new_v4().to_string(),
+            false,
+            &|_| Ok(()),
+            Arc::new(|_| Ok(())),
+            limits,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_that_ends_with_a_background_task_pending_is_not_the_end_of_the_run() {
+        let root = tempfile::tempdir().unwrap();
+        // The first turn starts a pipeline watch in the background and ends; the task's
+        // notification wakes a second turn, which finishes the work and reports the branch.
+        let binary = fake_session(
+            root.path(),
+            r##"[ "$CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS" = 1 ] || exit 9
+printf '%s\n' '{"type":"system","subtype":"session_state_changed","state":"running"}'
+printf '%s\n' '{"type":"system","subtype":"task_started","task_id":"watch","description":"Pipeline","is_backgrounded":true}'
+printf '%s\n' '{"type":"system","subtype":"task_started","task_id":"inbox","description":"Watcher","ambient":true}'
+printf '%s\n' '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"watch","task_type":"local_bash","description":"Pipeline"},{"task_id":"inbox","task_type":"monitor","description":"Watcher","ambient":true}]}'
+printf '%s\n' '{"type":"result","is_error":false,"result":"The pipeline is running; I will be notified when it finishes."}'
+printf '%s\n' '{"type":"system","subtype":"session_state_changed","state":"idle"}'
+sleep 1
+echo second-turn > second-turn.txt
+printf '%s\n' '{"type":"system","subtype":"task_notification","task_id":"watch","status":"completed","output_file":"","summary":"Pipeline passed"}'
+printf '%s\n' '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"inbox","task_type":"monitor","description":"Watcher","ambient":true}]}'
+printf '%s\n' '{"type":"system","subtype":"session_state_changed","state":"running"}'
+printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Opening the pull request."}]}}'
+printf '%s\n' '{"type":"result","is_error":false,"result":"Opened the pull request.\nBranch: feature/two-turns"}'
+printf '%s\n' '{"type":"system","subtype":"session_state_changed","state":"idle"}'
+while read -r line; do :; done"##,
+        );
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_session(
+                &binary,
+                root.path(),
+                (Duration::from_secs(30), Duration::from_secs(5)),
+            ),
+        )
+        .await
+        .expect("The run did not end when the session went idle with nothing pending");
+        assert!(root.path().join("second-turn.txt").exists());
+        assert!(outcome.ok);
+        assert_eq!(
+            outcome.text,
+            "Opened the pull request.\nBranch: feature/two-turns"
+        );
+        // The idle signal ends it at once: no settle time added.
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cli_that_does_not_say_it_is_idle_ends_after_the_settle_time_or_its_next_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_session(
+            root.path(),
+            r##"printf '%s\n' '{"type":"result","is_error":true,"result":"First turn failed."}'
+sleep 0.2
+printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[]}}'
+printf '%s\n' '{"type":"result","is_error":false,"result":"Done.\nBranch: feature/settled"}'
+while read -r line; do :; done"##,
+        );
+        let started = std::time::Instant::now();
+        let outcome = run_session(
+            &binary,
+            root.path(),
+            (Duration::from_secs(30), Duration::from_secs(1)),
+        )
+        .await;
+        // The last turn's report and its success count, not the first turn's error.
+        assert!(outcome.ok);
+        assert_eq!(outcome.text, "Done.\nBranch: feature/settled");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(5),
+            "{elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_session_that_never_ends_is_stopped_at_the_limit_with_its_cause() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_session(
+            root.path(),
+            r##"printf '%s\n' '{"type":"system","subtype":"task_started","task_id":"forever","description":"Watch"}'
+printf '%s\n' '{"type":"result","is_error":false,"result":"Waiting.\nBranch: feature/unfinished"}'
+printf '%s\n' '{"type":"system","subtype":"session_state_changed","state":"idle"}'
+while read -r line; do :; done"##,
+        );
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_session(
+                &binary,
+                root.path(),
+                (Duration::from_secs(1), Duration::from_millis(200)),
+            ),
+        )
+        .await
+        .expect("The limit did not stop the session");
+        assert!(!outcome.ok);
+        assert!(outcome.text.starts_with(LIMIT_REACHED), "{}", outcome.text);
+        assert!(outcome.text.contains("Waiting."));
+    }
+
+    #[test]
+    fn the_session_is_over_only_after_its_last_turn_with_nothing_pending() {
+        let mut activity = Activity::default();
+        let event = |activity: &mut Activity, value: Value| activity.event(&value);
+        assert!(!activity.ended());
+        event(
+            &mut activity,
+            json!({"type":"system","subtype":"task_started","task_id":"a"}),
+        );
+        event(&mut activity, json!({"type":"result"}));
+        event(
+            &mut activity,
+            json!({"type":"system","subtype":"session_state_changed","state":"idle"}),
+        );
+        assert!(activity.ended() && !activity.over() && !activity.settling());
+        // A finished task wakes a turn: until the CLI says idle again, it is only settling.
+        event(
+            &mut activity,
+            json!({"type":"system","subtype":"task_updated","task_id":"a","patch":{"status":"completed"}}),
+        );
+        assert!(activity.settling() && !activity.over());
+        event(
+            &mut activity,
+            json!({"type":"system","subtype":"session_state_changed","state":"running"}),
+        );
+        assert!(!activity.ended() && !activity.settling());
+        event(&mut activity, json!({"type":"result"}));
+        assert!(activity.settling());
+        event(
+            &mut activity,
+            json!({"type":"system","subtype":"session_state_changed","state":"idle"}),
+        );
+        assert!(activity.over());
+        // The level replaces the edges; an ambient watcher is not work.
+        event(
+            &mut activity,
+            json!({"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b"},{"task_id":"c","ambient":true}]}),
+        );
+        assert!(!activity.over());
+        event(
+            &mut activity,
+            json!({"type":"system","subtype":"task_notification","task_id":"b","status":"stopped"}),
+        );
+        assert!(activity.settling());
     }
 }

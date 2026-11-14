@@ -231,7 +231,7 @@ impl Client {
         interrupt.turn = Some(turn_id.clone());
         let mut text = String::new();
         let mut prompts = Vec::new();
-        let ok = tokio::time::timeout(Duration::from_secs(7200), async {
+        let ok = tokio::time::timeout(SESSION_LIMIT, async {
             loop {
                 let event = match self.pending.pop_front() { Some(event) => event, None => self.receive().await? };
                 let method = event["method"].as_str().unwrap_or_default();
@@ -254,8 +254,12 @@ impl Client {
                     return Ok::<_, anyhow::Error>(p["turn"]["status"] == "completed" && !text.trim().is_empty());
                 }
             }
-        }).await??;
-        Outcome::redacted(ok, &text, &prompts)
+        }).await;
+        // At the limit the turn is interrupted (`Interrupt`) and the run records why.
+        let Ok(ok) = ok else {
+            return Outcome::redacted(false, LIMIT_REACHED, &prompts);
+        };
+        Outcome::redacted(ok?, &text, &prompts)
     }
 }
 /// Server requests of the app-server protocol that wait for a person: approvals, questions and
