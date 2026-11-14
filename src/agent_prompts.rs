@@ -1,6 +1,6 @@
 //! The instructions the implementation agents start from: planning children, implementing a
-//! work item, writing a new request, and choosing a workflow for a work item (the workflow
-//! director). The map keeps only what the user changed
+//! work item, writing a new request, choosing a workflow for a work item (the workflow
+//! director) and looking after the workflow runs (the workflow supervisor). The map keeps only what the user changed
 //! (`[[agent_prompts]]`); a prompt not listed uses its default. What the agents may not do
 //! (untrusted evidence, no provider writes, the JSON contract) is added by code to every prompt
 //! and cannot be replaced.
@@ -32,8 +32,9 @@ pub const PLAN: &str = "plan";
 pub const CODE: &str = "code";
 pub const REQUEST: &str = "request";
 pub const DIRECT: &str = "direct";
+pub const SUPERVISE: &str = "supervise";
 
-pub const BUILT_IN: [BuiltIn; 4] = [
+pub const BUILT_IN: [BuiltIn; 5] = [
     BuiltIn {
         id: PLAN,
         name: "Plan children",
@@ -57,6 +58,12 @@ pub const BUILT_IN: [BuiltIn; 4] = [
         name: "Choose a workflow",
         summary: "Workflows: the workflow director reads a work item and the enabled workflows of its project and chooses the one that fits, or none.",
         instructions: prompts::WORKFLOW_DIRECT,
+    },
+    BuiltIn {
+        id: SUPERVISE,
+        name: "Supervise workflow runs",
+        summary: "Workflows: the workflow supervisor reads what a run's agents did, checks their reports and drafts a handover note, work items and the next steps for you to confirm.",
+        instructions: prompts::WORKFLOW_SUPERVISE,
     },
 ];
 
@@ -151,5 +158,17 @@ mod tests {
             instructions: "x".repeat(8001),
         }];
         assert!(validate(&over).is_err());
+    }
+
+    #[test]
+    fn the_supervisor_has_its_own_editable_prompt() {
+        assert_eq!(resolve(&[], SUPERVISE), prompts::WORKFLOW_SUPERVISE);
+        let edited = [Prompt {
+            id: SUPERVISE.into(),
+            instructions: "Be brief.".into(),
+        }];
+        assert!(validate(&edited).is_ok());
+        assert_eq!(resolve(&edited, SUPERVISE), "Be brief.");
+        assert_eq!(resolve(&edited, DIRECT), prompts::WORKFLOW_DIRECT);
     }
 }

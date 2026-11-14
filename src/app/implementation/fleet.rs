@@ -339,6 +339,7 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         workflow_direct: false,
         upgrade: false,
         agent_sessions: false,
+        workflow_supervise: false,
     });
     state.save(&data)?;
     drop(data);
@@ -435,6 +436,7 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
             machine.workflow_direct = args["workflow_direct_support"] == true;
             machine.upgrade = args["upgrade_support"] == true;
             machine.agent_sessions = args["agent_sessions_support"] == true;
+            machine.workflow_supervise = args["workflow_supervise_support"] == true;
         }
         state.save(&data)?;
     }
@@ -777,6 +779,20 @@ async fn call_bounded(
                 .any(|m| m.id == machine && m.workflow_direct),
             "Update the workflow director's machine: its version cannot run the workflow director."
         );
+        // A supervisor's look (`task: "supervise"`, its own session bound) only goes to a
+        // worker that says it runs one; an older worker would refuse the unknown fields.
+        if args["task"] == "supervise" || !args["seconds"].is_null() {
+            ensure!(
+                state
+                    .registry
+                    .lock()
+                    .await
+                    .machines
+                    .iter()
+                    .any(|m| m.id == machine && m.workflow_supervise),
+                "Update the workflow supervisor's machine: its version cannot run the workflow supervisor."
+            );
+        }
     }
     if method == "machine_assistant" {
         let data = state.registry.lock().await;
@@ -798,6 +814,8 @@ async fn call_bounded(
             "Select this machine for Teams before starting it."
         );
     }
+    // A supervisor's look asks for its own session bound; the wait follows it.
+    let asked_seconds = args["seconds"].as_u64();
     let id = uuid::Uuid::new_v4().to_string();
     {
         let mut calls = state.calls.lock().await;
@@ -818,7 +836,9 @@ async fn call_bounded(
     // The director's session answers within its own bound (`director::SESSION_SECONDS`).
     let polls = match method {
         "machine_assistant" | "machine_upgrade" => 360,
-        "workflow_direct" => 4 * super::director::WAIT_SECONDS,
+        "workflow_direct" => {
+            4 * asked_seconds.map_or(super::director::WAIT_SECONDS, super::director::wait_seconds)
+        }
         _ => 160,
     };
     let polls = bound.map_or(polls, |bound| {
@@ -937,7 +957,7 @@ async fn poll(host: Arc<Host>) {
             let polled = remote(
                 &connection,
                 json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next,"assistant_phase":assistant_phase,"management_support":true,"roots":roots,
-                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host),"checkout_inspect_support":true,"workflow_direct_support":true,"agent_sessions_support":true,"upgrade_support":crate::app::maintenance::remote_capable(&host)}),
+                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host),"checkout_inspect_support":true,"workflow_direct_support":true,"workflow_supervise_support":true,"agent_sessions_support":true,"upgrade_support":crate::app::maintenance::remote_capable(&host)}),
             )
             .await;
             standing::note(&host.state, &polled);
@@ -1151,6 +1171,7 @@ mod tests {
             workflow_direct: false,
             upgrade: false,
             agent_sessions: false,
+            workflow_supervise: false,
         });
         data.teams_machine = worker.clone();
         assert!(leased(&mut data, &worker));

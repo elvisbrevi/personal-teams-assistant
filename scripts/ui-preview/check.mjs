@@ -587,7 +587,8 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#save'); await page.waitForTimeout(300);
   check('a new guide is saved with its field', await page.evaluate(() => window.__ptaLastSave.map.work_item_guides.some(g => g.id === 'support' && g.type === 'Support' && g.provider === 'azure' && g.fields[0]?.reference === 'Custom.Kind')));
   const plan = page.locator('#agent-prompts > .resource').first();
-  check('agent instructions show the built-in prompts, the director\'s included', await page.$$eval('#agent-prompts > .resource', rows => rows.length) === 4 && await page.locator('#agent-prompts [data-prompt="direct"]').count() === 1);
+  check('agent instructions show the built-in prompts, the director\'s and the supervisor\'s included', await page.$$eval('#agent-prompts > .resource', rows => rows.length) === 5
+    && await page.locator('#agent-prompts [data-prompt="direct"]').count() === 1 && await page.locator('#agent-prompts [data-prompt="supervise"]').count() === 1);
   await plan.locator('summary').click();
   await plan.locator('textarea').fill('Plan at most three children.');
   await page.click('#save'); await page.waitForTimeout(300);
@@ -2390,6 +2391,28 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
     && !('pull_request_wait_days' in update) && !('project_directors' in update) && JSON.stringify(update.ready_states) === '[{"organization":"https://dev.azure.com/contoso","project":"Exports","states":["Approved"]}]'
     && update.director.model === 'claude-opus-5-5' && update.director.machine === '11111111-1111-4111-8111-111111111111', JSON.stringify(update));
   check(`workflow settings ${label}: saving clears the save bar`, await page.isHidden('#savebar') && await page.isHidden('#settings-tab-workflows .flag.edited'));
+  // The supervisor: on with its agent in this scenario; turning it off sends only that, and its prompt opens.
+  await page.waitForSelector('#workflow-supervisor-machine');
+  check(`workflow settings ${label}: the supervisor shows on, with its machine, agent and bounds`, await page.isChecked('#workflow-supervisor-enabled')
+    && await page.inputValue('#workflow-supervisor-machine') === '11111111-1111-4111-8111-111111111111' && await page.inputValue('#workflow-supervisor-looks') === '24');
+  await page.uncheck('#workflow-supervisor-enabled');
+  await page.fill('#workflow-supervisor-seconds', '700');
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check(`workflow settings ${label}: a supervisor bound out of range is refused before sending`, await page.isVisible('#workflow-settings-problem')
+    && !(await calls()).some(c => c.method === 'workflow_settings_update' && c.supervisor));
+  await page.fill('#workflow-supervisor-seconds', '240');
+  await page.click('#save');
+  await page.waitForTimeout(600);
+  const supervised = (await calls()).find(c => c.method === 'workflow_settings_update' && c.supervisor);
+  check(`workflow settings ${label}: saving the supervisor sends only what changed`, JSON.stringify(supervised?.supervisor) === '{"enabled":false,"session_seconds":240}', JSON.stringify(supervised));
+  await page.check('#workflow-supervisor-enabled');
+  await page.click('#save');
+  await page.waitForTimeout(600);
+  await page.click('#workflow-supervisor-prompt');
+  check(`workflow settings ${label}: the supervisor's prompt opens in Guides and instructions`, await page.isVisible('#agent-guides') && await page.locator('#agent-prompts [data-prompt="supervise"] details').evaluate(d => d.open).catch(() => false));
+  await page.evaluate(() => showTab('settings', 'panel-workflow-ready'));
+  await page.waitForTimeout(400);
 
   // Home links to the ready states while an enabled workflow that starts by itself has none.
   await page.evaluate(async () => {
@@ -2801,6 +2824,40 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.locator('#todo-list [data-run]').first().click();
   await page.waitForSelector('#run-detail-content #run-timeline');
   check(`runs ${label}: the card's link opens the run`, await page.isVisible('#workflow-run-detail'));
+  // The supervisor's look: its assessment, a report claim it could not verify, its drafts; a proposed restart is the
+  // only restart control and uses its drafted note, carried out as that proposal on a second press.
+  await page.evaluate(() => window.__ptaSuperviseRun('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01'));
+  await page.click('#run-detail-back');
+  await page.waitForSelector('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01"]');
+  await page.click('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01"]');
+  await page.waitForSelector('#run-supervision .run-look');
+  const lookText = await page.locator('#run-supervision').innerText();
+  check(`runs ${label}: the supervisor's look shows what was done, what is left and what it recommends`, /Hecho/.test(lookText) && /Pendiente/.test(lookText) && /Recomienda/.test(lookText), lookText);
+  check(`runs ${label}: a report claim the provider contradicts is marked not verified, with code's fact`,
+    await page.locator('#run-supervision .run-check[data-result="not_verified"] .badge', { hasText: 'Sin verificar' }).count() === 1
+    && await page.locator('#run-supervision .run-check[data-result="verified"]').count() === 1);
+  check(`runs ${label}: a proposed restart replaces the run's own restart control`, await page.locator('#run-restart-open').count() === 1
+    && await page.locator('#run-supervision #run-restart-open').count() === 1);
+  const lookScan = await scan(page);
+  check(`runs ${label}: the supervisor's look passes WCAG 2.2 AA`, lookScan.length === 0, JSON.stringify(lookScan));
+  await page.screenshot({ path: `${out}/${label}-workflow-run-supervisor.png`, fullPage: true });
+  check(`runs ${label}: no sideways scroll with the supervisor's look`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.locator('#run-supervision .run-proposal[data-action="post_summary"] button', { hasText: 'Descartar' }).click();
+  await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_supervision_dismiss'));
+  check(`runs ${label}: a proposal can be set aside`, (await calls()).some(c => c.method === 'workflow_supervision_dismiss' && c.action === 'a3'));
+  await page.waitForSelector('#run-supervision .run-proposal[data-action="post_summary"][data-state="dismissed"]');
+  await page.click('#run-supervision #run-restart-open');
+  await page.waitForSelector('#run-restart-note');
+  check(`runs ${label}: the restart starts from the supervisor's drafted note, and says whose it is`, /feature\/5012-rounding/.test(await page.inputValue('#run-restart-note'))
+    && /El supervisor redactó esta nota/.test(await page.locator('#run-restart').innerText()));
+  await page.locator('#run-restart button', { hasText: 'Reiniciar' }).first().click();
+  check(`runs ${label}: the proposed restart waits for a second press`, !(await calls()).some(c => c.method === 'workflow_supervision_act'));
+  await page.locator('#run-restart button', { hasText: 'Confirmar reinicio' }).click();
+  await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_supervision_act'));
+  await page.waitForSelector('#run-continues');
+  const acted = (await calls()).find(c => c.method === 'workflow_supervision_act');
+  check(`runs ${label}: the proposal is carried out once, with the unedited draft and the confirmation`, acted?.confirmed && acted.action === 'a1' && !('note' in acted)
+    && (await calls()).filter(c => c.method === 'workflow_supervision_act').length === 1, JSON.stringify(acted));
   check(`runs ${label}: no client errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }

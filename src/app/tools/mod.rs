@@ -1728,6 +1728,56 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "workflow_supervise",
+        title: "Ask the workflow supervisor to look at a run",
+        description: "Asks the workflow supervisor (workflow_settings supervisor: its own machine, CLI, model and effort; the supervise prompt) to look at one workflow run now. Code reads the run, its implementation records and why each session stopped, the bounded summaries of its own sessions, the work item fresh with its comments and history, the pull requests and branches of the run and the machines, and the supervisor judges them in a read-only, tool-less session on its machine (Agent history, purpose supervision). The look is stored on the run (workflow_run_status supervision): its assessment (what was done, what is left, what it recommends), each claim of the final report checked by code against what it read (verified or not_verified, with code's fact), a drafted handover note, drafted work items, a drafted summary and the actions it proposes, which wait for the user (workflow_supervision_act). By itself it only stores the look and may move that run ahead in the queue. Returns at once with the look queued or running; one look runs at a time, and a run with a look queued or running is refused. Needs the supervisor on; runs only on the owner's coordinator.",
+        effect: Effect::Local,
+        schema: || object(json!({"run": string("The workflow run's ID.")}), &["run"]),
+    },
+    Tool {
+        name: "workflow_supervision",
+        title: "Read the supervisor's looks at a run",
+        description: "The workflow supervisor's looks at one workflow run (the last 20, oldest first: event, assessment, checks of the final report with verified or not_verified and code's fact, what code could not read or cut, drafted handover, work items and summary, and each proposed action with its state: proposed, done, attempting, executed, refused, uncertain, opened, expired or dismissed) and the looks queued or running for it.",
+        effect: Effect::Read,
+        schema: || object(json!({"run": string("The workflow run's ID.")}), &["run"]),
+    },
+    Tool {
+        name: "workflow_supervision_act",
+        title: "Carry out an action the supervisor proposed",
+        description: "Carries out one action a look of the workflow supervisor proposed (action: its id such as a1, or its name), once, through the operation that already does it and as the user confirmed it: restart (workflow_run_restart with the drafted handover, or note, the user's edited version), resume, cancel, pause_project (workflow_runs_pause of the run's project with the proposed sessions choice) or post_summary (the drafted summary stored on the run and posted with workflow_summary_send to chat, a chat ID from teams_chats that the user chose, with mentions). create_work_item needs no confirmation here: it returns the draft for Create request (implementation_request_start), whose own confirmation and work item guide apply. An action of a run that moved on since the look is expired and refused; an action already carried out is refused. Show the user the exact draft before confirming. Runs only on the owner's coordinator.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"run": string("The workflow run's ID."), "look": string("The look's ID (workflow_supervision)."), "action": string("The action's id (a1…) or name."), "note": string("For restart: the user's edited handover note, at most 4000 characters."), "chat": string("For post_summary: a chat ID from teams_chats."), "mentions": strings("For post_summary: display names of members of that chat to mention."), "confirmed": confirmed()}),
+                &["run", "look", "action"],
+            )
+        },
+    },
+    Tool {
+        name: "workflow_supervision_dismiss",
+        title: "Set aside a proposed action",
+        description: "Sets aside one action a look of the workflow supervisor proposed (dismissed); nothing else changes.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"run": string("The workflow run's ID."), "look": string("The look's ID."), "action": string("The action's id (a1…) or name.")}),
+                &["run", "look", "action"],
+            )
+        },
+    },
+    Tool {
+        name: "workflow_run_requeue",
+        title: "Move a waiting run ahead, or back",
+        description: "Moves a workflow run that waits for a slot ahead in the line (ahead: true; runs moved ahead go first, in the order they were moved, for one admission) or puts it back in its place by creation (ahead: false). It never takes a slot from a run that holds one. Refused for a run that does not wait for a slot.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"run": string("The workflow run's ID."), "ahead": {"type": "boolean", "description": "true to move it ahead, false to put it back in its place."}}),
+                &["run", "ahead"],
+            )
+        },
+    },
+    Tool {
         name: "answer_rate",
         title: "Rate an answer",
         description: "Rates an answer good or bad with a comment; ratings automatically guide answers to the matched question: good suggests its approach, bad rejects its mistakes. Facts always come from fresh evidence. null clears the rating.",
@@ -2436,7 +2486,9 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         | "workflow_classify" | "workflow_run_start" | "workflow_runs" | "workflow_run_status"
         | "workflow_run_resume" | "workflow_run_cancel" | "workflow_run_assign"
         | "workflow_run_restart" | "workflow_runs_pause" | "workflow_runs_unpause"
-        | "workflow_summary" | "workflow_summary_send" => ipc(name, args.clone()).await,
+        | "workflow_summary" | "workflow_summary_send" | "workflow_supervise"
+        | "workflow_supervision" | "workflow_supervision_act" | "workflow_supervision_dismiss"
+        | "workflow_run_requeue" => ipc(name, args.clone()).await,
         "answer_rate" => ipc("answer_feedback", json!({"resource": text(args, "resource")?, "rating": args.get("rating"),
             "comment": args.get("comment"), "example": args.get("example"), "context": args.get("context")})).await,
         "answer_draft" => ipc("answer_refine", json!({"resource": text(args, "resource")?, "context": args.get("context").and_then(Value::as_str).unwrap_or(""),
@@ -2641,6 +2693,13 @@ pub(super) async fn question(name: &str, args: &Value) -> Result<Option<String>,
             )
         )));
     }
+    // An action of the supervisor names the run, the action and its exact draft.
+    if name == "workflow_supervision_act"
+        && let Ok(status) = run("workflow_run_status", &json!({"run": args["run"]})).await
+        && let Some(text) = super::workflows::supervisor::describe_act(&status, args)
+    {
+        return Ok(Some(format!("{text}\n\nCarry it out?")));
+    }
     let edited = args["text"].as_str().is_some_and(|t| !t.trim().is_empty());
     if name != "workflow_summary_send" || edited {
         return Ok(Some(asked));
@@ -2771,6 +2830,12 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             super::workflows::runs::describe_unpause(args["project"].as_str())
         ),
         "workflow_summary_send" => format!("{}?", super::workflows::summary::describe_args(args, None)),
+        "workflow_supervision_act" => format!(
+            "Carry out action {} that the workflow supervisor proposed in look {} of workflow run {}, once, through the operation that does it?",
+            args["action"].as_str().unwrap_or("this"),
+            args["look"].as_str().unwrap_or("this"),
+            args["run"].as_str().unwrap_or("this")
+        ),
         "cloud_disconnect" => if args["forget_service_token"] == true {
             "Disconnect this installation from the account store and remove the account's service token from it?".into()
         } else {
@@ -3073,6 +3138,11 @@ mod tests {
             ("workflow_runs_unpause", "needs confirmation"),
             ("workflow_summary", "local"),
             ("workflow_summary_send", "needs confirmation"),
+            ("workflow_supervise", "local"),
+            ("workflow_supervision", "read"),
+            ("workflow_supervision_act", "needs confirmation"),
+            ("workflow_supervision_dismiss", "local"),
+            ("workflow_run_requeue", "local"),
         ] {
             assert_eq!(effect(name), (json!(expected), json!("offered")), "{name}");
             assert!(super::super::workflows::handles(name), "{name}");

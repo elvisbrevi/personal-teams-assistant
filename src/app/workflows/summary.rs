@@ -215,8 +215,8 @@ fn mentioned(text: &str, link: &Link) -> bool {
 }
 
 /// What the model wrote, made safe to store and send: no URL, link, HTML tag or mention marker
-/// of its own, no control characters; at most `limit` characters.
-fn clean(text: &str, limit: usize) -> String {
+/// of its own, no control characters; at most `limit` characters. Cleaned to a fixed point.
+pub(super) fn clean(text: &str, limit: usize) -> String {
     let patterns: [(&str, &str); 7] = [
         // Images and links keep their words.
         (
@@ -237,11 +237,24 @@ fn clean(text: &str, limit: usize) -> String {
         (r"@\[([^\]\n]*)\]", "@$1"),
     ];
     let mut text = text.replace(['\u{e000}', '\u{e001}'], "");
-    for (pattern, replacement) in patterns {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            text = re.replace_all(&text, replacement).into_owned();
+    // To a fixed point: removing one piece can join others into a new link, URL, tag or
+    // mention (`@[[Ana]]`, `http:<i></i>//x`, `<<b>a href=x>`), so the patterns run again
+    // until nothing changes; each pass only shortens the text, and the passes are bounded.
+    let compiled: Vec<(regex::Regex, &str)> = patterns
+        .iter()
+        .filter_map(|(p, r)| regex::Regex::new(p).ok().map(|re| (re, *r)))
+        .collect();
+    for _ in 0..32 {
+        let before = text.clone();
+        for (re, replacement) in &compiled {
+            text = re.replace_all(&text, *replacement).into_owned();
+        }
+        if text == before {
+            break;
         }
     }
+    // Whatever a bound left: no mention marker survives.
+    text = text.replace("@[", "@");
     let text: String = text
         .replace("\r\n", "\n")
         .chars()
@@ -400,6 +413,7 @@ async fn summarize(host: &Arc<Host>, args: SummaryArgs) -> Result<Value, String>
             instructions: &instructions,
             input: json_input,
             item: &item,
+            seconds: None,
         },
     ))
     .await;

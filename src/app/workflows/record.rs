@@ -327,9 +327,10 @@ pub(in crate::app) struct Run {
     pub children: Vec<Child>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub block_outcomes: Vec<BlockOutcome>,
-    /// Progress summaries the director wrote (`summary::Summary`: `id`, `text`, `created_at`,
+    /// Progress summaries the director wrote, and the supervisor's drafts posted through it (`by:
+    /// "supervisor"`) (`summary::Summary`: `id`, `text`, `created_at`,
     /// `provider`, `model`, `session_id`), oldest first, at most `summary::MAX_SUMMARIES`.
-    /// A notification block's `{summary}` is rendered from the latest entry (the last).
+    /// A notification block's `{summary}` is rendered from the latest the director wrote.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub summaries: Vec<Value>,
     /// One record per send of a summary to a chat (`summary::Send`), oldest first.
@@ -386,6 +387,18 @@ pub(in crate::app) struct Run {
     /// [`MAX_HANDOVER`] characters): given to each of its coding runs, posted nowhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handover: Option<String>,
+    /// The handover is the supervisor's draft, which the person did not edit: its coding runs
+    /// get it as the supervisor's untrusted text, not as the person's note.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handover_drafted: bool,
+    /// The workflow supervisor's looks at this run (`supervisor::Look`), oldest first, at most
+    /// `supervisor::MAX_LOOKS`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supervision: Vec<super::supervisor::Look>,
+    /// When it was moved ahead in the line for a slot (by the supervisor or the person); the
+    /// mark is cleared when it takes a slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead_since: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -430,6 +443,9 @@ impl Run {
             continues: None,
             restarted_as: None,
             handover: None,
+            handover_drafted: false,
+            supervision: Vec::new(),
+            ahead_since: None,
             created_at: now,
             updated_at: now,
             finished_at: None,
@@ -555,6 +571,12 @@ impl Run {
                 .map(|p| json!({"url": p.url, "status": p.status})).collect::<Vec<_>>(),
             "continues": self.continues,
             "restarted_as": self.restarted_as,
+            "supervision": self.supervision.last().map(|l| json!({
+                "look": l.id, "event": l.event, "outcome": l.outcome, "created_at": l.created_at,
+                "proposed": self.supervision.iter().flat_map(|l| &l.actions).filter(|a| a.state == "proposed").count(),
+                "not_verified": l.checks.iter().filter(|c| c.result == "not_verified").count(),
+            })),
+            "ahead": self.ahead_since.is_some(),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "finished_at": self.finished_at,
@@ -608,14 +630,20 @@ pub(in crate::app) fn paused(pauses: &[Pause], project: &str) -> bool {
 /// keeps its place, so a run created later never passes it.
 /// A paused run is out of the line while its pause lasts, so it holds up no run of a project
 /// that is not paused, and back in its place when the pause ends.
+/// A run moved ahead (`ahead_since`) goes before every run that was not, the runs moved ahead
+/// in the order they were moved; every other run keeps its place by creation.
 pub(in crate::app) fn line<'a>(runs: &'a [Run], now: i64, pauses: &[Pause]) -> Vec<&'a Run> {
-    runs.iter()
+    let mut line: Vec<&Run> = runs
+        .iter()
         .filter(|r| {
             r.waits_for_slot()
                 || (r.state == State::Classifying && r.retry_at.is_none_or(|at| at <= now))
         })
         .filter(|r| !paused(pauses, &r.item.project))
-        .collect()
+        .collect();
+    // Stable: equal keys keep their order by creation.
+    line.sort_by_key(|r| (r.ahead_since.is_none(), r.ahead_since.unwrap_or_default()));
+    line
 }
 
 /// Whether run `id` takes a slot now: fewer runs are ahead of it in the line than slots are

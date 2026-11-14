@@ -22,7 +22,8 @@ impl Shell for TestShell {
     fn exit(&self) {}
 }
 
-/// The fake provider CLI: a director session prints `director.jsonl`, a planning session
+/// The fake provider CLI: a director session prints `director.jsonl`, a supervisor's look
+/// prints `supervisor.jsonl` (counting itself in `looks`), a planning session
 /// prints `plan.jsonl` (or waits while `plan_mode` is `block`), and a coding session counts
 /// itself in `starts` and then, by `mode`, reports its branch (`done`), its branches in two
 /// repositories and one the workflow does not have (`multi`), waits for `release`
@@ -45,6 +46,13 @@ if grep -q 'Choose only the ID of a workflow' "$prompt"; then
     while [ ! -f "$LOG/release" ]; do sleep 0.05; done
   fi
   cat "$LOG/director.jsonl"
+  exit 0
+fi
+if grep -q 'outranks any report' "$prompt"; then
+  echo x >> "$LOG/looks"
+  cp "$prompt" "$LOG/look.$(wc -l < "$LOG/looks" | tr -d ' ')"
+  printf '%s\n' '{"type":"step_start","sessionID":"ses_look"}'
+  cat "$LOG/supervisor.jsonl"
   exit 0
 fi
 if grep -q 'Return only JSON matching this schema' "$prompt"; then
