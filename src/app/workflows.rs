@@ -39,6 +39,7 @@ pub(super) mod record;
 mod rehearsal;
 pub(super) mod runs;
 pub(super) mod summary;
+pub(super) mod supervisor;
 #[cfg(test)]
 pub(super) mod synthetic;
 pub(super) mod watcher;
@@ -48,6 +49,11 @@ pub(super) fn handles(method: &str) -> bool {
         || director::METHODS.contains(&method)
         || runs::METHODS.contains(&method)
         || summary::METHODS.contains(&method)
+        || supervisor::METHODS.contains(&method)
+}
+/// The workflow supervisor's operations (`workflow_supervisor_support`).
+pub(super) fn supervisor_handles(method: &str) -> bool {
+    supervisor::METHODS.contains(&method)
 }
 /// The workflow run operations, and the summaries of a run (`workflow_runs_support`).
 pub(super) fn runs_handles(method: &str) -> bool {
@@ -139,19 +145,120 @@ fn require_coordinator(state: &DesktopState) -> Result<(), String> {
 fn shown(workflow: &Workflow) -> Value {
     let mut value = serde_json::to_value(workflow).unwrap_or_default();
     value["allow"] = json!(workflow.allow);
+    value["preapprove"] = json!(workflow.preapprove);
     value
+}
+
+/// The blocks a workflow lists that the map holds, in its order.
+fn listed(workflow: &Workflow, blocks: &[Block]) -> Vec<Block> {
+    workflow
+        .blocks
+        .iter()
+        .filter_map(|id| blocks.iter().find(|b| &b.id == id).cloned())
+        .collect()
+}
+
+/// How much of each limit a workflow uses: its instructions' characters, its blocks, and the
+/// characters of the largest context a run of it can be given (`fixed` of them are not its
+/// instructions or instruction blocks: the fixed sentences, its checkouts, the item and the
+/// longest handover note).
+pub(super) fn usage(workflow: &Workflow, blocks: &[Block]) -> Value {
+    let listed = listed(workflow, blocks);
+    let context = engine::largest_context(workflow, &listed);
+    let fixed = context.saturating_sub(engine::instructions_part(workflow, &listed));
+    json!({
+        "instructions": {"used": workflow.instructions.chars().count(), "limit": core::MAX_INSTRUCTIONS},
+        "blocks": {"used": workflow.blocks.len(), "limit": core::MAX_WORKFLOW_BLOCKS},
+        "context": {"used": context, "limit": core::MAX_CONTEXT, "fixed": fixed},
+    })
+}
+
+/// Refuses a workflow whose largest run context would not fit, with the numbers: a run is
+/// given its instructions and instruction blocks whole or not at all.
+fn fits(workflow: &Workflow, blocks: &[Block]) -> Result<(), String> {
+    let listed = listed(workflow, blocks);
+    let used = engine::largest_context(workflow, &listed);
+    if used <= core::MAX_CONTEXT {
+        return Ok(());
+    }
+    let part = engine::instructions_part(workflow, &listed);
+    Err(invalid(format!(
+        "A run of workflow {} could be given {used} characters of context, more than the {} a run takes (and a context is never cut): {part} of them are its instructions and instruction blocks, the other {} the fixed sentences, its checkouts, the item and the longest handover note. Shorten its instructions or instruction blocks by at least {} characters.",
+        workflow.id,
+        core::MAX_CONTEXT,
+        used - part,
+        used - core::MAX_CONTEXT
+    )))
+}
+
+/// What a workflow larger than older hosts accept means for the account's other computers.
+/// A workflow that pre-approves anything is refused by a host from before the supervisor
+/// (`deny_unknown_fields`): the save names the machines of the account that report one.
+async fn older_supervisors(host: &Arc<Host>, workflow: &Workflow) -> Option<String> {
+    if workflow.preapprove.is_empty() {
+        return None;
+    }
+    let older = implementation::machines_before_supervisor(host)
+        .await
+        .unwrap_or_default();
+    (!older.is_empty()).then(|| {
+        format!(
+            "Workflow {} pre-approves actions of the workflow supervisor, which {} cannot read: until updated, {} the account's configuration while this workflow is in it.",
+            workflow.id,
+            older.join(", "),
+            if older.len() == 1 { "it refuses" } else { "they refuse" }
+        )
+    })
+}
+
+async fn older_hosts(host: &Arc<Host>, workflow: &Workflow) -> Option<String> {
+    let characters = workflow.instructions.chars().count();
+    if characters <= core::OLDER_MAX_INSTRUCTIONS
+        && workflow.blocks.len() <= core::OLDER_MAX_WORKFLOW_BLOCKS
+    {
+        return None;
+    }
+    let older = implementation::machines_until(host, core::OLDER_LIMITS_UNTIL)
+        .await
+        .unwrap_or_default();
+    let machines = if older.is_empty() {
+        "None of the account's machines reports one.".to_owned()
+    } else {
+        format!(
+            "These of the account's machines report one, or no version: {}.",
+            older.join(", ")
+        )
+    };
+    Some(format!(
+        "Workflow {} has {} blocks and {characters} characters of instructions, more than hosts of release {} or older accept ({} blocks, {} characters): a computer of this account that runs one cannot take the account's configuration while this workflow is in it (it keeps the copy it has and reports the coordinator's configuration as invalid; its implementation runs work as before) until it is updated (pta update, or pta update --machine NAME from here). {machines}",
+        workflow.id,
+        workflow.blocks.len(),
+        core::OLDER_LIMITS_UNTIL,
+        core::OLDER_MAX_WORKFLOW_BLOCKS,
+        core::OLDER_MAX_INSTRUCTIONS,
+    ))
 }
 
 /// What a person confirms before a workflow whose coding agents may do more than the fixed
 /// rules allow is saved; none when it allows nothing.
 pub(super) fn describe_workflow(workflow: &Workflow) -> Option<String> {
     let lifted = core::describe_allow(&workflow.allow);
-    (!lifted.is_empty()).then(|| {
-        format!(
-            "Save workflow {}? In every run it starts (also those that start by themselves), {lifted}, when its instructions ask for it. Its planning run, and every run without this workflow, keep every prohibition.",
-            workflow.id
-        )
-    })
+    let preapproved = core::describe_preapprove(&workflow.preapprove);
+    if lifted.is_empty() && preapproved.is_empty() {
+        return None;
+    }
+    let mut text = format!("Save workflow {}?", workflow.id);
+    if !lifted.is_empty() {
+        text.push_str(&format!(
+            " In every run it starts (also those that start by themselves), {lifted}, when its instructions ask for it. Its planning run, and every run without this workflow, keep every prohibition."
+        ));
+    }
+    if !preapproved.is_empty() {
+        text.push_str(&format!(
+            " For its runs, {preapproved}; code checks every condition first, and anything else the supervisor proposes waits for you."
+        ));
+    }
+    Some(text)
 }
 
 /// What a person confirms before a block that acts is saved.
@@ -196,12 +303,20 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
     if summary::METHODS.contains(&method) {
         return summary::operation(host, method, args).await;
     }
+    if supervisor::METHODS.contains(&method) {
+        return supervisor::operation(host, method, args, &engine::Azure::Live).await;
+    }
     match method {
         "workflows_list" => {
             ensure_no_arguments(args)?;
             let map = state.settings.map().map_err(fail)?;
             let workflows: Vec<Value> = map.workflows.iter().map(shown).collect();
-            Ok(json!({"workflows":workflows,"editable":editable(state)?}))
+            let used: BTreeMap<&str, Value> = map
+                .workflows
+                .iter()
+                .map(|w| (w.id.as_str(), usage(w, &map.workflow_blocks)))
+                .collect();
+            Ok(json!({"workflows":workflows,"usage":used,"editable":editable(state)?}))
         }
         "workflow_show" => {
             let a: IdArgs = parse(args)?;
@@ -216,7 +331,12 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
                 .iter()
                 .filter_map(|id| map.workflow_blocks.iter().find(|b| &b.id == id))
                 .collect();
-            Ok(json!({"workflow":shown(workflow),"blocks":blocks,"editable":editable(state)?}))
+            Ok(json!({
+                "workflow": shown(workflow),
+                "blocks": blocks,
+                "usage": usage(workflow, &map.workflow_blocks),
+                "editable": editable(state)?,
+            }))
         }
         "workflow_blocks_list" => {
             ensure_no_arguments(args)?;
@@ -349,6 +469,10 @@ async fn save(host: &Arc<Host>, args: SaveArgs) -> Result<Value, String> {
             // Refuses checkouts keyed twice by one repository, then keys them in lowercase.
             core::validate_workflow(&workflow).map_err(invalid)?;
             workflow.allow.sort();
+            workflow.preapprove.sort_by_key(|p| p.action);
+            // A pre-approved post's chat is one of the user's, under the name their chat list
+            // gives it, before the confirmation shows it.
+            preapproved_chats(state, &workflow).await?;
             // Lifting a fixed rule of its coding agents is the user's decision, confirmed with
             // what it lets them do.
             if let Some(question) = describe_workflow(&workflow)
@@ -366,14 +490,21 @@ async fn save(host: &Arc<Host>, args: SaveArgs) -> Result<Value, String> {
             let mut candidate = state.settings.map().map_err(fail)?;
             upsert(&mut candidate.workflows, workflow.clone(), |w| &w.id);
             core::validate(&candidate.workflows, &candidate.workflow_blocks).map_err(invalid)?;
-            let warnings = verify(host, &mut workflow).await?;
+            fits(&workflow, &candidate.workflow_blocks)?;
+            let mut warnings = verify(host, &mut workflow).await?;
+            // A pre-approved post goes only to a chat the user belongs to.
             let saved = workflow.clone();
-            change(host, |map| {
+            // Again with the directories as the machine spells them and the blocks as they are now.
+            let used = change(host, |map| {
+                fits(&workflow, &map.workflow_blocks)?;
+                let used = usage(&workflow, &map.workflow_blocks);
                 upsert(&mut map.workflows, workflow, |w| &w.id);
-                Ok(())
+                Ok(used)
             })
             .await?;
-            Ok(json!({"workflow":shown(&saved),"saved":true,"warnings":warnings}))
+            warnings.extend(older_hosts(host, &saved).await);
+            warnings.extend(older_supervisors(host, &saved).await);
+            Ok(json!({"workflow":shown(&saved),"saved":true,"usage":used,"warnings":warnings}))
         }
         _ => Err(invalid(
             "Give the workflow to save, or its id and enabled to enable or disable it.",
@@ -540,6 +671,48 @@ async fn verify_chat(state: &DesktopState, chat: &str) -> Result<Option<String>,
     }
 }
 
+/// A pre-approved post goes, with nobody reading it first, only to a chat the user belongs to:
+/// the chat must be in the user's chat list, read now, under the name that list gives it
+/// (otherwise the confirmation would show the caller's label). A list that cannot be read
+/// refuses the save: a destination nobody could check is not pre-approved.
+pub(super) async fn preapproved_chats(
+    state: &DesktopState,
+    workflow: &Workflow,
+) -> Result<(), String> {
+    let chats: Vec<&core::Chat> = workflow
+        .preapprove
+        .iter()
+        .filter_map(|p| p.chat.as_ref())
+        .collect();
+    if chats.is_empty() {
+        return Ok(());
+    }
+    let read = tokio::time::timeout(std::time::Duration::from_secs(CHATS_SECONDS), async {
+        let graph = teams_graph(state).await?;
+        graph.chat_directory(None).await
+    })
+    .await;
+    let Ok(Ok(directory)) = read else {
+        return Err("[not_ready] Your chats could not be read here (no Microsoft session could read them): a pre-approved post needs its chat checked against your chats. Save it where they can be read.".into());
+    };
+    for chat in chats {
+        let Some(listed) = directory.iter().find(|c| c["id"] == chat.id.as_str()) else {
+            return Err(invalid(format!(
+                "You are not a member of the chat {}; choose one that pta teams chats lists.",
+                chat.id
+            )));
+        };
+        let name = listed["topic"].as_str().unwrap_or_default();
+        if name != chat.name {
+            return Err(invalid(format!(
+                "The chat {} is named «{name}» in your chats; save the pre-approved post with that name.",
+                chat.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn save_block(host: &Arc<Host>, args: BlockSaveArgs) -> Result<Value, String> {
     let state = &host.state;
     require_coordinator(state)?;
@@ -601,6 +774,14 @@ async fn save_block(host: &Arc<Host>, args: BlockSaveArgs) -> Result<Value, Stri
     let saved = block.clone();
     change(host, |map| {
         upsert(&mut map.workflow_blocks, block, |b| &b.id);
+        // A longer text is part of every workflow that lists the block.
+        for workflow in map
+            .workflows
+            .iter()
+            .filter(|w| w.blocks.contains(&saved.id))
+        {
+            fits(workflow, &map.workflow_blocks)?;
+        }
         Ok(())
     })
     .await?;

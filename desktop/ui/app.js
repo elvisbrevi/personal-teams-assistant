@@ -28,7 +28,7 @@ import {
 import { addEffortType, renderScheduleFields } from './settings-daily.js';
 import { folded, loadActivity, loadMessages, renderMessages, setFilter } from './messages.js';
 import {
-  addRepositorySource, listGithub, loadNotes, newNoteContexts, noteOrigin, openSources, recordSource,
+  addRepositorySource, listGithub, loadNotes, newNoteContexts, noteOrigin, openSources, recordSource, sessionsSource,
   renderNoteContexts, renderNotes, renderRepositories, renderResources, setNewNoteContexts, setNoteOrigin,
 } from './knowledge.js';
 import {
@@ -39,6 +39,7 @@ import { openGuides, renderGuides } from './guides.js';
 import { answerBubble, bubble, chosen, resizeComposer } from './chat.js';
 import { machineTrust } from './dialogs.js';
 import { closeWorkflowRun, loadWorkflowRuns, showRunsList } from './workflow-runs.js';
+import { showPause } from './workflow-pause.js';
 
 // ---------------------------------------------------------------- wiring
 
@@ -86,7 +87,7 @@ $('#todo-more').onclick = () => busy($('#todo-more'), async () => {
 $('#todo-agent-guides').onclick = () => { showTab('agent-guides'); $('#agent-guides h1').focus(); };
 $('#agent-guides-back').onclick = () => { showTab('todo'); $('#todo-agent-guides').focus(); };
 $('#teams-machine-open').onclick = () => showTab('settings', 'panel-machines');
-$('#todo-create').onclick = openRequest;
+$('#todo-create').onclick = () => openRequest();
 $('#todo-agent-history').onclick = () => showTab('agent-history');
 $('#agent-history-back').onclick = () => showTab('todo');
 $('#agent-history-refresh').onclick = () => busy($('#agent-history-refresh'), loadAgentHistory);
@@ -172,6 +173,7 @@ $('#stop').onclick = () => busy($('#stop'), async () => { await invoke('stop_ass
 $('#activity-all').onclick = () => showTab('messages');
 $('#workflow-attention-open').onclick = () => showRunsList();
 $('#runs-refresh').onclick = () => loadWorkflowRuns();
+$('#runs-pause-open').onclick = () => showPause(loadWorkflowRuns);
 $('#runs-state').onchange = () => loadWorkflowRuns();
 $('#runs-workflow').onchange = () => loadWorkflowRuns();
 $('#run-detail-back').onclick = () => closeWorkflowRun();
@@ -321,6 +323,15 @@ $('#add-record').onclick = () => {
   current.map.resources.push(source);
   openSources.add(source.id);
   markDirty({ target: $('#add-record') });
+  renderResources();
+  notify(t('Source {id} added, disabled. Enable it, authorize it, choose its conversations and save.', { id: source.id }));
+};
+$('#add-sessions-source').onclick = () => {
+  if (current.map.resources.some(r => r.tool?.type === 'agent_sessions')) return;
+  const source = sessionsSource();
+  current.map.resources.push(source);
+  openSources.add(source.id);
+  markDirty({ target: $('#add-sessions-source') });
   renderResources();
   notify(t('Source {id} added, disabled. Enable it, authorize it, choose its conversations and save.', { id: source.id }));
 };

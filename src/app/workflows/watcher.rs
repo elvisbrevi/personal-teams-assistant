@@ -1,11 +1,14 @@
 //! The ready-state watcher: a tracked task of the coordinator's control loop, like the run
-//! engine and the daily scheduler. Every `watch_interval_minutes` it lists the HUs, bugs and
-//! listed tasks assigned to the user in the ready states of each configured project (the To-Do
-//! read `list_azure_hus`, with the same assignment rules, the read credential and the process
-//! cache), and starts a workflow run for each item it has not seen in that state yet, through
-//! the engine's own start path (`runs::start_confirmed`) with the project's director choosing
-//! among its enabled workflows that start by themselves (`auto_start`), even when there is only
-//! one, so an item that workflow does not fit waits unassigned. The director is the project's
+//! engine and the daily scheduler. Every `watch_interval_minutes` it lists every requirement-,
+//! bug- and task-category item assigned to the user in the ready states of each configured
+//! project, whatever its type (a plain Task as much as a development bug), with two To-Do reads
+//! `list_azure_hus` per state (the default list, which holds the HUs, the bugs and the task
+//! types listed with them, and the `task` kind, which holds every other task type), with the
+//! same assignment rules, the read credential and the process cache, and starts a workflow run
+//! for each item it has not seen in that state yet, through the engine's own start path
+//! (`runs::start_confirmed`) with the project's director choosing among its enabled workflows
+//! that start by themselves (`auto_start`), even when there is only one, so an item that
+//! workflow does not fit waits unassigned. The director is the project's
 //! own, else the machine and agent its workflows share, else the account's
 //! (`workflows::director::resolve`). Only when no director can classify (none resolves, or its
 //! machine cannot run the director) does the one workflow that starts by itself take the item
@@ -22,11 +25,15 @@
 //! guards. An item that is no longer in a ready state is forgotten, so one that comes back is
 //! seen again; nothing is forgotten from a read that was partial or failed.
 //!
-//! Bounds: at most [`MAX_ITEMS`] items per project per poll (the To-Do list's own limit), at
-//! most [`MAX_STARTS`] new runs per poll (the rest are seen at the next one), and the poll
-//! reports which projects it covered fully. It runs only on the account owner's coordinator
-//! (never on a computer signed in to one, nor for a shared portal account), needs no running
-//! Teams service, and does nothing while no ready state is configured.
+//! Bounds: at most [`MAX_ITEMS`] items per project per poll over both reads (the To-Do list's
+//! own limit, and each read keeps its time budget), at most [`MAX_STARTS`] new runs per poll
+//! (the rest are seen at the next one), and the poll reports which projects it covered fully
+//! and how many items of each category it saw (`seen_by_category`). It runs only on the
+//! account owner's coordinator (never on a computer signed in to one, nor for a shared portal
+//! account), needs no running Teams service, and does nothing while no ready state is
+//! configured. A paused project (`record::Pause`, every project when the pause names none) is
+//! neither read nor recorded, so its items are seen as new at the first poll after the pause
+//! ends.
 use super::engine::{self, Azure};
 use super::*;
 use crate::workflows::director::{ReadyStates, Settings};
@@ -39,6 +46,9 @@ pub(in crate::app) const MAX_ITEMS: usize = 100;
 pub(in crate::app) const MAX_STARTS: usize = 25;
 /// How often the task looks at whether a poll is due.
 const TICK_SECONDS: u64 = 30;
+/// What a paused project reports.
+const PAUSED: &str =
+    "Paused: the watcher starts no run for this project until the workflow runs are unpaused.";
 /// What a project with several workflows that start by themselves and no director reports.
 const WAITING: &str = "Waiting for a director: several workflows of this project start by themselves, they differ in machine or agent, and neither the project nor the account has a workflow director to choose among them.";
 
@@ -245,6 +255,8 @@ pub(in crate::app) fn view(state: &DesktopState) -> Value {
         .map(|m| waiting_for_director(&settings, &m.workflows))
         .unwrap_or_default();
     let last = state.workflows.watcher.last();
+    let pauses = state.workflows.db.pauses().unwrap_or_default();
+    let paused_projects: Vec<&str> = pauses.iter().filter_map(|p| p.project.as_deref()).collect();
     let (word, reason) = if !engine::may_run(state) {
         (
             "unavailable",
@@ -257,6 +269,13 @@ pub(in crate::app) fn view(state: &DesktopState) -> Value {
             "idle",
             Some("No ready state is configured; choose one for a project in Settings › Workflows."),
         )
+    } else if pauses.iter().any(|p| p.project.is_none()) {
+        (
+            "paused",
+            Some(
+                "Paused: the watcher starts no run until the workflow runs are unpaused (workflow_runs_unpause).",
+            ),
+        )
     } else if !waiting.is_empty() {
         ("waiting_for_director", Some(WAITING))
     } else {
@@ -266,6 +285,7 @@ pub(in crate::app) fn view(state: &DesktopState) -> Value {
         "state": word,
         "reason": reason,
         "waiting_projects": waiting,
+        "paused_projects": paused_projects,
         "interval_minutes": settings.watch_interval_minutes,
         "last_poll": last,
         "next_poll_at": last
@@ -277,33 +297,57 @@ pub(in crate::app) fn view(state: &DesktopState) -> Value {
 }
 
 impl Azure {
-    /// The HUs, bugs and listed tasks assigned to the user in one state of a project, at most
-    /// `limit`: the To-Do read of that Azure source, with the read credential and the process
-    /// cache.
+    /// The items assigned to the user in one state of a project, at most `limit`: the To-Do
+    /// read of that Azure source, with the read credential and the process cache. Without a
+    /// kind it lists the HUs, the bugs and the task types listed with them; the `task` kind
+    /// lists every other task-category type (a plain Task).
     async fn ready_items(
         &self,
         state: &DesktopState,
         source: Option<&str>,
         project: &str,
         ready: &str,
+        kind: Option<&str>,
         limit: usize,
     ) -> Result<crate::tools::todo::List, String> {
         match self {
             Self::Live => {
-                let body = json!({"source":source,"project":project,"state":ready,"limit":limit});
+                let mut body =
+                    json!({"source":source,"project":project,"state":ready,"limit":limit});
+                if let Some(kind) = kind {
+                    body["kind"] = json!(kind);
+                }
                 let value = tools::todo::read(state, "list_azure_hus", &body).await?;
                 serde_json::from_value(value).map_err(fail)
             }
             #[cfg(test)]
-            Self::Synthetic(catalog) => catalog.ready_items(source, project, ready, limit),
+            Self::Synthetic(catalog) => catalog.ready_items(source, project, ready, kind, limit),
         }
     }
+}
+
+/// The process categories the watcher takes, as each item's `category` names them.
+const CATEGORIES: [&str; 3] = ["requirement", "bug", "task"];
+/// The two To-Do reads that together list every type of those categories: the default list
+/// (HUs, bugs and the task types listed with them) and the `task` kind (every other one).
+const READS: [Option<&str>; 2] = [None, Some("task")];
+
+/// How many items of each category a poll saw.
+fn by_category(counts: &[usize; 3]) -> Value {
+    CATEGORIES
+        .iter()
+        .zip(counts)
+        .map(|(category, n)| ((*category).to_owned(), json!(n)))
+        .collect::<serde_json::Map<_, _>>()
+        .into()
 }
 
 /// What one project's poll found.
 #[derive(Default)]
 struct Coverage {
     seen: usize,
+    /// `seen` by category, in the order of [`CATEGORIES`].
+    categories: [usize; 3],
     started: usize,
     already: usize,
     deferred: usize,
@@ -322,6 +366,8 @@ pub(in crate::app) async fn poll(host: &Arc<Host>, azure: &Azure, now: i64) -> V
         return unread;
     };
     let settings = map.workflow_settings.clone();
+    // Without the pauses read, nothing is started.
+    let pauses = state.workflows.db.pauses().ok();
     let mut projects = Vec::new();
     let mut budget = MAX_STARTS;
     for ready in settings
@@ -329,12 +375,30 @@ pub(in crate::app) async fn poll(host: &Arc<Host>, azure: &Azure, now: i64) -> V
         .iter()
         .filter(|r| !r.states.is_empty())
     {
+        if pauses
+            .as_ref()
+            .is_none_or(|p| super::record::paused(p, &ready.project))
+        {
+            projects.push(
+                json!({"organization": ready.organization, "project": ready.project,
+                "states": ready.states, "complete": false, "paused": true, "skipped": PAUSED}),
+            );
+            continue;
+        }
         projects.push(project(host, azure, &map, ready, &mut budget, now).await);
     }
     let partial = projects.iter().any(|p| p["complete"] != true);
+    let mut categories = [0; 3];
+    for (i, category) in CATEGORIES.iter().enumerate() {
+        categories[i] = projects
+            .iter()
+            .map(|p| p["seen_by_category"][category].as_u64().unwrap_or(0) as usize)
+            .sum();
+    }
     let poll = json!({
         "at": now,
         "started": projects.iter().map(|p| p["started"].as_u64().unwrap_or(0)).sum::<u64>(),
+        "seen_by_category": by_category(&categories),
         "partial": partial,
         "projects": projects,
     });
@@ -417,46 +481,73 @@ async fn project(
             found.complete = false;
             break;
         }
-        let list = match azure
-            .ready_items(
-                state,
-                source.as_deref(),
-                &ready.project,
-                ready_state,
-                items_left,
-            )
-            .await
-        {
-            Ok(list) => list,
-            Err(error) => {
-                // This state is reported and kept as it is; the others are still read.
-                let note = error.split_once("] ").map_or(error.as_str(), |(_, t)| t);
-                found.errors.push(format!("{ready_state}: {note}"));
-                found.complete = false;
-                continue;
+        // Both reads of the state, within the project's bound; items of this organization only
+        // (a project name can exist in several).
+        let mut items: Vec<crate::tools::todo::Item> = Vec::new();
+        let mut sure = true;
+        for kind in READS {
+            let limit = items_left.saturating_sub(items.len());
+            if limit == 0 {
+                // The bound is spent: the rest of the state is read at the next poll.
+                sure = false;
+                break;
             }
-        };
-        // Items of this organization only (a project name can exist in several).
-        let items: Vec<_> = list
-            .items
-            .iter()
-            .filter(|i| {
-                crate::workflows::director::item_organization(&i.url).as_deref()
+            let list = match azure
+                .ready_items(
+                    state,
+                    source.as_deref(),
+                    &ready.project,
+                    ready_state,
+                    kind,
+                    limit,
+                )
+                .await
+            {
+                Ok(list) => list,
+                Err(error) => {
+                    // Reported and kept as it is: nothing of this state is forgotten, what was
+                    // read is still taken, and the other states are still read.
+                    let note = error.split_once("] ").map_or(error.as_str(), |(_, t)| t);
+                    found.errors.push(format!("{ready_state}: {note}"));
+                    sure = false;
+                    break;
+                }
+            };
+            if list.partial || list.has_more {
+                sure = false;
+                found.errors.extend(list.warnings.iter().cloned());
+            }
+            for item in list.items {
+                if crate::workflows::director::item_organization(&item.url).as_deref()
                     == Some(organization.as_str())
-                    && i.state == *ready_state
-                    && ["requirement", "bug", "task"].contains(&i.category.as_str())
-            })
-            .collect();
+                    && item.state == *ready_state
+                    && CATEGORIES.contains(&item.category.as_str())
+                    && !items.iter().any(|i| i.url == item.url)
+                {
+                    items.push(item);
+                }
+            }
+        }
+        // Newest first over both reads, as one list orders them.
+        items.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+                .then_with(|| a.url.cmp(&b.url))
+        });
         items_left = items_left.saturating_sub(items.len());
         found.seen += items.len();
-        let sure = !list.partial && !list.has_more;
+        for item in &items {
+            if let Some(i) = CATEGORIES.iter().position(|c| *c == item.category) {
+                found.categories[i] += 1;
+            }
+        }
         if !sure {
             found.complete = false;
-            found.errors.extend(list.warnings.iter().cloned());
         }
         // Every listed item is present, whether or not this poll may start it.
         let present: Vec<String> = items.iter().map(|i| i.url.clone()).collect();
-        for item in items {
+        for item in &items {
             let run = match watcher.entry(&item.url, ready_state) {
                 // Its run exists: seen. A mark without its run is waited for one interval (it
                 // may be the start in flight), then asked for again under the same run ID.
@@ -541,6 +632,7 @@ async fn project(
     named(json!({
         "complete": found.complete,
         "seen": found.seen,
+        "seen_by_category": by_category(&found.categories),
         "started": found.started,
         "already_seen": found.already,
         "deferred": found.deferred,

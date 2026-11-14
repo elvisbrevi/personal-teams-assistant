@@ -329,7 +329,7 @@ async fn a_save_is_refused_before_anything_is_read_when_the_map_alone_refuses_it
     w.instructions = "x".repeat(crate::workflows::MAX_INSTRUCTIONS + 1);
     let refused = call(&host, Local, "workflow_save", save(&w)).await;
     assert_eq!(refused.code, "invalid_input");
-    assert!(refused.message.unwrap().contains("8000"));
+    assert!(refused.message.unwrap().contains("20000"));
     let mut w = workflow("payments", &own);
     w.blocks = vec!["missing".into()];
     let refused = call(&host, Local, "workflow_save", save(&w)).await;
@@ -403,6 +403,79 @@ async fn a_save_is_refused_before_anything_is_read_when_the_map_alone_refuses_it
     )
     .await;
     assert_eq!(refused.code, "not_ready");
+}
+
+#[tokio::test]
+async fn a_workflow_that_preapproves_the_supervisor_is_saved_only_once_confirmed() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let mut w = workflow("payments", &own);
+    w.preapprove = vec![crate::workflows::Preapproval {
+        action: crate::workflows::Preapproved::PostSummary,
+        chat: Some(crate::workflows::Chat {
+            id: "19:team@thread.v2".into(),
+            name: "Equipo".into(),
+        }),
+        mentions: vec!["Ana Pérez".into()],
+    }];
+    // A post's chat must be checked against the user's chats: here they cannot be read, so the
+    // save is refused before anything else.
+    let refused = call(&host, Local, "workflow_save", json!({"workflow":w})).await;
+    assert_eq!(refused.code, "not_ready", "{:?}", refused.message);
+    assert!(refused.message.unwrap().contains("could not be read"));
+    // MCP's question names the chat and mentions.
+    let question =
+        crate::app::tools::confirmation("workflow_save", &json!({"workflow":w})).unwrap();
+    assert!(
+        question.contains("without asking") && question.contains("Equipo"),
+        "{question}"
+    );
+    // A restart alone: unconfirmed, refused with what the supervisor may do and how far the
+    // barrier goes.
+    let mut restart = workflow("payments", &own);
+    restart.preapprove = vec![crate::workflows::Preapproval {
+        action: crate::workflows::Preapproved::RestartAfterCut,
+        chat: None,
+        mentions: Vec::new(),
+    }];
+    let refused = call(&host, Local, "workflow_save", json!({"workflow":restart})).await;
+    assert_eq!(refused.code, "invalid_input");
+    let text = refused.message.unwrap();
+    assert!(
+        text.contains("confirmed: true") && text.contains("not a guarantee"),
+        "{text}"
+    );
+    // Confirmed: it goes on to the checks (here, the Azure source this host lacks).
+    let refused = call(
+        &host,
+        Local,
+        "workflow_save",
+        json!({"workflow":restart,"confirmed":true}),
+    )
+    .await;
+    assert_eq!(refused.code, "not_ready", "{:?}", refused.message);
+    // A machine of the account that predates the supervisor would refuse it: the save says so.
+    implementation::test_worker(&host, "Old laptop", false).await;
+    implementation::test_worker(&host, "New desktop", true).await;
+    let warning = older_supervisors(&host, &w).await.unwrap();
+    assert!(
+        warning.contains("Old laptop") && !warning.contains("New desktop"),
+        "{warning}"
+    );
+    assert!(
+        older_supervisors(&host, &workflow("plain", &own))
+            .await
+            .is_none()
+    );
+    // list and show carry it, empty included.
+    store(&host, vec![w, workflow("plain", &own)]);
+    let list = call(&host, Local, "workflows_list", json!({})).await.data;
+    assert_eq!(
+        list["workflows"][0]["preapprove"][0]["action"],
+        "post_summary"
+    );
+    assert_eq!(list["workflows"][1]["preapprove"], json!([]));
 }
 
 #[tokio::test]
@@ -815,6 +888,107 @@ async fn the_director_must_be_an_installed_agent_on_a_machine_of_the_account() {
     );
     // Only the coordinator's own machine runs agents for its owner: a machine credential cannot.
     let from_machine = call(&host, Machine, "workflow_settings_update", director(&own)).await;
+    assert!(!from_machine.ok);
+}
+
+#[tokio::test]
+async fn the_supervisor_must_be_an_installed_agent_and_starts_off() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let shown = call(&host, Local, "workflow_settings", json!({})).await;
+    assert!(shown.ok, "{:?}", shown.message);
+    assert_eq!(shown.data["settings"]["supervisor"]["enabled"], false);
+    assert_eq!(shown.data["defaults"]["supervisor"]["looks_per_day"], 24);
+    assert_eq!(
+        shown.data["bounds"]["supervisor"]["session_seconds"],
+        json!([60, 600])
+    );
+    // On without an agent: refused, naming what is missing, and nothing is saved.
+    let bare = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        json!({"supervisor":{"enabled":true}}),
+    )
+    .await;
+    assert_eq!(bare.code, "invalid_input");
+    assert!(
+        bare.message
+            .unwrap()
+            .contains("machine, provider, model, effort")
+    );
+    // An agent not installed on its machine is refused like the director's.
+    let missing = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        json!({"supervisor":{"enabled":true,"machine":own,"provider":"codex","model":"synthetic-model-that-is-not-installed","effort":"low"}}),
+    )
+    .await;
+    assert_eq!(missing.code, "invalid_input", "{:?}", missing.message);
+    let message = missing.message.unwrap();
+    assert!(
+        message.contains("the workflow supervisor's machine")
+            && (message.contains("not installed") || message.contains("has no model")),
+        "{message}"
+    );
+    assert!(!stored_map(&host).contains("supervisor"));
+    // Its bounds alone change without an agent, merged with the defaults, and only they are written.
+    let bounds = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        json!({"supervisor":{"looks_per_day":12}}),
+    )
+    .await;
+    assert!(bounds.ok, "{:?}", bounds.message);
+    let saved = host
+        .state
+        .settings
+        .map()
+        .unwrap()
+        .workflow_settings
+        .supervisor;
+    assert_eq!(
+        (saved.looks_per_day, saved.session_seconds, saved.enabled),
+        (12, 180, false)
+    );
+    let out = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        json!({"supervisor":{"session_seconds":601}}),
+    )
+    .await;
+    assert_eq!(out.code, "invalid_input");
+    assert!(out.message.unwrap().contains("session_seconds"));
+    // null turns it off and clears it.
+    let cleared = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        json!({"supervisor":null}),
+    )
+    .await;
+    assert!(cleared.ok, "{:?}", cleared.message);
+    assert!(
+        host.state
+            .settings
+            .map()
+            .unwrap()
+            .workflow_settings
+            .supervisor
+            .is_default()
+    );
+    // A machine credential reaches none of it.
+    let from_machine = call(
+        &host,
+        Machine,
+        "workflow_settings_update",
+        json!({"supervisor":{"looks_per_day":5}}),
+    )
+    .await;
     assert!(!from_machine.ok);
 }
 
@@ -1586,4 +1760,159 @@ fn a_classification_answers_within_the_control_deadline_with_margin() {
     };
     // A settings update: every project read at once, then the director's machine (40 s).
     const { assert!(director::READY_READ_SECONDS + 40 + MARGIN <= CONTROL_DEADLINE_SECONDS) };
+}
+
+/// Instruction blocks `rule-0`… of `each` characters, stored as a save would store them.
+fn store_blocks(host: &Arc<Host>, count: usize, each: usize) -> Vec<String> {
+    let mut map = host.state.settings.map().unwrap();
+    map.workflow_blocks = (0..count)
+        .map(|n| Block {
+            id: format!("rule-{n}"),
+            name: format!("Rule {n}"),
+            text: "r".repeat(each),
+            ..Default::default()
+        })
+        .collect();
+    host.state.settings.save_map(&map).unwrap();
+    map.workflow_blocks.iter().map(|b| b.id.clone()).collect()
+}
+
+#[tokio::test]
+async fn a_workflow_at_its_limits_saves_and_one_whose_context_cannot_fit_is_refused_with_the_numbers()
+ {
+    use crate::workflows::{MAX_CONTEXT, MAX_INSTRUCTIONS, MAX_WORKFLOW_BLOCKS};
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let save = |w: &Workflow| json!({"workflow":w});
+    let ids = store_blocks(&host, MAX_WORKFLOW_BLOCKS + 1, 2000);
+    let mut w = workflow("payments", &own);
+    w.instructions = "x".repeat(MAX_INSTRUCTIONS);
+    w.blocks = ids[..MAX_WORKFLOW_BLOCKS].to_vec();
+    // 20,000 characters and 20 blocks pass every check of the map and the context: what is
+    // left is reading the Azure source this host lacks.
+    let reached = call(&host, Local, "workflow_save", save(&w)).await;
+    assert_eq!(reached.code, "not_ready", "{:?}", reached.message);
+    // One block more, or one character more, is refused with the limit and the count.
+    let mut more = w.clone();
+    more.blocks = ids.clone();
+    let refused = call(&host, Local, "workflow_save", save(&more)).await;
+    assert_eq!(refused.code, "invalid_input");
+    let text = refused.message.unwrap();
+    assert!(text.contains("at most 20 blocks (it lists 21)"), "{text}");
+    let mut more = w.clone();
+    more.instructions.push('x');
+    let refused = call(&host, Local, "workflow_save", save(&more)).await;
+    assert_eq!(refused.code, "invalid_input");
+    let text = refused.message.unwrap();
+    assert!(text.contains("20000") && text.contains("20001"), "{text}");
+
+    // Blocks long enough that a run's context could not hold everything: refused before
+    // anything is read, with what it takes, the limit and what to take out.
+    store_blocks(&host, MAX_WORKFLOW_BLOCKS, crate::workflows::MAX_BLOCK_TEXT);
+    let refused = call(&host, Local, "workflow_save", save(&w)).await;
+    assert_eq!(refused.code, "invalid_input");
+    let text = refused.message.unwrap();
+    let blocks = host.state.settings.map().unwrap().workflow_blocks;
+    let largest = engine::largest_context(&w, &blocks);
+    assert!(largest > MAX_CONTEXT);
+    assert!(
+        text.contains(&format!("{largest} characters of context"))
+            && text.contains(&format!("more than the {MAX_CONTEXT}"))
+            && text.contains(&format!("by at least {}", largest - MAX_CONTEXT)),
+        "{text}"
+    );
+    assert!(host.state.settings.map().unwrap().workflows.is_empty());
+}
+
+#[tokio::test]
+async fn a_longer_block_is_refused_when_a_workflow_that_lists_it_would_not_fit() {
+    use crate::workflows::{MAX_BLOCK_TEXT, MAX_CONTEXT, MAX_INSTRUCTIONS, MAX_WORKFLOW_BLOCKS};
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let ids = store_blocks(&host, MAX_WORKFLOW_BLOCKS, 3000);
+    let mut w = workflow("payments", &own);
+    w.instructions = "x".repeat(MAX_INSTRUCTIONS);
+    w.blocks = ids;
+    store(&host, vec![w.clone()]);
+    let before = host.state.settings.map().unwrap();
+    let longer = json!({"id":"rule-0","name":"Rule 0","kind":"instruction","text":"r".repeat(MAX_BLOCK_TEXT)});
+    // One longer block still fits; every block at its longest does not.
+    let saved = call(&host, Local, "workflow_block_save", json!({"block":longer})).await;
+    assert!(saved.ok, "{:?}", saved.message);
+    let mut refused = None;
+    for n in 1..MAX_WORKFLOW_BLOCKS {
+        let block = json!({"id":format!("rule-{n}"),"name":format!("Rule {n}"),"kind":"instruction","text":"r".repeat(MAX_BLOCK_TEXT)});
+        let reply = call(&host, Local, "workflow_block_save", json!({"block":block})).await;
+        if !reply.ok {
+            refused = Some((n, reply));
+            break;
+        }
+    }
+    let (n, reply) = refused.expect("a block that does not fit");
+    assert_eq!(reply.code, "invalid_input");
+    let text = reply.message.unwrap();
+    assert!(
+        text.contains("workflow payments") && text.contains(&MAX_CONTEXT.to_string()),
+        "{text}"
+    );
+    // The refused block keeps its text, and the stored workflow fits.
+    let map = host.state.settings.map().unwrap();
+    assert_eq!(map.workflow_blocks[n].text, before.workflow_blocks[n].text);
+    assert!(engine::largest_context(&w, &map.workflow_blocks) <= MAX_CONTEXT);
+}
+
+#[tokio::test]
+async fn list_and_show_say_how_much_of_each_limit_a_workflow_uses() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let ids = store_blocks(&host, 3, 100);
+    let mut w = workflow("payments", &own);
+    w.instructions = "Write tests first.".into();
+    w.blocks = ids;
+    store(&host, vec![w.clone()]);
+    let blocks = host.state.settings.map().unwrap().workflow_blocks;
+    let largest = engine::largest_context(&w, &blocks);
+    let part = engine::instructions_part(&w, &blocks);
+    // The instructions' section, and each block's (`Instruction block «Rule N»:` and its text).
+    assert_eq!(part, 15 + 18 + 3 * (23 + 6 + 100));
+    let expected = json!({
+        "instructions": {"used": 18, "limit": 20000},
+        "blocks": {"used": 3, "limit": 20},
+        "context": {"used": largest, "limit": 100000, "fixed": largest - part},
+    });
+    let shown = call(&host, Local, "workflow_show", json!({"id":"payments"})).await;
+    assert_eq!(shown.data["usage"], expected);
+    let list = call(&host, Local, "workflows_list", json!({})).await;
+    assert_eq!(list.data["usage"]["payments"], expected);
+    // The definition itself carries no usage, so it can be saved back as shown.
+    assert!(shown.data["workflow"].get("usage").is_none());
+}
+
+#[tokio::test]
+async fn a_workflow_larger_than_older_hosts_accept_warns_and_names_the_older_machines() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let mut w = workflow("payments", &own);
+    w.instructions = "x".repeat(crate::workflows::OLDER_MAX_INSTRUCTIONS);
+    w.blocks = (0..crate::workflows::OLDER_MAX_WORKFLOW_BLOCKS)
+        .map(|n| format!("rule-{n}"))
+        .collect();
+    assert!(older_hosts(&host, &w).await.is_none());
+    let worker = uuid::Uuid::new_v4().to_string();
+    implementation::register(&host, &json!({"id":worker,"name":"Worker","os":"linux"}))
+        .await
+        .unwrap();
+    w.blocks.push("rule-10".into());
+    let warning = older_hosts(&host, &w).await.unwrap();
+    assert!(
+        warning.contains("11 blocks")
+            && warning.contains("release 0.12.22 or older")
+            && warning.contains("Worker (unknown version)")
+            && warning.contains("pta update --machine NAME"),
+        "{warning}"
+    );
 }

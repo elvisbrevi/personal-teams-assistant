@@ -285,21 +285,22 @@ pub(in crate::app) async fn execute(host: &Arc<Host>, id: &str, now: i64) -> Res
                 }
                 return Ok(progress);
             };
-            // One launcher runs at a time. The slot is taken before the attempt is recorded, so
-            // a launcher that is busy is waited for with nothing recorded, never lost as an
-            // outcome.
-            let slot = if block.kind == Kind::Launcher {
-                match consumers::try_launcher_slot(&host.state) {
-                    Some(slot) => Some(slot),
-                    None => {
-                        if dirty {
-                            state.db.save(&run)?;
+            // A launcher never runs twice at once, and only a few run together. The slot is
+            // taken before the attempt is recorded, so a launcher that is busy is waited for
+            // with nothing recorded, never lost as an outcome.
+            let slot = match (block.kind, &block.launcher) {
+                (Kind::Launcher, Some(launcher)) => {
+                    match consumers::try_launcher_slot(&host.state, &launcher.id) {
+                        Some(slot) => Some(slot),
+                        None => {
+                            if dirty {
+                                state.db.save(&run)?;
+                            }
+                            return Ok(Progress::Waiting);
                         }
-                        return Ok(Progress::Waiting);
                     }
                 }
-            } else {
-                None
+                _ => None,
             };
             run.block_outcomes.push(BlockOutcome {
                 block: block.id.clone(),
@@ -346,11 +347,14 @@ pub(in crate::app) async fn execute(host: &Arc<Host>, id: &str, now: i64) -> Res
                 entry.at = now;
             }
             let moved = run.state != began_in || run.timeline.len() != began_at;
-            // A launcher that failed, timed out or whose outcome is unknown stops the run that
-            // is still in the stage the block belongs to; one that already failed, was resumed
-            // or was cancelled is not stopped again.
+            // A launcher that failed, timed out, was stopped or whose outcome is unknown stops
+            // the run that is still in the stage the block belongs to; one that already failed,
+            // was resumed or was cancelled is not stopped again.
             let stops = block.kind == Kind::Launcher
-                && matches!(result.outcome, "failed" | "timed_out" | "uncertain")
+                && matches!(
+                    result.outcome,
+                    "failed" | "timed_out" | "stopped" | "uncertain"
+                )
                 && !moved
                 && run.state.driven();
             if stops {
@@ -362,7 +366,11 @@ pub(in crate::app) async fn execute(host: &Arc<Host>, id: &str, now: i64) -> Res
                         "Launcher block {} ({}) {} at the {name} stage (exit code {}); its output is not kept. Resume to continue without running it again, or cancel the run.",
                         block.name,
                         block.launcher.as_ref().map_or("", |l| l.id.as_str()),
-                        if result.outcome == "timed_out" { "timed out" } else { "ended unknown" },
+                        match result.outcome {
+                            "timed_out" => "timed out",
+                            "stopped" => "was stopped",
+                            _ => "ended unknown",
+                        },
                         result.exit_code.map_or("none".into(), |c| c.to_string()),
                     ),
                 );
@@ -472,9 +480,10 @@ fn pull_request_links<'a>(
         .join("\n")
 }
 
-/// The latest stored summary of the run (written by the director on request), or nothing.
-fn latest_summary(run: &Run) -> String {
-    let Some(last) = run.summaries.last() else {
+/// The latest stored summary of the run written by the director on request, or nothing: a
+/// summary the workflow supervisor drafted is never posted by a block.
+pub(in crate::app::workflows) fn latest_summary(run: &Run) -> String {
+    let Some(last) = run.summaries.iter().rev().find(|s| s["by"] != "supervisor") else {
         return String::new();
     };
     last["text"]

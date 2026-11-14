@@ -389,6 +389,10 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 .resource-edit .actions { margin: .2rem 0 0; justify-content: flex-end; }
 .resource-edit .resource-toggles { margin: .3rem 0 .9rem; }
 .resource-edit label > small { display: block; margin: .1rem 0 .2rem; }
+.session-preview:empty { display: none; }
+.session-summary p { margin: .2rem 0 0; font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.session-summary small { color: var(--muted); font-size: var(--fs-sm); }
+.session-summary .label { font-weight: 600; }
 /* Dashed: a slot to fill in, not something saved yet. */
 .add-form { margin-top: .9rem; padding: .2rem 1rem; border: var(--bw) dashed var(--edge); border-radius: var(--radius-card); }
 .add-form[open] { padding-bottom: 1rem; }
@@ -1153,6 +1157,8 @@ body.directory-picker-open { overflow: hidden; }
 .workflow-add label { flex: 1 1 14rem; margin: 0; }
 .counter { display: block; text-align: right; color: var(--muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
 .counter.over { color: var(--error); }
+.workflow-usage { font-variant-numeric: tabular-nums; }
+.workflow-usage.over { color: var(--error); }
 .placeholder-list { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 .75rem; }
 .block-confirm { display: grid; gap: .5rem; }
 .block-confirm pre { margin: 0; padding: .6rem .75rem; border: 1.5px solid var(--rule); border-radius: 12px; background: var(--surface); white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
@@ -1165,7 +1171,10 @@ body.directory-picker-open { overflow: hidden; }
 }
 
 /* Workflows › Runs: rows that are buttons, a stage timeline with the status dots, children and pull requests. */
-.run-row { text-align: left; width: 100%; cursor: pointer; }
+/* A run is a card (`button.card`): badges, the item's number and title wrapping inside, its type, why it waits, the facts. */
+.run-row-title { font-family: var(--display); font-size: 1rem; font-weight: var(--w-strong); line-height: 1.3; }
+.run-row-kind { font-size: var(--fs-sm); }
+.run-row-facts { color: var(--muted); font-size: var(--fs-xs); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .run-row.waits { border-color: var(--warn); }
 .run-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .5rem; }
 .run-timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: .4rem; }
@@ -1175,3 +1184,6 @@ body.directory-picker-open { overflow: hidden; }
 .run-pulls { margin: .25rem 0 0; padding-left: 1.1rem; }
 .run-actions { flex-wrap: wrap; }
 .run-send-text { width: 100%; min-height: 8rem; }
+.run-restart-note { width: 100%; min-height: 10rem; }
+.run-handover-text { margin: .4rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.run-pause .actions { margin-top: .4rem; }

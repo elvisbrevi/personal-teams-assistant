@@ -178,7 +178,7 @@ The editable text an implementation agent starts from when it plans children, im
 _Avoid_: system prompt (in user-facing text)
 
 **Agent session**:
-The coding agent's own conversation associated with an implementation run and its work item. Its native session ID identifies it in that agent's tools and supported app links.
+A coding agent's own conversation (Claude Code, Codex or OpenCode): one the user started on a machine of their account, or one an implementation run started for its work item. Its native session ID identifies it in that agent's tools and supported app links. The agent sessions source reads the most recent ones as summaries; one whose requests carry `#private` is never read.
 _Avoid_: run ID
 
 **Workflow**:
@@ -193,12 +193,20 @@ _Avoid_: step, plugin
 The model-backed selector and summarizer of a project's items: it chooses which enabled workflow fits an item, or none, and writes progress summaries; code checks its choice and it decides nothing else. A project's director is its own when Settings › Workflows sets one, otherwise the machine and agent its workflows share, otherwise the account's general director. Distinct from the coordinator, which stays the user's main installation.
 _Avoid_: coordinator, orchestrator, dispatcher
 
+**Workflow supervisor**:
+The model-backed agent on the coordinator that looks after the account's workflow runs: on events (a run stopped, waited too long, lost its machine or disagrees with its session) or on request, it reads what the runs' agents did, checks their final reports against facts code read, drafts handover notes, work items and summaries, and proposes actions the user confirms. When every run of a batch has ended it writes an audit. By itself it changes no code and writes nothing outside the run's record, except moving the run it looks at ahead in the queue and what the user pre-approved for a workflow (a restart after a cut session, a post of its summary to a chat the user named). Distinct from the workflow director, which only chooses a workflow and summarizes.
+_Avoid_: orchestrator, monitor, watchdog
+
 **Workflow run**:
-One execution of a workflow for one work item, kept on the coordinator, advancing through stages (planning, the plan-review gate, child creation, coding, pull requests, blocks, done) by the existing implementation operations, never past the user's review of the plan. An item has at most one active run; a run that stops (needs attention, interrupted, failed) waits for the user to resume it, and a resume never repeats a write or a started coding run.
+One execution of a workflow for one work item, kept on the coordinator, advancing through stages (planning, the plan-review gate, child creation, coding, pull requests, blocks, done) by the existing implementation operations, never past the user's review of the plan. An item has at most one active run; a run that stops (needs attention, interrupted, failed) waits for the user to resume it, and a resume never repeats a write or a started coding run. A restart ends a run and starts a new one of the same workflow for the same item, which records the run it continues; a pause holds every run, or one project's, so nothing new starts until it ends.
 _Avoid_: implementation run (one of its parts), job
 
+**Handover note**:
+The user's text given to a restarted run's coding runs: what the previous run did, not to be repeated, and what is left. Stored with the new run and posted nowhere by the engine; the agent may write it elsewhere only where its workflow allows.
+_Avoid_: comment, handoff comment
+
 **Ready state**:
-A workflow state of a project's process, among those of its requirement, bug and listed task types, that the user chose in the workflow settings as «ready to develop»: an assigned item that reaches it can start its workflow. Chosen from the states the process has, never typed.
+A workflow state of a project's process, among those of its requirement, bug and task types, that the user chose in the workflow settings as «ready to develop»: an assigned item that reaches it can start its workflow. Chosen from the states the process has, never typed.
 _Avoid_: trigger state, start state
 
 **Workflow watcher**:

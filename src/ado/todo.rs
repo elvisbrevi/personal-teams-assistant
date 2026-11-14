@@ -89,6 +89,7 @@ struct Schema {
     assignments: Vec<Value>,
     dates: Vec<Value>,
 }
+#[allow(clippy::too_many_arguments)]
 async fn schema(
     client: &Client,
     key: &str,
@@ -97,6 +98,7 @@ async fn schema(
     project: &str,
     filters: &Filters,
     guides: &[Guide],
+    every_type: bool,
 ) -> Result<Schema> {
     let fields = metadata(
         client,
@@ -153,6 +155,7 @@ async fn schema(
                 group: group.to_owned(),
             });
             let wanted = match (&filters.work_type, &filters.kind) {
+                _ if every_type => true,
                 (Some(work_type), _) => work_type == name,
                 (None, Some(kind)) => kind == group,
                 // Without a filter the list holds the HUs and bugs, not every task.
@@ -225,9 +228,10 @@ async fn schema(
     })
 }
 
-/// The workflow states of a project's requirement, bug and listed task types (the types To-Do
-/// lists without a filter), read from its process with the read credential and cached like the
-/// rest of the process metadata: the states a workflow's ready states are chosen from.
+/// The workflow states of a project's requirement, bug and task types (every type the ready
+/// watcher takes, a plain Task included), read from its process with the read credential and
+/// cached like the rest of the process metadata: the states a workflow's ready states are
+/// chosen from.
 pub(crate) async fn process_states(
     client: &Client,
     key: &str,
@@ -247,6 +251,7 @@ pub(crate) async fn process_states(
         &project,
         &Filters::default(),
         guides,
+        true,
     )
     .await?;
     Ok(json!({"organization":source.organization,"project":project,"states":schema.states}))
@@ -263,7 +268,7 @@ async fn in_project(
     guides: &[Guide],
     result: &mut List,
 ) -> Result<()> {
-    let schema = schema(client, key, cache, source, project, filters, guides).await?;
+    let schema = schema(client, key, cache, source, project, filters, guides, false).await?;
     result.types.extend(schema.types.iter().cloned());
     result.states.extend(schema.states.iter().cloned());
     result.assignment_fields.extend(
@@ -567,7 +572,7 @@ mod tests {
         .unwrap();
         assert_eq!(states["project"], "Payments");
         assert_eq!(states["organization"], "https://dev.azure.com/example");
-        // The task type listed with the bugs counts; an ordinary task type does not.
+        // Every requirement, bug and task type counts, a plain Task included.
         assert_eq!(
             states["states"],
             json!([
@@ -575,7 +580,8 @@ mod tests {
                 "Approved",
                 "New",
                 "Ready",
-                "Ready for development"
+                "Ready for development",
+                "To Do"
             ])
         );
         assert!(

@@ -14,6 +14,10 @@ pub(in crate::app) struct Catalog {
     items: Mutex<BTreeMap<u64, Detail>>,
     assigned: Mutex<BTreeSet<u64>>,
     pulls: Mutex<BTreeMap<(String, String), Vec<PullRequest>>>,
+    /// The branches that exist, by repository (lowercased) and name.
+    branches: Mutex<BTreeSet<(String, String)>>,
+    /// Session summaries by implementation run, as the supervisor reads them.
+    summaries: Mutex<BTreeMap<String, serde_json::Value>>,
     /// Every request, as `GET what`.
     pub requests: Mutex<Vec<String>>,
     /// The items whose reads fail, as during an outage.
@@ -27,13 +31,15 @@ pub(in crate::app) struct Catalog {
     /// The most items a listing may return, whatever the limit asked (a catalog larger than
     /// the read's bound).
     pub list_cap: Mutex<Option<usize>>,
+    /// The task-category types whose work item guide lists them with the bugs (a development
+    /// bug): the To-Do list without a kind holds them, its `task` kind does not.
+    pub listed_with_bugs: Mutex<BTreeSet<String>>,
 }
 
 #[cfg(unix)]
 pub(in crate::app) const ORGANIZATION: &str = "https://dev.azure.com/example";
 
-/// A work item of project Payments.
-#[cfg(unix)]
+/// A work item of project Payments (also built by tests that run on every platform).
 pub(in crate::app) fn detail(
     id: u64,
     kind: &str,
@@ -90,6 +96,49 @@ impl Catalog {
             .unwrap()
             .insert((repository.to_lowercase(), branch.to_owned()), pulls);
     }
+    /// The summary of an implementation run's session, as the next read returns it.
+    #[cfg(unix)]
+    pub(in crate::app) fn set_summary(&self, run: &str, summary: serde_json::Value) {
+        self.summaries.lock().unwrap().insert(run.into(), summary);
+    }
+    pub(in crate::app) fn sessions(&self, runs: &[String]) -> Vec<serde_json::Value> {
+        let summaries = self.summaries.lock().unwrap();
+        runs.iter()
+            .filter_map(|run| summaries.get(run).cloned())
+            .collect()
+    }
+    /// A branch that exists in a repository, as the next read returns it.
+    #[cfg(unix)]
+    pub(in crate::app) fn set_branch(&self, repository: &str, branch: &str) {
+        self.branches
+            .lock()
+            .unwrap()
+            .insert((repository.to_lowercase(), branch.to_owned()));
+    }
+    pub(in crate::app) fn branch_exists(&self, repository: &str, branch: &str) -> bool {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(format!("GET refs {repository} heads/{branch}"));
+        self.branches
+            .lock()
+            .unwrap()
+            .contains(&(repository.to_lowercase(), branch.to_owned()))
+    }
+    /// Add a comment to an item, as its next read returns it.
+    #[cfg(unix)]
+    pub(in crate::app) fn comment(&self, id: u64, author: &str, text: &str) {
+        if let Some(detail) = self.items.lock().unwrap().get_mut(&id) {
+            detail.comments.push(crate::tools::todo::Comment {
+                author: author.into(),
+                created_at: Some(chrono::Utc::now().to_rfc3339()),
+                modified_at: None,
+                text: text.into(),
+                format: "markdown".into(),
+                content: None,
+            });
+        }
+    }
     pub(in crate::app) fn item(&self, id: u64) -> Result<Detail, String> {
         self.requests
             .lock()
@@ -137,15 +186,19 @@ impl Catalog {
     }
     /// The items assigned to the user in a state of a project, newest ID first, at most
     /// `limit` (with `has_more` when there are others): the To-Do read the watcher makes.
+    /// Without a kind it holds the HUs, the bugs and the task types listed with them; the
+    /// `task` kind holds every other task-category type, as the To-Do list groups them.
     pub(in crate::app) fn ready_items(
         &self,
         source: Option<&str>,
         project: &str,
         state: &str,
+        kind: Option<&str>,
         limit: usize,
     ) -> Result<crate::tools::todo::List, String> {
+        let asked = kind.map(|k| format!(" kind {k}")).unwrap_or_default();
         self.requests.lock().unwrap().push(format!(
-            "GET list {project} {state} limit {limit} source {}",
+            "GET list {project} {state}{asked} limit {limit} source {}",
             source.unwrap_or("-")
         ));
         if self.failing_state.lock().unwrap().as_deref() == Some(state) {
@@ -154,6 +207,12 @@ impl Catalog {
         if self.failing_lists.load(std::sync::atomic::Ordering::SeqCst) {
             return Err("[network] Azure work items could not be read.".into());
         }
+        let listed = self.listed_with_bugs.lock().unwrap().clone();
+        let group = |item: &Item| match item.category.as_str() {
+            "requirement" => "hu",
+            "task" if !listed.contains(&item.kind) => "task",
+            _ => "bug",
+        };
         let assigned = self.assigned.lock().unwrap().clone();
         let mut items: Vec<Item> = self
             .items
@@ -162,6 +221,7 @@ impl Catalog {
             .values()
             .filter(|d| {
                 assigned.contains(&d.item.id)
+                    && kind.map_or(group(&d.item) != "task", |k| group(&d.item) == k)
                     && d.item.state == state
                     && d.item.project.eq_ignore_ascii_case(project)
             })

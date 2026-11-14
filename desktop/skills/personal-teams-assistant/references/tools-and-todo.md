@@ -280,6 +280,20 @@ still raised one, its text (bounded, redacted) is in the run's `prompts` and the
 in records from older hosts). Failures, cancellations and interruptions stay distinct. An interrupted run retains its session ID, with no invented finish time. The
 coordinator receives durable session updates, including last-known records for offline machines.
 
+Every run or session that did not end with its answer has `failure`: `{cause, exit_code?,
+stderr?, text}`, chosen by code on the machine that ran it, and `text` is one sentence naming
+the next action. The causes: `cli_missing`, `model_unavailable`, `cli_exited_at_start` (with
+`exit_code`, and `stderr` the kind of the CLI's first stderr line: `missing_variable`,
+`not_signed_in`, `unknown_model`, `unknown_flag` or `other`), `stream_ended` (with
+`exit_code`), `output_limit` (the final report was too large to read), `timeout`, `cancelled`,
+`permission_prompt`, `invalid_answer`, `agent_error` (the CLI reported the turn as an error),
+`no_report`, `host_restarted`, `machine_offline` and `unknown` (a machine that predates causes,
+or a cause this version does not know). What a CLI wrote on stderr is never recorded or shown:
+to see it, run the CLI in a terminal on that machine. `implementation_runs`,
+`implementation_history` and `implementation_sessions` return it; report the `text` and act on
+the cause (for example install or sign in to the CLI, or update the machine) instead of
+guessing from `output`.
+
 `implementation_runs` filters by machine and optional run `id` or `work_item_url`, returns the
 latest 100 matching executions within an 800 KB response budget and their session/timing/result fields; `partial` signals an omitted older result. Request a run by `id` to retrieve it individually. `implementation_sessions`
 reads the account's session index for up to 100 canonical work item URLs, with up to three recent summaries per item, prioritizing active executions. Work item details show
@@ -297,8 +311,25 @@ and [Claude Remote Control](https://code.claude.com/docs/en/remote-control).
 Mobile/PWA session access uses the provider's own login on the execution machine.
 New implementation/request sessions try to enable it automatically. Codex uses its shared Remote
 Control daemon so the phone sees the same live thread. Claude publishes a real remote session
-whose `session_…` ID differs from the local UUID. The retained Claude process serves mobile for
-up to two hours (at most 16 per host) after the PTA run ended.
+whose `session_…` ID differs from the local UUID. After its run the Claude process keeps serving
+mobile for up to two hours (at most 16 per host) only when the run ended with its answer (a
+coding run `done`, a planning run `plan_ready`): the session is then **handed to the user** and is
+theirs to continue. Every other ending stops its process (a failed turn, the time limit,
+`needs_attention`, `permission_prompt`, `failed`, a cancel, a restart of the host), and so does
+cancelling a finished run with `implementation_cancel`; the workflow director's sessions are
+never kept. A stopped session is reachable again only when the user opens it with
+`implementation_mobile_session`. `implementation_runs`, `implementation_history`,
+`implementation_sessions` and each implementation run in `workflow_run_status` say
+`session_alive` (its process exists now) and `handed_to_user` (it outlived its run): read them
+instead of guessing from the run's state or the machine's processes.
+
+In the provider's session list (Claude Remote Control, Codex threads) each session is named
+after what it works on: `Teams Assistant - <work item ID> <title>` for a coding or planning run
+(the title on one line, shortened to 100 characters), `Teams Assistant - director <ID>`,
+`Teams Assistant - summary <ID>` and `Teams Assistant - supervision <ID>` for the workflow
+director's and supervisor's sessions, and `Teams Assistant - new
+user story` (`new bug`, `new epic`) for a request run. OpenCode sessions are not named. A worker
+too old to receive the item names those sessions without the ID.
 
 A coding run is finished when its agent's work is, not at its first turn end: a Claude session
 that ends a turn while a background task it started is still pending (a pipeline it watches, a
@@ -306,7 +337,10 @@ subagent) stays `running` until a later turn finishes and the CLI reports it idl
 pending, or its process exits; a session that says nothing more ends five seconds after its last
 turn. The run's report and its `done` or `needs_attention` come from the last turn. While it runs
 it keeps its directories reserved and its workflow run's slot. A session still working after two
-hours is stopped and the run ends `needs_attention`, saying so, with its last report.
+hours is stopped and the run ends `needs_attention`, saying so, with its last report. A huge
+output line (an image the agent read, for example) never ends a session: its payload is dropped
+while it is read, and an event that still cannot be read is skipped, noted once at the end of
+the run's report with a fixed sentence.
 Internal Teams model calls remain tool-less and ephemeral without remote access.
 
 Use `implementation_mobile_session` with `machine`, recorded run `id`, `action` (`connect`,
@@ -366,7 +400,8 @@ workflow settings.
    `implementation_catalog`.
 3. Save blocks first if the workflow uses any: `pta workflows blocks save` (MCP
    `workflow_block_save`), JSON on stdin with `id`, `name`, `kind` and that kind's fields:
-   - `instruction`: `text` (at most 8000 characters), no stage; saved without confirmation.
+   - `instruction`: `text` (at most 8000 characters), no stage; saved without confirmation, and
+     refused when a workflow that lists it would no longer fit its run's context (below).
    - `teams_notification`: `stage` (`before_planning`, `plan_ready`, `children_created`,
      `coding_started`, `child_done`, `pull_requests_completed`, `done`, `failed`), `chat` `{id, name}` from
      `teams_chats`, `mentions` (member display names of at most 100 characters without `]`, at most 20) and `template` (at most 4000
@@ -385,8 +420,8 @@ workflow settings.
    `description` (what the director will read to choose it), `enabled`, `auto_start`,
    `organization` (`https://dev.azure.com/NAME`), `project`, `repositories` `[{id, name}]` as
    listed, `machine`, `checkouts` `{REPOSITORY_ID: DIRECTORY}` (one per repository),
-   `agent` `{provider: codex|claude|opencode, model, effort}`, `instructions` (at most 8000
-   characters), `blocks` (existing block IDs, at most 10, in order) and `allow`: what the
+   `agent` `{provider: codex|claude|opencode, model, effort}`, `instructions` (at most 20000
+   characters), `blocks` (existing block IDs, at most 20, in order) and `allow`: what the
    workflow's coding runs may do that the fixed rules otherwise forbid, each at most once:
    `work_items` (create and change work items and issues: state, fields, comments), `teams`
    (send Teams messages, e.g. with `pta teams send`), `merge` (complete and merge pull requests),
@@ -400,7 +435,17 @@ workflow settings.
    directory the refusal names), two checkouts for one repository (keys are compared without
    letter case), a directory that is not a Git checkout, an origin naming another repository, an agent, model or
    effort the machine does not have, a missing block and anything over the limits (50
-   workflows, 100 blocks, 20 repositories). The reply's `warnings` list what could not be
+   workflows, 100 blocks, 20 repositories), each refusal with the limit and the count. A run
+   gets the instructions and instruction blocks whole, never cut, in a context of at most
+   100000 characters: a workflow whose largest run context (its instructions and instruction
+   blocks plus the fixed sentences, its checkouts, the item and the longest handover note) would
+   exceed it is refused with that size, the part that is its instructions and blocks and how
+   many characters to take out. The reply's `usage` says how much of each limit it uses (as
+   `show` does). Over 10 blocks or 8000 characters of instructions the save succeeds with a
+   warning: computers of the account on release 0.12.22 or older cannot take the account's
+   configuration until they are updated (`pta update`, or `pta update --machine NAME`), and
+   the warning names the account's machines that report such a version or none. Relay it.
+   The reply's `warnings` list what could not be
    verified or was adjusted: an offline machine or one whose version cannot inspect checkouts
    (its directories are then checked only against the roots it last reported), a checkout
    without a readable origin, an agent catalog the machine did not return, a directory saved as
@@ -408,7 +453,10 @@ workflow settings.
    again before a run.
 5. `pta workflows enable ID` / `disable ID` (MCP `workflow_save` with `id` and `enabled` only)
    change nothing else. `pta workflows list|show ID` and `pta workflows blocks list` (with
-   `used_by`) read them. `pta workflows remove ID --confirmed` (MCP `workflow_remove`, needs
+   `used_by`) read them; `show` (and `list`, by workflow ID) has `usage`: `instructions`,
+   `blocks` and `context`, each `{used, limit}`, `context.used` being the largest context a run
+   of it can get and `context.fixed` the part that is not its instructions or instruction
+   blocks. `pta workflows remove ID --confirmed` (MCP `workflow_remove`, needs
    confirmation) cannot be undone; `pta workflows blocks remove ID` is refused while a workflow
    uses the block. A workflow with a run that is not done or cancelled cannot be removed.
 
@@ -427,8 +475,8 @@ How a workflow takes an item from its ready state to its release, and where the 
    repository's checkout, the agent and instructions, its blocks, `auto_start`), the ready states of
    the project, and a director only when the project's workflows differ in machine or agent (by
    default the director runs where the workflow runs, with its agent).
-2. **An item becomes ready.** The coordinator's watcher sees an assigned HU, bug or listed task in a
-   ready state and starts one run, and the project's director checks which workflow fits it (also
+2. **An item becomes ready.** The coordinator's watcher sees an assigned HU, bug or task (any
+   task type) in a ready state and starts one run, and the project's director checks which workflow fits it (also
    when only one starts by itself; one that does not fit waits `unassigned`); or the person starts
    one from Implement or with `pta workflows run ID`.
 3. **The run plans** with the workflow's machine, checkouts, agent, instructions and instruction
@@ -437,35 +485,51 @@ How a workflow takes an item from its ready state to its release, and where the 
    confirms them; only that `implementation_create` writes to Azure DevOps. Nothing passes the gate
    without it. A task has no plan and goes straight to coding.
 5. **Children are coded one by one** in the checkout of the repository each names, each with its
-   own guide; each coding agent opens its pull request and reports its branch.
-6. **Pull requests are read** (never merged) until all are completed; an abandoned one, a missing
-   branch or the wait (`pull_request_wait_days`) stops the run in `needs_attention`.
+   own guide; each coding agent opens its pull request and reports its branch. A task is coded in
+   the repository it names and is given every checkout of the workflow: it may change the others
+   too, each on its own branch with its own pull request, reported on one `Branch REPOSITORY: NAME`
+   line each after its `Branch: NAME`.
+6. **Pull requests are read** (never merged) until all are completed, one for each reported branch;
+   an abandoned one, a missing branch or the wait (`pull_request_wait_days`) stops the run in `needs_attention`.
 7. **Blocks act at their stage**: a launcher (an approved program of the coordinator, by digest)
    when the pull requests are completed, notifications with mentions when the run is done or fails.
 8. **Report on request**: `workflow_summary` asks the director for a summary of the record, and
    `workflow_summary_send` posts it, after the person confirms the exact text, to each chat chosen.
 9. **When something stops it** (`needs_attention`, `interrupted`, `failed`, `unassigned`), the run
    says why; the person fixes the cause and resumes, assigns a workflow, or cancels. Nothing that
-   may already have happened is done again by a resume.
+   may already have happened is done again by a resume. When the agent stopped halfway and its
+   work must go on without being repeated, restart the run with a handover note instead
+   (`workflows restart`), written with the person from the run's record and what they know.
+10. **When the network to the customer drops** or two sessions would collide, pause the runs
+   (`workflows pause`, every project or one, stopping the live sessions or letting them finish)
+   and unpause when it is back; restart each interrupted run with its note, in the order that
+   makes sense.
+11. **Let the supervisor follow the runs** (Settings › Workflows, `--set supervisor.*`): when a
+   run stops, waits too long, loses its machine or disagrees with its session, it reads what the
+   agents did, checks their final reports and drafts the handover note, work items and a
+   summary; read its look (`workflows supervision RUN`) and carry out what the person agrees to
+   (`workflows act`), once each.
 
 ### Workflow settings and the director
 
 Requires host and CLI `workflow_director_support: true`.
 
 - **Read them:** `pta workflows settings` (MCP `workflow_settings`) shows
-  `watch_interval_minutes` (default 5), `concurrency` (workflow runs that advance at once,
-  default 2), `pull_request_wait_days` (default 7), the account's `director` (`machine`,
+  `watch_interval_minutes` (default 5), `concurrency` (workflow runs that plan, code or act at
+  once, first in, first out; classifying takes no slot; default 2), `pull_request_wait_days` (default 7), the account's `director` (`machine`,
   `provider`, `model`, `effort`; none until chosen), `ready_states` and `project_directors` (a
   project's own director) per organization and project, `directors` (for each project, the
   director that classifies and summarizes its items and its `source`: `project` its own,
   `workflow` the machine and agent its enabled workflows that start by themselves share (all its
   enabled ones when none does), `global` the account's; null without one), with the defaults,
   the bounds, `editable` and `watcher` (the ready-state watcher on this computer:
-  `state` `watching`, `idle` while no ready state is configured, `waiting_for_director` or
-  `unavailable` where it never runs, the interval and `last_poll`; see [automatic starts](#automatic-starts-and-the-implement-choice)).
+  `state` `watching`, `idle` while no ready state is configured, `waiting_for_director`,
+  `paused` while every run is paused (`paused_projects` names the projects paused on their own) or
+  `unavailable` where it never runs, the interval and `last_poll`; see [automatic starts](#automatic-starts-and-the-implement-choice))
+  and `paused` (the pauses in force; see [workflow runs](#workflow-runs)).
   With `--project NAME` (and `--organization URL` or
   `--source ID` when needed) it adds `process_states`: the states that project's process has
-  for its requirement, bug and listed task types. Choose ready states only from that list.
+  for its requirement, bug and task types. Choose ready states only from that list.
 - **Change them:** `pta workflows settings --set KEY VALUE [--set KEY VALUE…]` (MCP
   `workflow_settings_update` with only the fields to change). Keys: `watch_interval_minutes`
   (1-60), `concurrency` (1-4), `pull_request_wait_days` (1-60); `director.machine` (a
@@ -498,7 +562,10 @@ Requires host and CLI `workflow_director_support: true`.
   the item's project, with the director's one-line `reason` (in the user's language) and
   `outcome: "chosen"`; otherwise `workflow` is `null` with `reason` and `outcome`
   `unrecognized` (an ID it did not send, an answer that is not the JSON asked for, no answer),
-  `disabled` or `other_project`, or `none` with the director's reason when it chose none. The
+  `disabled` or `other_project`, or `none` with the director's reason when it chose none. A
+  session that gave no answer adds `failure` (the vocabulary of `implementation_runs`, chosen by
+  the director's machine; `unknown` from one that predates causes), and a director that could
+  not run fails with `The workflow director did not run.` and the cause's sentence. The
   reply also has what the director said (`director`), which director answered (`directed_by`:
   machine, provider, model, effort and `source`), the `candidates`, the item's verified
   link, and `run` and `session_id`: the session appears in Agent history
@@ -524,7 +591,17 @@ run (any state but `done` and `cancelled`).
   `implementation_runs`). Then each created child is coded in turn, with full permissions on that
   machine and no prompts, in the checkout of the workflow repository it names (or the first), and
   the run waits until the pull request of the branch each session reported is completed. A task
-  (or a development bug listed with the bugs) is coded directly, with no plan or children. Refused:
+  (or a development bug listed with the bugs) is coded directly, with no plan or children: its
+  working directory is the checkout of the repository it names first (or the first), where its
+  pull request goes, and the run is given every other checkout of the workflow too (at most 16
+  directories), so it may change those repositories when the item needs it, each on its own branch
+  with its own pull request. Its report ends with `Branch: NAME` for its own repository and one
+  `Branch REPOSITORY: NAME` line for each other repository it pushed a branch in (the workflow's
+  name for it); the run waits for a pull request of every reported branch. A line for a repository
+  the workflow does not have (or has no checkout of) is ignored and listed in the child's
+  `ignored_branches`. Because every task run of a workflow holds all its checkouts, two of them
+  never run at once on its machine: the second waits (`Another run is using these directories`).
+  Refused:
   a disabled or unknown workflow, one of another project, an item that is not assigned to the user,
   and an item that already has an active run (the refusal names it). With `--director`, a run the
   director finds no workflow for (or without a director) waits `unassigned`:
@@ -532,18 +609,27 @@ run (any state but `done` and `cancelled`).
 - **Follow:** `pta workflows runs [--state STATE] [--workflow W] [--limit N]` (MCP
   `workflow_runs`) lists runs newest first, with `attention`: the runs waiting on the user
   (`plan_review`, `unassigned`, `needs_attention`, `interrupted`, `failed`; `status` carries them
-  too as `workflow_attention`). `pta workflows status RUN` (MCP `workflow_run_status`) is the
+  too as `workflow_attention`). A run in a stage that takes one of the `concurrency` slots
+  (`planning`, `creating_children`, `coding`, `blocks`) without one shows `waiting_for_slot:
+  true` and its `queue_position` (1 is next): slots go in creation order, and a run whose
+  classification is retrying keeps its place once its retry is due. `pta workflows status RUN` (MCP `workflow_run_status`) is the
   whole record: the stage timeline with times and outcomes, the planning run and each child's
   coding run (`implementation_runs` with the machine and ID shows them), the creation ledger entry
-  (`implementation_creation`), every child's verified link, branch and pull requests with their
-  links and status, and `attention` (what to look at) or `error`. Report links as they are.
+  (`implementation_creation`), every child's verified link, branch (a task's branches in other
+  repositories in `branches`, `{repository, branch}`, and the repositories of ignored lines in
+  `ignored_branches`) and pull requests with their links, status and repository, and `attention` (what to look at) or `error`. A planning or coding run that
+  did not end with its answer has its machine's cause in `planning.failure` or the child's
+  `coding.failure`, and a classification without an answer in `classification.failure`
+  (`{cause, exit_code?, stderr?}`, the vocabulary of `implementation_runs`). Report links as they are.
 - **States:** `classifying`, `unassigned`, `planning`, `plan_review`, `creating_children`,
   `coding`, `pull_requests`, `blocks` (the `pull_requests_completed` and `done` blocks run here),
   `done`, `failed`, `cancelled`, `interrupted`, `needs_attention`. A coding run that ends
   `permission_prompt`, `failed`, `needs_attention` or `interrupted`, an abandoned pull request, a
   session that reported no branch, an uncertain creation, a run that delivered no child and a
   wait longer than `pull_request_wait_days` stop the run in `needs_attention`, naming the cause and the linked run
-  or pull request. A restart while a planning or coding run was active leaves it `interrupted`.
+  or pull request; for a coding or planning run the attention text is `… ended STATE: SENTENCE`,
+  the sentence of the session's cause. A director that gave no answer leaves the run
+  `unassigned` with `The workflow director gave no answer: SENTENCE Assign a workflow to this run.` A host restart while a planning or coding run was active leaves it `interrupted`, and so does a pause with `--sessions stop` that stopped its active run.
 - **Resume:** `pta workflows resume RUN --confirmed` (MCP `workflow_run_resume`) continues a
   `failed`, `interrupted` or `needs_attention` run from the stage it stopped in, accepting what
   stopped it: a new planning run replaces one that did not end ready, the children that were
@@ -564,8 +650,10 @@ run (any state but `done` and `cancelled`).
   refusal from Teams records `refused` with the reason and the run goes on; a failure after the
   request left is `uncertain` and nothing is ever retried. A launcher block runs the approved
   launcher of the coordinator only while it is still approved with the digest the block stored
-  (otherwise `not_started`, with the reason), never shows or keeps its output, and when it
-  `failed`, `timed_out` or ended `uncertain` stops the run in `needs_attention`. `status` shows every outcome in
+  (otherwise `not_started`, with the reason), never shows or keeps its output, waits with nothing
+  recorded while that launcher is already running or three launchers run on the coordinator, and
+  when it `failed`, `timed_out`, was `stopped` by the owner or ended `uncertain` stops the run in
+  `needs_attention`. `status` shows every outcome in
   `block_outcomes` (`block`, `stage`, `occurrence`, `outcome`, `reason`, `exit_code`,
   `duration_ms`, `message_id`; `skipped` marks a stage that had already happened when a run of an
   older version was first seen); an `attempting` outcome that a restart interrupted reads
@@ -573,11 +661,39 @@ run (any state but `done` and `cancelled`).
   before telling the user it did or did not happen. Resuming a run stopped by a launcher goes on
   with the blocks that have not run and never runs that launcher again. Blocks never post to a
   Teams channel, only to chats, and a block cannot do anything but these two things.
+- **Restart with a handover note:** `pta workflows restart RUN [--note TEXT | --note-file PATH]
+  --confirmed` (MCP `workflow_run_restart {run, note?}`) is for a run whose agent stopped halfway
+  and must not repeat what it did. It ends the run as cancel does (its live sessions stop, the file
+  changes stay) and starts a new run of the same workflow (enabled, as it is now) for the same
+  item, read fresh, from its first stage: an HU or bug plans again and waits for the plan review, a
+  task is coded again. Before it, read the old run (`status`: stages, branches, pull requests) and
+  ask the user what was really done; write the note with them: what is done and must not be
+  repeated (branch pushed, version deployed, notices sent, pull request state) and what is left. It
+  is plain text, at most 4000 characters (`--note-file` is read on this computer, at most 16 KiB),
+  stored with the new run (`handover`) and given to each of its coding runs under «Handover from
+  the previous run»; it is posted nowhere, so do not also write it on the work item unless the
+  user asks (that is a separate confirmed write). The new run names the old one in `continues`,
+  the old one the new in `restarted_as`. An unassigned or classifying run has no workflow to
+  restart: assign one or cancel it.
+- **Pause and unpause:** `pta workflows pause [--project NAME] --sessions stop|finish --confirmed`
+  (MCP `workflow_runs_pause {project?, sessions}`) holds every run, or one project's (by name):
+  no run takes a slot, asks the director, starts a planning or coding run or runs an acting block,
+  and the watcher starts nothing for it, while what already runs is still followed. The choice
+  for the sessions running now is the user's and has no default: `stop` stops them now (their runs
+  become `interrupted`, to restart with a note or resume), `finish` lets them finish and records
+  how they end. Use it when the network to the customer dropped or two sessions would collide.
+  The runs keep their order in the line; a run started or restarted meanwhile waits.
+  `pta workflows unpause [--project NAME] --confirmed` (MCP `workflow_runs_unpause`) ends that
+  project's pause, or every pause; the held runs go on in the order they were created. `runs`,
+  `status` and `settings` show the pauses in force (`paused`) and each held run (`paused: true`).
 - **Cancel:** `pta workflows cancel RUN --confirmed` (MCP `workflow_run_cancel`) cancels the active
-  planning or coding run (its file changes stay) and the run advances no more; a creation already
-  being sent is not stopped. When the run's machine cannot be reached, the reply's `warning` names
-  the run and the machine: relay it, and cancel that run there with `implementation_cancel` once
-  the machine is reachable.
+  planning or coding run (its file changes stay), stops every other session the run started that
+  is still alive (a coding session handed to the user after `done`, or one the user opened again;
+  the reply lists them in `sessions_stopped`) and the run advances no more; a creation already
+  being sent is not stopped. A run that ends `failed` or `interrupted` stops those sessions too;
+  `needs_attention` keeps a `done` coding session handed to the user. When a machine cannot be
+  reached, the reply's `warning` names the run and the machine: relay it, and cancel that run
+  there with `implementation_cancel` once the machine is reachable.
 
 - **Summarize:** `pta workflows summary RUN` (MCP `workflow_summary`, which **runs a model** and needs no confirmation, like `workflow_classify`:
   it takes up to about a minute and uses the director's agent quota) has the workflow director
@@ -589,7 +705,8 @@ run (any state but `done` and `cancelled`).
   is in Agent history (`implementation_history`, `purpose: "summary"`). The director writes no
   links: URLs it wrote are dropped and code appends a **Links** list with the verified links of the
   item and of the children and pull requests the text names; report them as they are. An empty or
-  malformed answer is an error and nothing is stored. Needs a director (Settings › Workflows) on a
+  malformed answer, or a session that could not run, is an error that names the cause's sentence;
+  nothing is stored and the run's `error` says `The progress summary failed: …`. Needs a director (Settings › Workflows) on a
   machine running 0.12.6 or later. Show the user the summary before offering to send it.
 - **Send a summary to Teams:** `pta workflows summary RUN --send CHAT_ID [--mention NAME…]
   [--text-file PATH] [--summary ID] --confirmed` (MCP `workflow_summary_send` with `run`,
@@ -615,11 +732,88 @@ The engine never merges, completes or changes a pull request or a work item; the
 opens the pull request as its instructions ask. A run uses the workflow as it was when the run got
 it.
 
+### The workflow supervisor
+
+Requires host and CLI `workflow_supervisor_support: true`, on the owner's coordinator. It is off
+by default and an update never turns it on.
+
+- **Settings:** `pta workflows settings` shows `supervisor` (`enabled`, `machine`, `provider`,
+  `model`, `effort`, and the bounds `looks_per_day` 1–100 (default 24, the person's requests not
+  counted), `min_interval_minutes` 10–1440 (30), `wait_hours` 1–48 (3), `offline_minutes` 5–240
+  (15), `session_seconds` 60–600 (180)); change them with `pta workflows settings --set
+  supervisor.FIELD VALUE` (MCP `workflow_settings_update {supervisor: {...}}`, merged with the
+  stored values; `--set supervisor none` turns it off and clears it). Turning it on needs its
+  machine and agent, checked against the machine's installed CLIs like the director's; its own
+  prompt is `supervise` (`pta prompts show supervise`).
+- **When it looks:** once per run per event (a run stopped in `needs_attention`, `failed` or
+  `interrupted`, but not a stop the person caused with a pause; a run waited for a slot or a
+  launch longer than `wait_hours`; its machine unseen for `offline_minutes`; a session alive on
+  a run that ended, or a coding run without a live session), at most one look at a time, looks of
+  one run at least `min_interval_minutes` apart, at most `looks_per_day` automatic looks in 24
+  hours; nothing while a pause covers the run's project. A look that fails is never retried.
+  `pta workflows supervise RUN` (MCP `workflow_supervise`, local, no confirmation; it runs a
+  model on the supervisor's machine and uses its quota) asks for one now; it returns at once with
+  the look queued or running, and is refused within five minutes of that run's previous look.
+- **What a look holds:** `pta workflows supervision RUN` (MCP `workflow_supervision`; also
+  `supervision` in `workflow_run_status`, and the latest in each `workflow_runs` entry) gives
+  each look's `assessment` (`done`, `left`, `recommendation`), `checks` (each claim of the final
+  report, `verified` or `not_verified` with code's `fact`, such as «Pull request !7 is active.»:
+  report a `not_verified` claim as not verified, never as done), `unverified`, `unread` and
+  `truncated` (what code could not read or cut), the drafted `handover`, `work_items` and
+  `summary`, and `actions` with their `state`. Code read the facts (item and child states, pull
+  requests, branches, machines, session ends) with the read credential; comments, reports and
+  session summaries reached the supervisor only as untrusted text, and nothing it wrote can
+  choose a chat, a person, a link, a repository or another run.
+- **What it did by itself:** stored the look, and possibly moved the run ahead in the queue
+  (`move_ahead`, `done`). `pta workflows requeue RUN --ahead|--back` (MCP `workflow_run_requeue`,
+  local) moves a run waiting for a slot ahead, or back to its place by creation.
+- **Carry out a proposal:** `pta workflows act RUN LOOK ACTION [--note TEXT | --note-file PATH]
+  [--chat ID] [--mention NAME…] --confirmed` (MCP `workflow_supervision_act`, needs
+  confirmation: show the user the action and its exact draft first). `restart` restarts with the
+  drafted note when no `note` is given (it reaches the coding runs as the supervisor's text),
+  with the person's edited `note`, or without any note when `note` is empty; `resume`, `cancel` and `pause_project` run those operations;
+  `post_summary` posts the drafted summary to the chat the person chose (`teams_chats`), once,
+  never retried; `create_work_item` returns the draft for Create request
+  (`implementation_request_start`, with its own confirmation and the type's work item guide).
+  Each runs once, even when confirmed twice at once (`executed`, `refused` or `uncertain`; one
+  the operation refused before acting stays `proposed`; one a stopped host left `attempting`
+  becomes `uncertain`); an action of a run that moved on since the look is `expired`. The
+  confirmation of a post names its chat and every mention. `pta workflows dismiss RUN LOOK ACTION` (MCP
+  `workflow_supervision_dismiss`) sets one aside.
+- **Pre-approval per workflow:** a workflow's `preapprove` (in its JSON for `pta workflows save`,
+  MCP `workflow_save`; the editor's «What the supervisor may do without asking»; saved only with
+  `confirmed`, which names each entry, like `allow`) lists at most `{"action":
+  "restart_after_cut"}` and `{"action": "post_summary", "chat": {"id", "name"}, "mentions":
+  [...]}`. After a look at a stopped run the supervisor carries them out itself, once, recorded
+  with `by: "preapproval"`, only when code finds every condition: a restart only when the coding
+  session was cut (stream ended, over the line limit, time limit, host restart, machine offline),
+  no session is alive, no pause, the workflow is enabled, the run is as the look saw it, and the
+  run is not itself a pre-approved restart (so restarts never chain); a post only to the chat and
+  members saved there (the chat must be in the user's chat list under that name, read when the
+  workflow is saved; the save is refused when the list cannot be read), at most 3 a day per
+  workflow, and only when the drafted summary passes the same checks as an answer, otherwise it
+  stays proposed for the person. The post goes first, then the restart, whatever order the model
+  wrote them in. Nothing else is ever pre-approved. Tell the user plainly: a pre-approved restart
+  gives a fully permitted coding agent a note written by a model that read the item's comments;
+  prompts, a 4000-character bound, the cleaner and one automatic restart lower that risk, they
+  are not a guarantee.
+- **Audits:** when every run created since the last audit has ended (one reached coding), or with
+  `pta workflows supervise --audit [--since TIME]` (MCP `workflow_supervise {audit: true}`), the
+  supervisor writes an audit: per run its result, the pull requests and unverified claims, the
+  branches of completed pull requests that still exist, the findings left only in comments (and
+  whether they need a work item), proposals and drafted work items. Read them with `pta workflows
+  audits [ID|latest]` (MCP `workflow_supervision {audit}` or `{audits: true}`); the Runs view
+  shows the latest. An audit posts and writes nothing.
+
+It never changes code, merges, deploys or writes to Azure DevOps by itself, and posts to Teams only
+what the person confirmed or a workflow pre-approved, to the chat that workflow names.
+
 ### Automatic starts and the Implement choice
 
 - **Automatic starts.** On the account owner's coordinator (never a computer signed in to it, a
   worker or a shared portal account) a watcher looks every `watch_interval_minutes` (default 5) at
-  the HUs, bugs and listed tasks assigned to the user in the **ready states** of each project
+  every HU, bug and task assigned to the user in the **ready states** of each project, whatever
+  its type (a plain Task as much as a development bug a guide lists with the bugs)
   (`pta workflows settings --set ready_states.PROJECT "STATE,STATE"`; read-only, the To-Do read
   with the read credential, at most 100 items per project per poll, and at most 25 new runs per
   poll). It is idle until a ready state is configured and needs no running Teams service. With
@@ -634,8 +828,9 @@ it.
   workflow, a disabled workflow and an item the director finds no workflow for start no coding:
   the last waits `unassigned` for `pta workflows assign RUN WORKFLOW --confirmed`. An item starts at most one run per ready state
   (a seen ledger); one that leaves the state and comes back is seen again. Whether it ran and what
-  the last check found: `pta workflows settings` (`watcher`; kept in memory, so a restart empties
-  it). **The gate stands:** an automatic run only plans; it stops at `plan_review` (shown on Home
+  the last check found: `pta workflows settings` (`watcher`, whose `last_poll` counts the items
+  seen by category in `seen_by_category`: `requirement`, `bug` and `task`, the process category of
+  the type, so a development bug counts as `task`; kept in memory, so a restart empties it). **The gate stands:** an automatic run only plans; it stops at `plan_review` (shown on Home
   and in `status`'s `workflow_attention` with the item's link) and nothing is created in Azure
   DevOps until the user reviews the plan and confirms the children with `implementation_create`.
 - **Implement with a workflow.** `implementation_start` (MCP) takes `workflow`: `none` (default;
@@ -660,7 +855,7 @@ Agents use the same operations through `pta tools call` or MCP:
 1. `implementation_request_catalog` with `provider: azure|github` and, for Azure, `source`. It returns exact `targets`, up to three `recent` targets, CLI session/write readiness and available coding CLI providers/models/efforts. Keep a target as returned; arbitrary or edited targets are rejected.
 2. After the user approves the context, target, type and agent, call `implementation_request_start` with a new stable UUID `id`, the exact `target`, `kind: epic|hu|bug`, `context`, CLI `provider`, `model`, `effort` and `confirmed: true`. Azure requires the authenticated Azure CLI session on this host; read credentials cannot create requests. GitHub uses the GitHub CLI session that supplied the repository list, including its own assignment; the GitHub App connection does not authorize this flow. The process defines the actual Azure work item type. Creation uses its To-Do developer assignment role (or Assigned To) and description/reproduction field.
 3. Inspect `implementation_request_status` with `id` until generation/sending ends. Reusing that ID with the same submission only reads the saved record; another submission cannot reuse it. After any timeout inspect status, never start a replacement automatically. A failed/uncertain send is never retried. An uncertain request may already exist: inspect the provider first. If GitHub silently drops the Epic type or own assignment, `needs_attention` preserves its verified issue URL for review.
-4. `implementation_history` takes no arguments and returns the latest 100 recorded local requests and local/cached implementation sessions, bounded to 800 KB; `partial` indicates bounded history. The GUI's Agent history screen opens from To-Do. Run IDs belong to PTA; session IDs belong to the native coding CLI. Missing session IDs and finish times remain empty, including interrupted executions.
+4. `implementation_history` takes no arguments and returns the latest 100 recorded local requests and local/cached implementation sessions, bounded to 800 KB; `partial` indicates bounded history. Each entry says `session_alive` and `handed_to_user`. The GUI's Agent history screen opens from To-Do. Run IDs belong to PTA; session IDs belong to the native coding CLI. Missing session IDs and finish times remain empty, including interrupted executions.
 5. Use `implementation_open_session` with the recorded `machine` and run `id` on that machine's native desktop. The existing Codex/Claude platform limits apply; OpenCode and unsupported remote/mobile sessions retain their ID with an explanation rather than an invented app URL.
 
 Daily task snapshots, activity runs and all evidence tools remain read-only. This is a distinct explicit request-creation action; it does not authorize autonomous work item creation by the assistant.

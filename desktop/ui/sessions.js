@@ -8,6 +8,7 @@ import { busy, fail, notify } from './notices.js';
 import { copy } from './markdown.js';
 import { loadAgentHistory } from './todo-request.js';
 import { providerNames } from './home.js';
+import { failureText } from './run-states.js';
 
 // ---------------------------------------------------------------- implementation
 function sessionDestination(session, mobile, native = false) {
@@ -20,6 +21,12 @@ function sessionDestination(session, mobile, native = false) {
     return { connect: true };
   }
   return { reason: t('This agent does not provide a verified app link for the recorded local session. Its session ID is available in implementation runs.') };
+}
+/** Whether a recorded session's process outlived its run (handed to the user) or ended; nothing while it runs or when an older host does not say. */
+function sessionLifeBadge(session) {
+  if (session?.handed_to_user) return badge(t('Session handed to you'), 'info');
+  if (session?.session_alive === false && session.session_id && !['running', 'planning', 'generating', 'sending'].includes(session.state)) return badge(t('Session ended'), 'muted');
+  return null;
 }
 function sessionIsMobile() {
   return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -113,8 +120,9 @@ async function loadWorkItemSessions() {
       const open = el('button', { type: 'button', class: 'secondary small', textContent: t('Open agent session') });
       open.onclick = () => openAgentSession(session, open);
       return el('article', { class: 'implementation-run', 'data-run-id': session.id }, el('strong', { textContent: `${providerNames[session.provider] || session.provider} · ${session.model}` }),
-        badge(session.online === false ? t('Machine offline. Last reported state: {state}', { state: tx(session.state) }) : tx(session.state), session.state === 'done' ? 'ok' : session.state === 'permission_prompt' ? 'warn' : 'info'),
+        badge(session.online === false ? t('Machine offline. Last reported state: {state}', { state: tx(session.state) }) : tx(session.state), session.state === 'done' ? 'ok' : session.state === 'permission_prompt' ? 'warn' : 'info'), sessionLifeBadge(session),
         el('code', { textContent: session.session_id || t('The agent has not reported its session ID yet.') }),
+        session.failure ? el('p', { class: 'hint run-failure', textContent: failureText(session.failure) }) : null,
         el('dl', { class: 'todo-fields' }, ...[[t('Started at'), session.started_at], [t('Finished at'), session.finished_at]].map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value ? new Date(value).toLocaleString(uiLocale()) : t('Not recorded') })))), open);
     }));
   }
@@ -122,4 +130,4 @@ async function loadWorkItemSessions() {
 setInterval(() => { if (tab === 'agent-history') loadAgentHistory(); }, 10000);
 setInterval(() => { if (['todo', 'registration'].includes(tab)) loadWorkItemSessions().catch(fail); }, 10000);
 
-export { sessionDestination, sessionIsMobile, showMobileSession, openAgentSession, loadWorkItemSessions };
+export { sessionDestination, sessionIsMobile, sessionLifeBadge, showMobileSession, openAgentSession, loadWorkItemSessions };

@@ -13,15 +13,19 @@ import { providerNames } from './home.js';
 import { fillAgentChoices } from './settings-models.js';
 import { blockSummary, KIND_NAMES, loadLaunchers, renderBlocks, STAGE_NAMES } from './workflow-blocks.js';
 import { ALLOWS, allowNames } from './run-states.js';
+import { preapproveField, preapproveLines, preapproveSent } from './workflow-supervisor.js';
 
-/** The host's limits (src/workflows.rs), checked here before anything is sent. */
-const LIMITS = { name: 80, description: 2000, instructions: 8000, repositories: 20, blocks: 10 };
+/**
+ * The host's limits (src/workflows.rs), checked here before anything is sent. `context` is the
+ * longest context a run takes: the host refuses a workflow whose largest one would not fit.
+ */
+const LIMITS = { name: 80, description: 2000, instructions: 20000, repositories: 20, blocks: 20, context: 100000 };
 
 /**
  * What the Workflows section shows: the definitions, the block library with the workflows that
  * use each block, whether this computer saves them, and the account's machines.
  */
-const workflowData = { workflows: [], blocks: [], usedBy: {}, editable: true, machines: [], thisMachine: '', loaded: false };
+const workflowData = { workflows: [], blocks: [], usedBy: {}, usage: {}, editable: true, machines: [], thisMachine: '', loaded: false };
 /** Editors' working copies by workflow ID (`new` for one not saved yet), kept across re-renders. */
 const drafts = new Map();
 /** Workflows whose editor fold is open. */
@@ -64,7 +68,7 @@ async function loadWorkflows() {
     const [list, library, fleet] = await Promise.all([invoke('workflows_list'), invoke('workflow_blocks_list'),
       invoke('machine_list').catch(() => ({ machines: [], this_machine: '' })), loadLaunchers()]);
     if (generation !== loadGeneration) return;
-    Object.assign(workflowData, { workflows: list.workflows ?? [], blocks: library.blocks ?? [], usedBy: library.used_by ?? {},
+    Object.assign(workflowData, { workflows: list.workflows ?? [], blocks: library.blocks ?? [], usedBy: library.used_by ?? {}, usage: list.usage ?? {},
       editable: list.editable !== false && library.editable !== false, machines: fleet.machines ?? [], thisMachine: fleet.this_machine ?? '', loaded: true });
     // A working copy nobody changed follows what is saved now.
     for (const [id, draft] of drafts) {
@@ -171,6 +175,21 @@ function textField(draft, key, label, { area = false, rows = 3, max, hint = '', 
   input.oninput = () => { draft[key] = input.value; draft.changed = true; count(); changed?.(); };
   count();
   return el('label', {}, label, hint ? el('small', { textContent: hint }) : null, input, area ? counter : null);
+}
+
+/**
+ * The characters the instructions and instruction blocks take in a run's context, as the host
+ * writes them (`engine::instructions`): `Instructions:` and the text, then `Instruction block
+ * «NAME»:` and the text of each instruction block.
+ */
+function instructionsPart(draft) {
+  const length = text => [...(text ?? '')].length;
+  let part = draft.instructions.trim() ? 15 + length(draft.instructions) : 0;
+  for (const id of draft.blocks) {
+    const block = workflowData.blocks.find(b => b.id === id);
+    if (block?.kind === 'instruction') part += 23 + length(block.name) + length(block.text);
+  }
+  return part;
 }
 
 function workflowEditor(draft, saved, renderFacts) {
@@ -340,7 +359,25 @@ function workflowEditor(draft, saved, renderFacts) {
   };
   loadAgents();
 
-  const instructions = textField(draft, 'instructions', t('Instructions'), { area: true, rows: 6, max: LIMITS.instructions, changed,
+  // How much of the block and context limits it uses: the host measured the saved workflow's
+  // context; the part the instructions and blocks take follows the form.
+  const blockCount = el('small', { class: 'counter' });
+  const contextUse = el('p', { class: 'hint workflow-usage' });
+  const fixed = saved ? workflowData.usage[saved.id]?.context?.fixed : undefined;
+  const limitOf = name => (saved ? workflowData.usage[saved.id]?.[name]?.limit : undefined) ?? LIMITS[name];
+  const renderUsage = () => {
+    blockCount.textContent = t('{n} of {max} blocks', { n: draft.blocks.length, max: limitOf('blocks') });
+    blockCount.classList.toggle('over', draft.blocks.length > limitOf('blocks'));
+    if (fixed === undefined) {
+      contextUse.textContent = t('A run gets the instructions and instruction blocks whole, in a context of at most {max} characters; saving measures it.', { max: limitOf('context') });
+      contextUse.classList.remove('over');
+      return;
+    }
+    const used = fixed + instructionsPart(draft);
+    contextUse.textContent = t('A run\'s context: up to {n} of {max} characters, with the instructions and instruction blocks whole.', { n: used, max: limitOf('context') });
+    contextUse.classList.toggle('over', used > limitOf('context'));
+  };
+  const instructions = textField(draft, 'instructions', t('Instructions'), { area: true, rows: 6, max: limitOf('instructions'), changed: () => { changed(); renderUsage(); },
     hint: t('What the planning and coding agents read for every item of this workflow. Code still adds the rules you cannot change here.') });
 
   // Blocks: an ordered list taken from the library.
@@ -375,10 +412,11 @@ function workflowEditor(draft, saved, renderFacts) {
     addChoice.replaceChildren(...available.map(b => el('option', { value: b.id, textContent: `${b.name} · ${KIND_NAMES[b.kind]}` })));
     if (!available.length) addChoice.append(el('option', { value: '', textContent: workflowData.blocks.length ? t('Every block is already in this workflow') : t('The library has no blocks yet') }));
     addChoice.disabled = !available.length;
-    addBlock.disabled = !available.length || draft.blocks.length >= LIMITS.blocks;
+    addBlock.disabled = !available.length || draft.blocks.length >= limitOf('blocks');
+    renderUsage();
   };
   addBlock.onclick = () => {
-    if (!addChoice.value || draft.blocks.length >= LIMITS.blocks) return;
+    if (!addChoice.value || draft.blocks.length >= limitOf('blocks')) return;
     draft.blocks = [...draft.blocks, addChoice.value];
     touched(); renderBlockList(); addChoice.focus();
   };
@@ -420,14 +458,18 @@ function workflowEditor(draft, saved, renderFacts) {
       id: saved ? saved.id : draft.id, name: draft.name.trim(), description: draft.description, enabled: saved ? saved.enabled : true,
       auto_start: Boolean(draft.auto_start), organization: draft.organization, project: draft.project,
       repositories: draft.repositories.map(({ id, name }) => ({ id, name })), machine: draft.machine, checkouts: { ...draft.checkouts },
-      agent: { ...draft.agent }, instructions: draft.instructions, blocks: [...draft.blocks], allow: [...draft.allow], updated_at: saved?.updated_at ?? 0,
+      agent: { ...draft.agent }, instructions: draft.instructions, blocks: [...draft.blocks], allow: [...draft.allow],
+      preapprove: preapproveSent(draft.preapprove), updated_at: saved?.updated_at ?? 0,
     };
-    // Lifting a fixed rule is confirmed with what it lets the agent do, before it is sent.
-    const lifting = workflow.allow.length > 0;
+    if (workflow.preapprove.some(p => p.action === 'post_summary' && !p.chat)) { report({ error: t('Choose the chat the supervisor posts to.') }); return; }
+    // Lifting a fixed rule, or pre-approving the supervisor, is confirmed with what it lets them do, before it is sent.
+    const lifting = workflow.allow.length > 0 || workflow.preapprove.length > 0;
     if (lifting && !reviewing) {
       reviewing = true;
-      confirmation.replaceChildren(el('p', { textContent: t('In every coding run of this workflow, also those that start by themselves, the agent will be able to, as you and without asking:') }),
-        el('ul', {}, ...ALLOWS.filter(a => workflow.allow.includes(a.id)).map(a => el('li', {}, el('strong', { textContent: a.name() }), ` · ${a.effect()}`))));
+      confirmation.replaceChildren(
+        ...(workflow.allow.length ? [el('p', { textContent: t('In every coding run of this workflow, also those that start by themselves, the agent will be able to, as you and without asking:') }),
+          el('ul', {}, ...ALLOWS.filter(a => workflow.allow.includes(a.id)).map(a => el('li', {}, el('strong', { textContent: a.name() }), ` · ${a.effect()}`)))] : []),
+        ...(workflow.preapprove.length ? [el('p', { textContent: t('For this workflow\'s runs, without asking you first:') }), el('ul', {}, ...preapproveLines(workflow.preapprove))] : []));
       confirmation.hidden = false;
       save.textContent = t('Confirm and save');
       return;
@@ -499,9 +541,11 @@ function workflowEditor(draft, saved, renderFacts) {
     el('fieldset', {}, el('legend', { textContent: t('Repositories and checkouts') }), repositories, repositoryProblem, el('div', { class: 'actions' }, chooseRepos)),
     el('div', { class: 'grid' }, el('label', {}, t('CLI'), provider), el('label', {}, t('Model'), model), el('label', {}, t('Effort'), effort)), agentNote,
     instructions,
-    el('fieldset', {}, el('legend', { textContent: t('Blocks, in order') }), blockList,
+    el('fieldset', {}, el('legend', { textContent: t('Blocks, in order') }), blockList, blockCount,
       el('div', { class: 'workflow-add' }, el('label', {}, t('Block from the library'), addChoice), addBlock), el('div', { class: 'actions' }, library)),
+    contextUse,
     allowField,
+    preapproveField(draft, () => { unreview(); touched(); }),
     el('label', { class: 'check' }, autoStart, el('span', {}, t('Start by itself when an assigned item reaches a ready state'),
       el('small', { textContent: t('The ready states are chosen per project in Settings. Children are still created only after you confirm their plan.') }))),
     el('div', { class: 'actions' }, readyStates),

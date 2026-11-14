@@ -49,9 +49,11 @@ pub(super) const CODEX_DISABLED_FEATURES: [&str; 26] = [
     "standalone_web_search",
 ];
 
-/// Variables a CLI needs to find its own login, configuration, locale and proxy. Host
-/// credentials (`NAME`, `NAME_FILE`) are never passed.
-pub(crate) const PASSED_ENV: [&str; 38] = [
+/// Variables a CLI needs to find its own login, configuration, locale and proxy, and on Windows
+/// the fixed system paths its runtimes and toolchains read (NuGet finds its machine-wide
+/// configuration through `ProgramData` and `ProgramFiles(x86)`). Host credentials (`NAME`,
+/// `NAME_FILE`) are never passed.
+pub(crate) const PASSED_ENV: [&str; 44] = [
     "HOME",
     "USER",
     "LOGNAME",
@@ -90,6 +92,12 @@ pub(crate) const PASSED_ENV: [&str; 38] = [
     "USERPROFILE",
     "HOMEDRIVE",
     "HOMEPATH",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
 ];
 
 fn home() -> Option<PathBuf> {
@@ -1004,8 +1012,28 @@ mod tests {
             "AZURE_DEVOPS_EXT_PAT",
             "PTA_PROFILE_DIR",
             "systemroot_file",
+            "ProgramData_FILE",
+            "PROGRAMFILES_TOKEN",
         ] {
             assert!(!passed(name, true) && !passed(name, false), "{name}");
+        }
+    }
+
+    #[test]
+    fn windows_system_paths_pass_so_toolchains_find_their_machine_configuration() {
+        // NuGet resolves its machine-wide configuration from `ProgramData` and
+        // `ProgramFiles(x86)`; without them `dotnet restore` ends with a null-path error.
+        for name in [
+            "ProgramData",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramW6432",
+            "CommonProgramFiles",
+            "CommonProgramFiles(x86)",
+        ] {
+            assert!(passed(name, true), "{name}");
+            assert!(!passed(name, false), "{name}");
+            assert!(!passed(&format!("{name}_FILE"), true), "{name}_FILE");
         }
     }
 

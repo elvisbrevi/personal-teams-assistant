@@ -103,6 +103,10 @@ pub(super) fn input(run: &Run, language: crate::config::Language, now: i64) -> V
             "coding_run": c.coding.as_ref().map(|i| json!({"started": i.started, "state": i.state})),
             "started_at": c.started_at.and_then(time), "finished_at": c.finished_at.and_then(time),
             "branch": c.branch, "outcome": c.outcome,
+            "other_branches": c.branches.iter().take(20).map(|b| json!({
+                "repository": b.repository.name, "branch": b.branch,
+            })).collect::<Vec<_>>(),
+            "ignored_branches": c.ignored_branches,
             "pull_requests": c.pull_requests.iter().take(20).map(|p| json!({
                 "id": p.id, "title": bounded(&p.title, 200), "status": p.status, "url": p.url,
                 "created_at": p.created_at, "closed_at": p.closed_at, "accepted": p.accepted,
@@ -211,8 +215,8 @@ fn mentioned(text: &str, link: &Link) -> bool {
 }
 
 /// What the model wrote, made safe to store and send: no URL, link, HTML tag or mention marker
-/// of its own, no control characters; at most `limit` characters.
-fn clean(text: &str, limit: usize) -> String {
+/// of its own, no control characters; at most `limit` characters. Cleaned to a fixed point.
+pub(super) fn clean(text: &str, limit: usize) -> String {
     let patterns: [(&str, &str); 7] = [
         // Images and links keep their words.
         (
@@ -233,11 +237,24 @@ fn clean(text: &str, limit: usize) -> String {
         (r"@\[([^\]\n]*)\]", "@$1"),
     ];
     let mut text = text.replace(['\u{e000}', '\u{e001}'], "");
-    for (pattern, replacement) in patterns {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            text = re.replace_all(&text, replacement).into_owned();
+    // To a fixed point: removing one piece can join others into a new link, URL, tag or
+    // mention (`@[[Ana]]`, `http:<i></i>//x`, `<<b>a href=x>`), so the patterns run again
+    // until nothing changes; each pass only shortens the text, and the passes are bounded.
+    let compiled: Vec<(regex::Regex, &str)> = patterns
+        .iter()
+        .filter_map(|(p, r)| regex::Regex::new(p).ok().map(|re| (re, *r)))
+        .collect();
+    for _ in 0..32 {
+        let before = text.clone();
+        for (re, replacement) in &compiled {
+            text = re.replace_all(&text, *replacement).into_owned();
+        }
+        if text == before {
+            break;
         }
     }
+    // Whatever a bound left: no mention marker survives.
+    text = text.replace("@[", "@");
     let text: String = text
         .replace("\r\n", "\n")
         .chars()
@@ -332,6 +349,23 @@ fn failed(text: &str) -> String {
     format!("[not_ready] {}", redactor.redact(text))
 }
 
+/// A summary that failed says why on its run (`error`, a fixed text with the cause's
+/// sentence), so `workflow_run_status` shows it.
+async fn note_failure(host: &Arc<Host>, id: &str, text: &str) {
+    let state = &host.state;
+    let lock = state.workflows.lock(id);
+    let _guard = lock.lock().await;
+    if let Ok(mut run) = found(state, id) {
+        let redactor =
+            security::Redactor::new(&[], Vec::new()).expect("built-in redaction patterns");
+        run.error = Some(format!(
+            "The progress summary failed: {}",
+            redactor.redact(text)
+        ));
+        let _ = state.workflows.db.save(&run);
+    }
+}
+
 /// `workflow_summary`: ask the director for a progress summary of the run and store it.
 async fn summarize(host: &Arc<Host>, args: SummaryArgs) -> Result<Value, String> {
     let state = &host.state;
@@ -379,10 +413,17 @@ async fn summarize(host: &Arc<Host>, args: SummaryArgs) -> Result<Value, String>
             instructions: &instructions,
             input: json_input,
             item: &item,
+            seconds: None,
         },
     ))
-    .await
-    .map_err(|error| failed(&error.to_string()))?;
+    .await;
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(error) => {
+            note_failure(host, &run.id, &error.to_string()).await;
+            return Err(failed(&error.to_string()));
+        }
+    };
     let session = &answer.run;
     let _ = implementation::director::annotate(host, session, "workflow_run", json!(run.id));
     let problem = match (
@@ -397,7 +438,18 @@ async fn summarize(host: &Arc<Host>, args: SummaryArgs) -> Result<Value, String>
     if let Some(problem) = problem {
         let _ = implementation::director::annotate(host, session, "state", json!("failed"));
         let _ = implementation::director::annotate(host, session, "output", json!(problem));
-        return Err(failed(&format!("{problem} No summary was stored.")));
+        // Why, from the fixed vocabulary: the session's own cause, or an answer that is not
+        // the summary asked for.
+        let failure = answer
+            .direction
+            .failure
+            .unwrap_or(crate::llm::implementation::Failure::of(
+                crate::llm::implementation::Cause::InvalidAnswer,
+            ));
+        let _ = implementation::director::annotate(host, session, "failure", json!(failure));
+        let text = format!("{problem} {} No summary was stored.", failure.sentence());
+        note_failure(host, &run.id, &text).await;
+        return Err(failed(&text));
     }
     let text = compose(
         written(answer.direction.answer.as_ref()).unwrap_or_default(),

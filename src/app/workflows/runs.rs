@@ -1,21 +1,25 @@
 //! The workflow run operations shared by the GUI, the CLI and MCP: start a run for an Azure
 //! work item assigned to the user (a named workflow, or the director chooses), list runs, show
-//! one, assign a workflow to an unassigned run, resume a stopped run and cancel one. They run
-//! on the coordinator, where the engine (`engine`) advances the runs; starting, resuming,
-//! assigning and cancelling need the user's confirmation, because a run plans with the
-//! workflow's agent and, once the user confirmed the children, codes each one with full
-//! permissions on the workflow's machine.
+//! one, assign a workflow to an unassigned run, resume a stopped run, cancel one, restart one
+//! with the user's handover note, and pause and unpause the runs of every project or of one.
+//! They run on the coordinator, where the engine (`engine`) advances the runs; starting,
+//! resuming, assigning, cancelling, restarting, pausing and unpausing need the user's
+//! confirmation, because a run plans with the workflow's agent and, once the user confirmed the
+//! children, codes each one with full permissions on the workflow's machine.
 use super::engine::{self, Azure};
-use super::record::{Item, Run, State as Phase};
+use super::record::{self, Item, Run, State as Phase};
 use super::*;
 
-pub(in crate::app) const METHODS: [&str; 6] = [
+pub(in crate::app) const METHODS: [&str; 9] = [
     "workflow_run_start",
     "workflow_runs",
     "workflow_run_status",
     "workflow_run_resume",
     "workflow_run_cancel",
     "workflow_run_assign",
+    "workflow_run_restart",
+    "workflow_runs_pause",
+    "workflow_runs_unpause",
 ];
 
 #[derive(Deserialize)]
@@ -56,6 +60,40 @@ struct ListArgs {
 #[serde(deny_unknown_fields)]
 struct RunArgs {
     run: String,
+    #[serde(default)]
+    confirmed: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestartArgs {
+    run: String,
+    /// The user's handover note for the new run's coding runs.
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    confirmed: bool,
+    /// The note is the workflow supervisor's draft, unedited (never from the arguments).
+    #[serde(skip)]
+    drafted: bool,
+    /// The supervisor restarts it as the workflow pre-approved (never from the arguments).
+    #[serde(skip)]
+    preapproved: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PauseArgs {
+    /// One project's runs (by name, in any organization); every project's when left out.
+    #[serde(default)]
+    project: Option<String>,
+    sessions: record::Sessions,
+    #[serde(default)]
+    confirmed: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnpauseArgs {
+    #[serde(default)]
+    project: Option<String>,
     #[serde(default)]
     confirmed: bool,
 }
@@ -109,6 +147,37 @@ pub(in crate::app) fn allow_effect(workflow: &crate::workflows::Workflow) -> Str
     } else {
         format!("; beyond the fixed rules, {lifted}")
     }
+}
+
+/// Where the runs stand in the line for a slot and which pauses are in force.
+struct Places {
+    places: HashMap<String, usize>,
+    pauses: Vec<record::Pause>,
+}
+/// The place in the line for a slot of every run waiting for one (1 is next), and the pauses.
+fn places(state: &DesktopState) -> Result<Places, String> {
+    let driven: Vec<Phase> = Phase::ALL.into_iter().filter(|s| s.driven()).collect();
+    let mut runs = state.workflows.db.list(&driven, None, -1).map_err(fail)?;
+    runs.reverse();
+    let pauses = state.workflows.db.pauses().map_err(fail)?;
+    Ok(Places {
+        places: record::positions(&runs, now(), &pauses),
+        pauses,
+    })
+}
+/// A run's view or summary with whether it waits for a slot, its place in the line, and
+/// whether a pause holds it (a run that is not done or cancelled, in a paused project).
+fn placed(mut value: Value, run: &Run, places: &Places) -> Value {
+    let place = places.places.get(&run.id);
+    value["waiting_for_slot"] = json!(place.is_some());
+    value["queue_position"] = json!(place);
+    value["paused"] =
+        json!(!run.state.finished() && record::paused(&places.pauses, &run.item.project));
+    value
+}
+/// The pauses in force, as the operations show them.
+pub(in crate::app) fn pauses_view(state: &DesktopState) -> Result<Value> {
+    Ok(json!(state.workflows.db.pauses()?))
 }
 
 pub(super) fn found(state: &DesktopState, id: &str) -> Result<Run, String> {
@@ -175,11 +244,18 @@ pub(super) async fn operation(
                 run: String,
             }
             let a: StatusArgs = parse(args)?;
-            Ok(json!({"run": found(&host.state, &a.run)?.view()}))
+            let run = found(&host.state, &a.run)?;
+            let mut view = placed(run.view(), &run, &places(&host.state)?);
+            sessions(host, &mut view).await;
+            view["supervising"] = json!(super::supervisor::queued(&host.state, &run.id));
+            Ok(json!({ "run": view }))
         }
         "workflow_run_resume" => resume(host, parse(args)?).await,
         "workflow_run_cancel" => cancel(host, parse(args)?).await,
         "workflow_run_assign" => assign(host, parse(args)?).await,
+        "workflow_run_restart" => restart(host, parse(args)?, azure).await,
+        "workflow_runs_pause" => pause(host, parse(args)?).await,
+        "workflow_runs_unpause" => unpause(&host.state, parse(args)?),
         _ => Err(invalid("Unknown workflow operation.")),
     }
 }
@@ -209,40 +285,14 @@ async fn start(host: &Arc<Host>, args: StartArgs, azure: &Azure) -> Result<Value
             describe_start(named.map(|w| w.id.as_str()), named, args.id)
         )));
     }
-    let detail = azure
-        .item(
-            state,
-            args.source.as_deref(),
-            args.project.as_deref(),
-            args.id,
-        )
-        .await?;
-    let organization = crate::workflows::director::item_organization(&detail.item.url)
-        .ok_or_else(|| invalid("The work item has no Azure DevOps link."))?;
-    if !["requirement", "bug", "task"].contains(&detail.item.category.as_str()) {
-        return Err(invalid(format!(
-            "Work item {} is a {}, not an HU, bug or task.",
-            args.id, detail.item.kind
-        )));
-    }
-    if !azure.assigned(state, args.source.as_deref(), &detail)? {
-        return Err(invalid(format!(
-            "Work item {} is not assigned to you; a workflow runs only items assigned to you.",
-            args.id
-        )));
-    }
-    let item = Item {
-        provider: "azure".into(),
-        id: detail.item.id,
-        project: detail.item.project.clone(),
-        organization: format!("https://dev.azure.com/{organization}"),
-        url: detail.item.url.clone(),
-        title: detail.item.title.chars().take(500).collect(),
-        kind: detail.item.kind.clone(),
-        category: detail.item.category.clone(),
-        state: detail.item.state.clone(),
-        source: args.source.clone(),
-    };
+    let item = read_item(
+        state,
+        azure,
+        args.source.as_deref(),
+        args.project.as_deref(),
+        args.id,
+    )
+    .await?;
     if let Some(workflow) = named {
         usable(&map, &workflow.id, Some(&item))?;
     }
@@ -271,7 +321,44 @@ async fn start(host: &Arc<Host>, args: StartArgs, azure: &Azure) -> Result<Value
             run.item.id
         )));
     }
-    Ok(json!({"run": run.view(), "started": true}))
+    let paused = record::paused(&db.pauses().map_err(fail)?, &run.item.project);
+    Ok(json!({"run": run.view(), "started": true, "paused": paused}))
+}
+
+/// The work item a run is for, read fresh: an HU, bug or task assigned to the user.
+async fn read_item(
+    state: &DesktopState,
+    azure: &Azure,
+    source: Option<&str>,
+    project: Option<&str>,
+    id: u64,
+) -> Result<Item, String> {
+    let detail = azure.item(state, source, project, id).await?;
+    let organization = crate::workflows::director::item_organization(&detail.item.url)
+        .ok_or_else(|| invalid("The work item has no Azure DevOps link."))?;
+    if !["requirement", "bug", "task"].contains(&detail.item.category.as_str()) {
+        return Err(invalid(format!(
+            "Work item {id} is a {}, not an HU, bug or task.",
+            detail.item.kind
+        )));
+    }
+    if !azure.assigned(state, source, &detail)? {
+        return Err(invalid(format!(
+            "Work item {id} is not assigned to you; a workflow runs only items assigned to you."
+        )));
+    }
+    Ok(Item {
+        provider: "azure".into(),
+        id: detail.item.id,
+        project: detail.item.project.clone(),
+        organization: format!("https://dev.azure.com/{organization}"),
+        url: detail.item.url.clone(),
+        title: detail.item.title.chars().take(500).collect(),
+        kind: detail.item.kind.clone(),
+        category: detail.item.category.clone(),
+        state: detail.item.state.clone(),
+        source: source.map(str::to_owned),
+    })
 }
 
 /// Start a run for an item on behalf of a caller that already holds the user's confirmation
@@ -324,9 +411,11 @@ fn list(state: &DesktopState, args: ListArgs) -> Result<Value, String> {
         .db
         .list(&states, args.workflow.as_deref(), limit)
         .map_err(fail)?;
+    let places = places(state)?;
     Ok(json!({
-        "runs": runs.iter().map(Run::summary).collect::<Vec<_>>(),
+        "runs": runs.iter().map(|r| placed(r.summary(), r, &places)).collect::<Vec<_>>(),
         "attention": attention(state).map_err(fail)?,
+        "paused": places.pauses,
     }))
 }
 
@@ -372,6 +461,26 @@ async fn resume(host: &Arc<Host>, args: RunArgs) -> Result<Value, String> {
     Ok(json!({"run": run.view(), "resumed": true, "accepted": accepted}))
 }
 
+/// Mark each implementation run in a run's view with whether its agent session is alive and
+/// was handed to the user (`implementation::session_life`); unknown ones stay unmarked.
+async fn sessions(host: &Arc<Host>, view: &mut Value) {
+    async fn mark(host: &Arc<Host>, target: &mut Value) {
+        let id = target["id"].as_str().unwrap_or_default().to_owned();
+        if let Some(life) = implementation::session_life(host, &id).await {
+            target["session_alive"] = life["session_alive"].clone();
+            target["handed_to_user"] = life["handed_to_user"].clone();
+        }
+    }
+    if view["planning"].is_object() {
+        mark(host, &mut view["planning"]).await;
+    }
+    for index in 0..view["children"].as_array().map_or(0, Vec::len) {
+        if view["children"][index]["coding"].is_object() {
+            mark(host, &mut view["children"][index]["coding"]).await;
+        }
+    }
+}
+
 async fn cancel(host: &Arc<Host>, args: RunArgs) -> Result<Value, String> {
     let state = &host.state;
     require_coordinator(state)?;
@@ -388,7 +497,7 @@ async fn cancel(host: &Arc<Host>, args: RunArgs) -> Result<Value, String> {
     let active = run.active_implementation().cloned();
     if !args.confirmed {
         return Err(invalid(format!(
-            "Confirm with the user, then cancel with confirmed: true. Cancel workflow run {}{}? It stops advancing for good; the file changes stay.",
+            "Confirm with the user, then cancel with confirmed: true. Cancel workflow run {}{}? It stops advancing for good and stops every session it started that is still alive; the file changes stay.",
             run.id,
             active
                 .as_ref()
@@ -396,36 +505,302 @@ async fn cancel(host: &Arc<Host>, args: RunArgs) -> Result<Value, String> {
                 .unwrap_or_default()
         )));
     }
-    let mut cancelled = None;
-    let mut warning = None;
-    if let Some(active) = &active {
-        // Only a run still in flight is cancelled. When its machine cannot be asked, the run
-        // may be running there (even one whose launch was not confirmed yet): the cancellation
-        // is tried, and when it does not reach the machine the reply says where to cancel it.
-        let present = match implementation::observe(host, &active.machine, &active.id).await {
-            Ok(Some(observed)) => {
-                matches!(observed["state"].as_str(), Some("running" | "planning"))
-            }
-            Ok(None) => false,
-            Err(_) => true,
-        };
-        if present {
-            match implementation::cancel_run(host, &active.machine, &active.id).await {
-                Ok(()) => cancelled = Some(active.id.clone()),
-                Err(_) => {
-                    warning = Some(format!(
-                        "Implementation run {} may still be running on machine {}, which could not be reached; once it is reachable, cancel it there with implementation_cancel (machine {}, id {}).",
-                        active.id, active.machine, active.machine, active.id
-                    ))
-                }
-            }
-        }
-    }
+    let engine::Ended {
+        cancelled,
+        stopped,
+        warning,
+    } = engine::end_sessions(host, &run).await;
     run.cancel(now());
     state.workflows.db.save(&run).map_err(fail)?;
     Ok(
-        json!({"run": run.view(), "cancelled": true, "implementation_cancelled": cancelled, "warning": warning}),
+        json!({"run": run.view(), "cancelled": true, "implementation_cancelled": cancelled, "sessions_stopped": stopped, "warning": warning}),
     )
+}
+
+/// The user's handover note as a restart stores it: trimmed, none when empty, refused when
+/// longer than `record::MAX_HANDOVER` characters or holding control characters other than line
+/// breaks and tabs.
+pub(in crate::app) fn handover_note(note: Option<&str>) -> Result<Option<String>, String> {
+    let Some(note) = note.map(|n| n.replace("\r\n", "\n")) else {
+        return Ok(None);
+    };
+    let note = note.trim();
+    if note.is_empty() {
+        return Ok(None);
+    }
+    let length = note.chars().count();
+    if length > record::MAX_HANDOVER {
+        return Err(invalid(format!(
+            "The handover note has {length} characters; it holds at most {}.",
+            record::MAX_HANDOVER
+        )));
+    }
+    if note
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Err(invalid(
+            "The handover note holds control characters; give plain text.",
+        ));
+    }
+    Ok(Some(note.to_owned()))
+}
+/// What restarting a run does, as the user confirms it: the run by its ID, its workflow (with
+/// its machine and agent when the host knows them) and item, and the note's length.
+pub(in crate::app) fn describe_restart(
+    run: &str,
+    workflow: Option<&crate::workflows::Workflow>,
+    item: Option<u64>,
+    note: Option<usize>,
+) -> String {
+    let workflow_text = match workflow {
+        Some(w) => format!(
+            "workflow {} on machine {} with {} {} {}",
+            w.id, w.machine, w.agent.provider, w.agent.model, w.agent.effort
+        ),
+        None => "the same workflow".into(),
+    };
+    let item_text = item.map_or("the same work item".into(), |id| {
+        format!("Azure work item {id}")
+    });
+    let note_text = match note {
+        Some(n) => format!(
+            "Each of its coding runs gets your handover note ({n} characters) under «{}», next to the item's evidence; it is stored with the new run and posted nowhere",
+            engine::HANDOVER
+        ),
+        None => "No handover note is given".into(),
+    };
+    format!(
+        "Restart workflow run {run}: it is cancelled (its active implementation run is cancelled and every session it started that is still alive is stopped; the file changes stay) and a new run of {workflow_text} starts for {item_text} from its first stage, which will {START_EFFECT}{}. {note_text}",
+        workflow.map(allow_effect).unwrap_or_default()
+    )
+}
+
+async fn restart(host: &Arc<Host>, args: RestartArgs, azure: &Azure) -> Result<Value, String> {
+    let state = &host.state;
+    require_engine(state)?;
+    let note = handover_note(args.note.as_deref())?;
+    let lock = state.workflows.lock(&args.run);
+    let _guard = lock.lock().await;
+    let mut run = found(state, &args.run)?;
+    if run.state.finished() {
+        return Err(conflict(format!(
+            "Workflow run {} is already {}; start a new run for its work item instead.",
+            run.id,
+            run.state.word()
+        )));
+    }
+    let Some(workflow) = run.workflow.clone() else {
+        return Err(conflict(format!(
+            "Workflow run {} has no workflow yet ({}); assign one to it, or cancel it and start its work item again.",
+            run.id,
+            run.state.word()
+        )));
+    };
+    let map = state.settings.map().map_err(fail)?;
+    let workflow = usable(&map, &workflow, Some(&run.item))?;
+    if !args.confirmed {
+        return Err(invalid(format!(
+            "Confirm with the user, then restart with confirmed: true. {}.",
+            describe_restart(
+                &run.id,
+                Some(workflow),
+                Some(run.item.id),
+                note.as_ref().map(|n| n.chars().count())
+            )
+        )));
+    }
+    // Read before anything changes: an item that cannot be read, or is no longer the user's,
+    // leaves the run as it is.
+    let item = read_item(
+        state,
+        azure,
+        run.item.source.as_deref(),
+        Some(&run.item.project),
+        run.item.id,
+    )
+    .await?;
+    let ended = engine::end_sessions(host, &run).await;
+    let now = now();
+    let mut next = Run::new(item, now);
+    next.continues = Some(run.id.clone());
+    next.handover_drafted = args.drafted && note.is_some();
+    next.preapproved_restart = args.preapproved;
+    next.handover = note;
+    next.classification = Some(json!({"workflow":workflow.id,"outcome":"restarted"}));
+    engine::assign(&mut next, workflow, &map.workflow_blocks, now, "restarted");
+    run.restarted_as = Some(next.id.clone());
+    run.cancel_as(now, "restarted");
+    let db = &state.workflows.db;
+    db.save(&run).map_err(fail)?;
+    if !db.insert(&next).map_err(fail)? {
+        return Err(conflict(format!(
+            "Workflow run {} was cancelled, but work item {} already has another active run, so none was started for it.",
+            run.id, next.item.id
+        )));
+    }
+    let paused = record::paused(&db.pauses().map_err(fail)?, &next.item.project);
+    Ok(json!({
+        "run": next.view(),
+        "restarted": true,
+        "previous": run.id,
+        "implementation_cancelled": ended.cancelled,
+        "sessions_stopped": ended.stopped,
+        "warning": ended.warning,
+        "paused": paused,
+    }))
+}
+
+/// Restart a run with the workflow supervisor's drafted handover, as the person confirmed it
+/// unedited: its coding runs get the note as the supervisor's text.
+pub(super) async fn restart_drafted(
+    host: &Arc<Host>,
+    run: &str,
+    note: &str,
+    preapproved: bool,
+    azure: &Azure,
+) -> Result<Value, String> {
+    let args = RestartArgs {
+        run: run.to_owned(),
+        note: Some(note.to_owned()),
+        confirmed: true,
+        drafted: true,
+        preapproved,
+    };
+    restart(host, args, azure).await
+}
+
+/// A pause's project as given: trimmed, none for every project.
+fn pause_project(project: Option<String>) -> Result<Option<String>, String> {
+    let project = project
+        .map(|p| p.trim().to_owned())
+        .filter(|p| !p.is_empty());
+    if project.as_ref().is_some_and(|p| p.chars().count() > 256) {
+        return Err(invalid("Give the project's name."));
+    }
+    Ok(project)
+}
+/// What pausing does, as the user confirms it.
+pub(in crate::app) fn describe_pause(project: Option<&str>, sessions: record::Sessions) -> String {
+    let scope = match project {
+        Some(p) => format!("the workflow runs of project {p}"),
+        None => "every workflow run".into(),
+    };
+    let sessions = match sessions {
+        record::Sessions::Stop => {
+            "every agent session of those runs that is still alive is stopped now (the file changes stay), and a run whose active implementation run is stopped becomes interrupted, to restart with a handover note or resume"
+        }
+        record::Sessions::Finish => {
+            "the agent sessions running now are left to finish, and their runs record how they end"
+        }
+    };
+    format!(
+        "Pause {scope}: no run takes a slot, asks the director, launches a planning or coding run or runs an acting block, and the watcher starts no run, until you unpause; {sessions}. The runs keep their order in the line."
+    )
+}
+/// What unpausing does, as the user confirms it.
+pub(in crate::app) fn describe_unpause(project: Option<&str>) -> String {
+    let scope = match project {
+        Some(p) => format!("the workflow runs of project {p}"),
+        None => "every paused workflow run".into(),
+    };
+    format!(
+        "Unpause {scope}: the runs continue on their own in the order they were created, each coding run with full permissions on its workflow's machine, and the watcher starts runs again for items in a ready state."
+    )
+}
+
+async fn pause(host: &Arc<Host>, args: PauseArgs) -> Result<Value, String> {
+    let state = &host.state;
+    require_engine(state)?;
+    let project = pause_project(args.project)?;
+    if !args.confirmed {
+        return Err(invalid(format!(
+            "Confirm with the user, then pause with confirmed: true. {}",
+            describe_pause(project.as_deref(), args.sessions)
+        )));
+    }
+    let db = &state.workflows.db;
+    let pause = record::Pause {
+        project,
+        sessions: args.sessions,
+        paused_at: now(),
+    };
+    db.pause(&pause).map_err(fail)?;
+    let (mut interrupted, mut stopped, mut warnings) = (Vec::new(), Vec::new(), Vec::new());
+    if pause.sessions == record::Sessions::Stop {
+        let open: Vec<Phase> = Phase::ALL.into_iter().filter(|s| !s.finished()).collect();
+        for listed in db.list(&open, None, -1).map_err(fail)? {
+            if !pause.covers(&listed.item.project) {
+                continue;
+            }
+            // Under the run's lock, so a step in flight (a launch) ends first and is seen.
+            let lock = state.workflows.lock(&listed.id);
+            let _guard = lock.lock().await;
+            let Some(mut run) = db.get(&listed.id).map_err(fail)? else {
+                continue;
+            };
+            if run.state.finished() {
+                continue;
+            }
+            let ended = engine::end_sessions(host, &run).await;
+            if let Some(cancelled) = &ended.cancelled
+                && run.state.driven()
+            {
+                run.stop(
+                    Phase::Interrupted,
+                    now(),
+                    format!(
+                        "The workflow runs were paused with their sessions stopped, so implementation run {cancelled} was stopped; restart this run with a handover note (workflow_run_restart), or resume it to continue past that run."
+                    ),
+                );
+                // The person stopped it: the supervisor does not look at this stop.
+                run.cause = Some("paused".into());
+                db.save(&run).map_err(fail)?;
+                interrupted.push(run.id.clone());
+            }
+            stopped.extend(ended.cancelled);
+            stopped.extend(ended.stopped);
+            warnings.extend(ended.warning);
+        }
+    }
+    Ok(json!({
+        "pause": pause,
+        "paused": pauses_view(state).map_err(fail)?,
+        "interrupted": interrupted,
+        "sessions_stopped": stopped,
+        "warning": warnings.into_iter().reduce(|all, next| format!("{all} {next}")),
+    }))
+}
+
+fn unpause(state: &DesktopState, args: UnpauseArgs) -> Result<Value, String> {
+    require_engine(state)?;
+    let project = pause_project(args.project)?;
+    if !args.confirmed {
+        return Err(invalid(format!(
+            "Confirm with the user, then unpause with confirmed: true. {}",
+            describe_unpause(project.as_deref())
+        )));
+    }
+    let db = &state.workflows.db;
+    if db.unpause(project.as_deref()).map_err(fail)? == 0 {
+        let paused = db.pauses().map_err(fail)?;
+        return Err(conflict(match (&project, paused.is_empty()) {
+            (_, true) => "No workflow run is paused.".to_owned(),
+            (Some(p), false) => format!(
+                "Project {p} has no pause of its own; {} paused. Unpause without a project to end every pause.",
+                paused
+                    .iter()
+                    .map(|p| p
+                        .project
+                        .as_deref()
+                        .map_or("every project is".to_owned(), |p| format!("{p} is")))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            (None, false) => "No workflow run is paused.".to_owned(),
+        }));
+    }
+    Ok(json!({"unpaused": true, "paused": pauses_view(state).map_err(fail)?}))
 }
 
 async fn assign(host: &Arc<Host>, args: AssignArgs) -> Result<Value, String> {

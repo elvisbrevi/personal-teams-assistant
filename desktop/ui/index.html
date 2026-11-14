@@ -52,6 +52,8 @@
   <link rel="modulepreload" href="settings-workflows.js" fetchpriority="low">
   <link rel="modulepreload" href="run-states.js" fetchpriority="low">
   <link rel="modulepreload" href="workflow-runs.js" fetchpriority="low">
+  <link rel="modulepreload" href="workflow-supervisor.js" fetchpriority="low">
+  <link rel="modulepreload" href="workflow-pause.js" fetchpriority="low">
   <link rel="modulepreload" href="notices.js" fetchpriority="low">
   <link rel="modulepreload" href="dialogs.js" fetchpriority="low">
   <link rel="modulepreload" href="control.js" fetchpriority="low">
@@ -286,6 +288,7 @@
             </label>
             <label>Language <small>The language of this app, of what the assistant writes in Teams (including notices and sources) and of the tasks it drafts. It overrides the style.</small><select id="llm-language" class="cfg" translate="no"><option value="es">Español</option><option value="en">English</option></select></label>
             <label>Answer style<textarea id="llm-style" class="cfg" rows="3"></textarea></label>
+            <label>Earlier messages read <small>How many earlier messages of the same chat the assistant reads before deciding whether and how to answer, so a message that refers back («the one I mentioned») makes sense. From 1 to 50.</small><input id="history-messages" class="cfg" type="number" min="1" max="50" step="1" inputmode="numeric"></label>
           </div>
           <div class="panel" id="panel-message-style">
             <h2>Message style in Teams <span class="badge info">Account</span></h2>
@@ -530,6 +533,20 @@
             <div id="workflow-director" class="grid"></div>
             <div class="actions"><button id="workflow-director-prompt" type="button" class="link-button">Edit the director's instructions</button></div>
           </div>
+          <div class="panel" id="panel-workflow-supervisor">
+            <h2>Workflow supervisor</h2>
+            <p class="hint">The supervisor looks after your runs: when one stops, waits too long, loses its machine or disagrees with its session, it reads what the agents actually did, checks their final reports against the work item, pull requests and branches, and drafts a handover note, work items and a summary. It runs without tools, read-only, and changes nothing by itself but its notes on the run and a run's place in the queue: every other step it proposes waits for you.</p>
+            <label class="check"><input id="workflow-supervisor-enabled" type="checkbox"> Supervisor on</label>
+            <div id="workflow-supervisor" class="grid"></div>
+            <div class="grid">
+              <label>Looks per day <small>From 1 to 100; your own requests are not counted.</small><input id="workflow-supervisor-looks" type="number" min="1" max="100" step="1" inputmode="numeric"></label>
+              <label>Minutes between looks at a run <small>From 10 to 1440.</small><input id="workflow-supervisor-interval" type="number" min="10" max="1440" step="1" inputmode="numeric"></label>
+              <label>Waiting before a look (hours) <small>From 1 to 48.</small><input id="workflow-supervisor-wait" type="number" min="1" max="48" step="1" inputmode="numeric"></label>
+              <label>Machine unseen before a look (minutes) <small>From 5 to 240.</small><input id="workflow-supervisor-offline" type="number" min="5" max="240" step="1" inputmode="numeric"></label>
+              <label>Session limit (seconds) <small>From 60 to 600.</small><input id="workflow-supervisor-seconds" type="number" min="60" max="600" step="1" inputmode="numeric"></label>
+            </div>
+            <div class="actions"><button id="workflow-supervisor-prompt" type="button" class="link-button">Edit the supervisor's instructions</button></div>
+          </div>
           <div id="workflow-settings-warnings" class="callout warn" role="status" hidden></div>
           <div id="workflow-settings-problem" class="callout error" role="alert" hidden></div>
         </div>
@@ -559,7 +576,7 @@
             <div id="consumers" class="list"></div>
             <div id="launchers" hidden>
               <h3>Local programs</h3>
-              <p class="hint">Programs that receive chosen variables as environment variables of that one process. Your agent or the CLI can propose one; it receives nothing until you approve its program, arguments, folder and variables here. Their output is never shown.</p>
+              <p class="hint">Programs that receive chosen variables as environment variables of that one process. Your agent or the CLI can propose one; it receives nothing until you approve its program, arguments, folder, variables and time limit here. Their output is never shown.</p>
               <div id="launcher-list" class="list"></div>
             </div>
             <div id="deliveries" hidden>
@@ -774,12 +791,16 @@
           <div class="panel" id="runs-list-panel">
             <div class="panel-head"><h2>Runs</h2><span id="runs-summary" class="hint"></span><button id="runs-refresh" type="button" class="secondary small"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div>
             <p class="hint">Each run takes one work item through its workflow: the plan, your review of the children, their coding, the pull requests and the blocks. Runs that wait for you come first.</p>
+            <div id="runs-pauses"></div>
+            <div class="actions"><button id="runs-pause-open" type="button" class="secondary">Pause runs</button></div>
+            <div id="runs-pause-form"></div>
             <div class="todo-filters">
               <label>State<select id="runs-state"><option value="">Every state</option><option value="plan_review">Plan to review</option><option value="unassigned">Needs a workflow</option><option value="needs_attention">Needs attention</option><option value="interrupted">Interrupted</option><option value="failed">Failed</option><option value="classifying">Choosing a workflow</option><option value="planning">Planning</option><option value="creating_children">Creating the children</option><option value="coding">Coding</option><option value="pull_requests">Waiting for pull requests</option><option value="blocks">Running the workflow's blocks</option><option value="done">Done</option><option value="cancelled">Cancelled</option></select></label>
               <label>Workflow<select id="runs-workflow"><option value="">Every workflow</option></select></label>
             </div>
             <div id="runs-problem" class="callout error" role="alert" hidden></div>
-            <div id="run-rows" class="list"></div>
+            <div id="run-rows" class="cards"></div>
+            <div id="runs-audit"></div>
           </div>
           <div id="workflow-run-detail" hidden>
             <div class="panel">
@@ -835,6 +856,12 @@
               <div class="grow">
                 <p>Answers about what you did can read the daily task record, with task links, HU and hours. Add the activity record as a source to authorize it for each conversation.</p>
                 <div class="actions"><button id="add-record" type="button" class="secondary">Add activity record</button></div>
+              </div>
+            </div>
+            <div id="sessions-offer" class="callout info" hidden>
+              <div class="grow">
+                <p>When no question covers a message, the assistant can say what your coding agents are already working on: it reads summaries of your latest Claude Code, Codex and OpenCode sessions on the machines of your account. Fixed rules drop lines that look like secrets, code and directory names, but that is not a guarantee: authorize it only for conversations you would trust with what your sessions discuss.</p>
+                <div class="actions"><button id="add-sessions-source" type="button" class="secondary">Add agent sessions</button></div>
               </div>
             </div>
             <details class="add-form">

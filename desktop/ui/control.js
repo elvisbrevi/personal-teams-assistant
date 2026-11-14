@@ -28,7 +28,7 @@ import { browserMicrosoftLogin } from './dialogs.js';
  *   'implementation_create' | 'implementation_creation' | 'implementation_history' |
  *   'implementation_mobile_session' | 'implementation_open_session' | 'implementation_prepare' |
  *   'implementation_request_catalog' | 'implementation_request_start' |
- *   'implementation_request_status' | 'implementation_runs' | 'implementation_sessions' |
+ *   'implementation_recent_sessions' | 'implementation_request_status' | 'implementation_runs' | 'implementation_sessions' |
  *   'implementation_start' | 'import_existing' | 'index_refresh' | 'index_status' |
  *   'list_azure_hus' | 'list_azure_tasks' | 'list_github_epics' | 'list_github_issues' |
  *   'llm_providers' | 'machine_assistant' | 'machine_browse' | 'machine_detail' |
@@ -43,12 +43,13 @@ import { browserMicrosoftLogin } from './dialogs.js';
  *   'variable_create' | 'variable_delete' | 'variable_deliver' | 'variable_delivery_approve' |
  *   'variable_delivery_list' | 'variable_delivery_remove' | 'variable_entry_cancel' |
  *   'variable_entry_complete' | 'variable_launcher_approve' | 'variable_launcher_remove' |
- *   'variable_launcher_run' | 'variable_list' | 'variable_migration_inspect' |
+ *   'variable_launcher_run' | 'variable_launcher_stop' | 'variable_list' | 'variable_migration_inspect' |
  *   'variable_migration_run' | 'variable_rename' | 'variable_reveal' | 'variable_update' |
  *   'workflow_block_remove' | 'workflow_block_save' | 'workflow_blocks_list' | 'workflow_remove' |
- *   'workflow_repositories' | 'workflow_run_assign' | 'workflow_run_cancel' | 'workflow_run_resume' | 'workflow_run_status' |
- *   'workflow_runs' | 'workflow_save' | 'workflow_settings' | 'workflow_settings_update' | 'workflow_show' | 'workflow_summary' |
- *   'workflow_summary_send' | 'workflows_list'
+ *   'workflow_repositories' | 'workflow_run_assign' | 'workflow_run_cancel' | 'workflow_run_requeue' | 'workflow_run_restart' | 'workflow_run_resume' |
+ *   'workflow_run_status' | 'workflow_runs' | 'workflow_runs_pause' | 'workflow_runs_unpause' | 'workflow_save' | 'workflow_settings' | 'workflow_settings_update' | 'workflow_show' | 'workflow_summary' |
+ *   'workflow_summary_send' | 'workflow_supervise' | 'workflow_supervision' | 'workflow_supervision_act' |
+ *   'workflow_supervision_dismiss' | 'workflows_list'
  * )} Method
  */
 /**

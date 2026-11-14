@@ -587,7 +587,8 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#save'); await page.waitForTimeout(300);
   check('a new guide is saved with its field', await page.evaluate(() => window.__ptaLastSave.map.work_item_guides.some(g => g.id === 'support' && g.type === 'Support' && g.provider === 'azure' && g.fields[0]?.reference === 'Custom.Kind')));
   const plan = page.locator('#agent-prompts > .resource').first();
-  check('agent instructions show the built-in prompts, the director\'s included', await page.$$eval('#agent-prompts > .resource', rows => rows.length) === 4 && await page.locator('#agent-prompts [data-prompt="direct"]').count() === 1);
+  check('agent instructions show the built-in prompts, the director\'s and the supervisor\'s included', await page.$$eval('#agent-prompts > .resource', rows => rows.length) === 5
+    && await page.locator('#agent-prompts [data-prompt="direct"]').count() === 1 && await page.locator('#agent-prompts [data-prompt="supervise"]').count() === 1);
   await plan.locator('summary').click();
   await plan.locator('textarea').fill('Plan at most three children.');
   await page.click('#save'); await page.waitForTimeout(300);
@@ -1355,8 +1356,11 @@ for (const [label, ctx] of [['machine-desktop', {}], ['machine-phone', { viewpor
   await upgrade.click();
   const confirm = page.getByRole('button', { name: 'Confirmar actualización: Travel laptop', exact: true });
   check(`${label}: a machine update requires its explicit second tap`, !await page.evaluate(() => window.__ptaMachineUpgrade) && await confirm.isVisible());
+  await page.evaluate(() => { window.__ptaMachineUpgradeWaits = true; });
   await confirm.click();
   await page.waitForFunction(() => window.__ptaMachineUpgrade);
+  check(`${label}: a machine that waits for its release archive says so`, await page.getByText('Travel laptop espera el archivo de la versión 0.11.6').first().isVisible());
+  await page.evaluate(() => { window.__ptaMachineUpgradeWaits = false; });
   check(`${label}: the machine update names only the machine`, await page.evaluate(() => JSON.stringify(window.__ptaMachineUpgrade) === JSON.stringify({ machine: '22222222-2222-4222-8222-222222222222' })));
   await page.waitForFunction(() => document.querySelector('#machine-list')?.textContent.includes('preparando una actualización'));
   check(`${label}: a machine preparing its update shows it and offers no second request`, await page.locator('#machine-list button:has-text("Actualizar a")').isDisabled());
@@ -1750,7 +1754,7 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await consumers.getByRole('button', { name: /^Probar clave/ }).click();
   await consumers.getByText('aceptó la clave').waitFor();
   check(`${label}: a test shows only a status sentence`, JSON.stringify(await consumerCalls()) === '["bind","check"]' && await consumers.innerText().then(text => !text.includes('rotated-synthetic') && !text.includes('release.example.test')));
-  check(`${label}: a proposed launcher is listed as text with its command, folder and variables, waiting for approval`, await page.locator('#launchers').innerText().then(text => text.includes('release-tool') && text.includes('/usr/local/bin/release --fixed') && text.includes('/home/user/work') && text.includes('RELEASE_URL desde DEPLOY_ENDPOINT') && text.includes('<b>not markup</b>') && text.includes('Esperando tu aprobación')) && await page.locator('#launcher-list b').count() === 0);
+  check(`${label}: a proposed launcher is listed as text with its command, folder and variables, waiting for approval`, await page.locator('#launchers').innerText().then(text => text.includes('release-tool') && text.includes('/usr/local/bin/release --fixed') && text.includes('/home/user/work') && text.includes('RELEASE_URL desde DEPLOY_ENDPOINT') && text.includes('Límite de tiempo: 1 minuto') && text.includes('<b>not markup</b>') && text.includes('Esperando tu aprobación')) && await page.locator('#launcher-list b').count() === 0);
   await page.evaluate(axeSource);
   check(`${label}: consumers pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   check(`${label}: consumers keep the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
@@ -1761,15 +1765,28 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await page.evaluate(async () => { window.__ptaLaunchersHere = true; await loadConsumers(); });
   await page.locator('#launcher-list').getByRole('button', { name: 'Aprobar el lanzador release-tool' }).click();
   await page.locator('#launcher-list .badge', { hasText: 'Aprobado' }).waitFor();
-  check(`${label}: approving sends the digest of the definition shown and hides the button`, await page.evaluate(() => {
+  check(`${label}: approving sends the digest and time limit of the definition shown and hides the button`, await page.evaluate(() => {
     const call = window.__ptaConsumerCalls.at(-1);
-    return call.method === 'approve' && call.id === 'release-tool' && call.digest === 'd'.repeat(64);
+    return call.method === 'approve' && call.id === 'release-tool' && call.digest === 'd'.repeat(64) && call.timeout_seconds === 60;
   }) && await page.locator('#launcher-list').getByRole('button', { name: /^Aprobar/ }).count() === 0);
+  // A running launcher shows when it started and when its limit stops it; only this machine stops it.
+  await page.evaluate(async now => { window.__ptaSetLauncherRunning({ started_at: now - 120, stops_at: now + 3480, seconds_left: 3480 }); window.__ptaLaunchersHere = false; await loadConsumers(); }, Math.floor(Date.now() / 1000));
+  check(`${label}: in the portal a running launcher is listed without Stop`, await page.locator('#launcher-list .badge', { hasText: 'En ejecución' }).count() === 1
+    && await page.locator('#launcher-list').innerText().then(text => text.includes('En ejecución desde las') && text.includes('su límite de tiempo lo detiene a las'))
+    && await page.locator('#launcher-list').getByRole('button', { name: /^Detener/ }).count() === 0);
+  await page.evaluate(async () => { window.__ptaLaunchersHere = true; await loadConsumers(); });
+  check(`${label}: a running launcher passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await page.locator('#launcher-list').getByRole('button', { name: 'Detener el lanzador release-tool' }).click();
+  await page.locator('#launcher-list .badge', { hasText: 'Aprobado' }).waitFor();
+  check(`${label}: stopping names the launcher and it is no longer listed as running`, await page.evaluate(() => {
+    const call = window.__ptaConsumerCalls.at(-1);
+    return call.method === 'stop' && call.id === 'release-tool';
+  }) && await page.locator('#launcher-list').getByRole('button', { name: /^Detener/ }).count() === 0);
   await consumers.getByRole('button', { name: 'Dejar de usar' }).click();
   await consumers.locator('.badge', { hasText: 'Ninguna variable elegida' }).waitFor();
   await page.locator('#launcher-list').getByRole('button', { name: /^Eliminar/ }).click();
   await page.locator('#launchers').waitFor({ state: 'hidden' });
-  check(`${label}: approving, stopping and removing call only their own operations`, JSON.stringify(await consumerCalls()) === '["bind","check","approve","unbind","remove"]');
+  check(`${label}: approving, stopping and removing call only their own operations`, JSON.stringify(await consumerCalls()) === '["bind","check","approve","stop","unbind","remove"]');
   // Delivery destinations: a person approves exactly what is shown; a delivery asks twice and reports only a status.
   const deliveries = page.locator('#deliveries');
   check(`${label}: a proposed destination shows its address, headers, body, credential and variables as text`, await deliveries.innerText().then(text => text.includes('PUT https://editor.example.test/api/import/secrets/OPENAI_API_KEY')
@@ -1878,6 +1895,21 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await page.evaluate(axeSource);
   check(`${label}: the updates panel passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   check(`${label}: the updates panel keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  // A release whose archive is not attached yet is not offered; preparing it waits for the archive and can be cancelled.
+  await page.evaluate(() => { window.__ptaUpdateArchiveLate(true); window.__ptaUpdateSet('idle', null); return loadUpdates(); });
+  await panel.locator('#update-progress').getByText('aún no está adjunto a la versión').waitFor();
+  check(`${label}: a release without its archive is not offered as available`, await panel.locator('#update-versions').innerText().then(text => !/Disponible\s*0\.9\.14/.test(text)) && await offer.isHidden() && await panel.locator('#update-stage').isEnabled());
+  await panel.locator('#update-stage').click();
+  await panel.locator('#update-progress').getByText('Esperando el archivo de 0.9.14').waitFor();
+  check(`${label}: preparing it waits for the archive, labelled, and can be cancelled`, await panel.locator('#update-state').innerText() === 'Esperando el archivo de la versión'
+    && await panel.locator('#update-cancel').isVisible() && await panel.locator('#update-stage').isDisabled() && await page.evaluate(() => JSON.stringify(window.__ptaUpdateCalls.at(-1)) === '{"method":"stage","version":"0.9.14"}'));
+  await page.evaluate(axeSource);
+  check(`${label}: waiting for the archive passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await panel.locator('#update-cancel').click();
+  await panel.locator('#update-cancel').waitFor({ state: 'hidden' });
+  check(`${label}: cancelling withdraws the wait`, await page.evaluate(() => window.__ptaUpdateCalls.at(-1).method === 'cancel') && await panel.locator('#update-state').innerText() === 'Al día');
+  await page.evaluate(() => { window.__ptaUpdateArchiveLate(false); window.__ptaUpdateFail(); return loadUpdates(); });
+  await panel.locator('#update-error').waitFor();
   // Unattended updating: off by default, this computer only, changed only by an explicit choice.
   const unattended = panel.locator('#update-unattended-toggle');
   check(`${label}: unattended updating is offered, off by default`, await unattended.isVisible() && !(await unattended.isChecked()) && await page.evaluate(() => !window.__ptaUpdateCalls.some(c => c.method === 'unattended')));
@@ -2144,6 +2176,19 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.evaluate(() => { for (const d of document.querySelectorAll('#workflow-rows details')) d.open = true; });
   await page.waitForTimeout(400);
   check(`workflows ${label}: the list with its editors passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  // How much of each limit the workflow uses: its blocks, and the context the instructions follow.
+  const usageOf = page.locator('[data-workflow="payments-features"] .workflow-editor');
+  const contextText = async () => usageOf.locator('.workflow-usage').textContent();
+  const contextBefore = await contextText();
+  check(`workflows ${label}: the editor shows the blocks and context used against their limits`,
+    await usageOf.locator('fieldset .counter', { hasText: '2 de 20 bloques' }).count() === 1 && /de 100000 caracteres/.test(contextBefore), contextBefore);
+  const area = usageOf.locator('textarea').nth(1);
+  const instructionsBefore = await area.inputValue();
+  await area.fill(`${instructionsBefore} Keep every commit small.`);
+  const contextAfter = await contextText();
+  const number = text => Number(/hasta (\d+) de/.exec(text)?.[1]);
+  check(`workflows ${label}: the context used follows the instructions as they are typed`, number(contextAfter) - number(contextBefore) === ' Keep every commit small.'.length, `${contextBefore} → ${contextAfter}`);
+  await area.fill(instructionsBefore);
   check(`workflows ${label}: no free-text directory field`, await page.locator('#workflows input:not([type=checkbox]):not([type=search])').evaluateAll(inputs => inputs.every(i => !/dir|path|checkout/i.test(i.name + i.id + i.placeholder))));
 
   // A new workflow: project, repositories, checkout on the machine, agent; saved and verified.
@@ -2230,6 +2275,20 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.waitForTimeout(300);
   const allowed = (await calls()).filter(c => c.method === 'workflow_save' && c.workflow?.id === 'payments-features').pop();
   check(`workflows ${label}: an allowed action is saved with confirmation`, allowed?.confirmed === true && allowed.workflow.allow.join() === 'merge', JSON.stringify(allowed));
+  // Pre-approving the supervisor is reviewed the same way: the restart, and a post to a chosen chat.
+  const preBefore = (await calls()).filter(c => c.method === 'workflow_save' && c.workflow?.id === 'payments-features').length;
+  await payments.locator('input[data-preapprove="restart_after_cut"]').check();
+  await payments.locator('button', { hasText: 'Guardar workflow' }).click();
+  await page.waitForTimeout(300);
+  check(`workflows ${label}: pre-approving a restart shows what the supervisor may do before anything is sent`,
+    await payments.locator('.workflow-allow-review .callout.warn', { hasText: 'El supervisor puede reiniciar' }).isVisible()
+    && (await calls()).filter(c => c.method === 'workflow_save' && c.workflow?.id === 'payments-features').length === preBefore);
+  const preScan = await scan(page);
+  check(`workflows ${label}: the pre-approval review passes WCAG 2.2 AA`, preScan.length === 0, JSON.stringify(preScan));
+  await payments.locator('button', { hasText: 'Confirmar y guardar' }).click();
+  await page.waitForTimeout(300);
+  const preapproved = (await calls()).filter(c => c.method === 'workflow_save' && c.workflow?.id === 'payments-features').pop();
+  check(`workflows ${label}: a pre-approval is saved with confirmation`, preapproved?.confirmed === true && JSON.stringify(preapproved.workflow.preapprove) === '[{"action":"restart_after_cut"}]', JSON.stringify(preapproved?.workflow?.preapprove));
   await payments.locator('input.switch').click();
   await page.waitForTimeout(300);
   check(`workflows ${label}: the switch disables a workflow and nothing else`, (await calls()).some(c => c.method === 'workflow_save' && c.id === 'payments-features' && c.enabled === false && !c.workflow));
@@ -2346,6 +2405,28 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
     && !('pull_request_wait_days' in update) && !('project_directors' in update) && JSON.stringify(update.ready_states) === '[{"organization":"https://dev.azure.com/contoso","project":"Exports","states":["Approved"]}]'
     && update.director.model === 'claude-opus-5-5' && update.director.machine === '11111111-1111-4111-8111-111111111111', JSON.stringify(update));
   check(`workflow settings ${label}: saving clears the save bar`, await page.isHidden('#savebar') && await page.isHidden('#settings-tab-workflows .flag.edited'));
+  // The supervisor: on with its agent in this scenario; turning it off sends only that, and its prompt opens.
+  await page.waitForSelector('#workflow-supervisor-machine');
+  check(`workflow settings ${label}: the supervisor shows on, with its machine, agent and bounds`, await page.isChecked('#workflow-supervisor-enabled')
+    && await page.inputValue('#workflow-supervisor-machine') === '11111111-1111-4111-8111-111111111111' && await page.inputValue('#workflow-supervisor-looks') === '24');
+  await page.uncheck('#workflow-supervisor-enabled');
+  await page.fill('#workflow-supervisor-seconds', '700');
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check(`workflow settings ${label}: a supervisor bound out of range is refused before sending`, await page.isVisible('#workflow-settings-problem')
+    && !(await calls()).some(c => c.method === 'workflow_settings_update' && c.supervisor));
+  await page.fill('#workflow-supervisor-seconds', '240');
+  await page.click('#save');
+  await page.waitForTimeout(600);
+  const supervised = (await calls()).find(c => c.method === 'workflow_settings_update' && c.supervisor);
+  check(`workflow settings ${label}: saving the supervisor sends only what changed`, JSON.stringify(supervised?.supervisor) === '{"enabled":false,"session_seconds":240}', JSON.stringify(supervised));
+  await page.check('#workflow-supervisor-enabled');
+  await page.click('#save');
+  await page.waitForTimeout(600);
+  await page.click('#workflow-supervisor-prompt');
+  check(`workflow settings ${label}: the supervisor's prompt opens in Guides and instructions`, await page.isVisible('#agent-guides') && await page.locator('#agent-prompts [data-prompt="supervise"] details').evaluate(d => d.open).catch(() => false));
+  await page.evaluate(() => showTab('settings', 'panel-workflow-ready'));
+  await page.waitForTimeout(400);
 
   // Home links to the ready states while an enabled workflow that starts by itself has none.
   await page.evaluate(async () => {
@@ -2408,6 +2489,7 @@ for (const [label, viewport] of [['desktop', { width: 1280, height: 900 }], ['ph
   await page.waitForSelector('#workflow-watcher-state p');
   const watching = await page.locator('#workflow-watcher-state').innerText();
   check(`automatic starts ${label}: Settings shows the interval and the last poll`, /revisa cada 5 minutos/.test(watching) && /Última revisión a las .*: 1 ejecución iniciada/.test(watching), watching);
+  check(`automatic starts ${label}: Settings shows the items the last poll saw by category`, /HU 0, bugs 1, tareas 1/.test(watching), watching);
   await page.evaluate(() => { window.__ptaWatcher = { state: 'idle', reason: '', interval_minutes: 5, last_poll: null, next_poll_at: null }; });
   await page.click('#workflow-settings-refresh');
   await page.waitForFunction(() => /inactiva/.test(document.querySelector('#workflow-watcher-state')?.textContent || ''));
@@ -2545,10 +2627,42 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   const listScan = await scan(page);
   check(`runs ${label}: the list passes WCAG 2.2 AA`, listScan.length === 0, JSON.stringify(listScan));
   await page.screenshot({ path: `${out}/${label}-workflow-runs.png`, fullPage: true });
+  // Every row is a card with one layout: a state badge with text, then the number and title, the type and the facts,
+  // each inside the card and none over another, with a short title and with one of 200 characters, in both modes.
+  const cardsFit = () => page.locator('#run-rows [data-run]').evaluateAll(rows => rows.map(row => {
+    const card = row.getBoundingClientRect();
+    const parts = [...row.querySelector('.card-main').children].map(part => part.getBoundingClientRect());
+    const inside = parts.every(r => r.left >= card.left && r.right <= card.right && r.top >= card.top && r.bottom <= card.bottom);
+    const apart = parts.every((r, i) => i === 0 || r.top >= parts[i - 1].bottom - 0.5);
+    const title = row.querySelector('.run-row-title');
+    const order = [...row.querySelector('.card-main').children].map(part => part.className.split(' ')[0]);
+    return { inside, apart, unclipped: title.scrollWidth <= title.clientWidth + 1, badge: Boolean(row.querySelector('.card-meta .badge')?.textContent.trim()), order: order.slice(0, 3).join() };
+  }));
+  const fitOk = fits => fits.length === 5 && fits.every(f => f.inside && f.apart && f.unclipped && f.badge && f.order === 'card-meta,run-row-title,run-row-kind');
+  const shortFit = await cardsFit();
+  check(`runs ${label}: every card shows its state badge, then the title, the type and the facts inside the card`, fitOk(shortFit), JSON.stringify(shortFit));
+  await page.evaluate(() => window.__ptaRetitleRun('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01', 'Improve settlement reporting so that every merchant sees the daily, weekly and monthly sums of their settlements with the fees, the refunds and the chargebacks of each period, and can export'.padEnd(200, '.')));
+  await page.click('#runs-refresh');
+  await page.waitForFunction(() => (document.querySelector('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01"] .run-row-title')?.textContent.length ?? 0) > 200);
+  const longFit = await cardsFit();
+  check(`runs ${label}: a 200-character title wraps inside its card without covering the rest`, fitOk(longFit) && await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), JSON.stringify(longFit));
+  await page.emulateMedia({ colorScheme: 'dark' });
+  const darkScan = await scan(page);
+  check(`runs ${label}: the list in dark mode passes WCAG 2.2 AA`, darkScan.length === 0, JSON.stringify(darkScan));
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.evaluate(() => window.__ptaRetitleRun('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01', 'Improve settlement reporting'));
   // Filters.
   await page.selectOption('#runs-state', 'done');
   await page.waitForFunction(() => document.querySelectorAll('#run-rows [data-run]').length === 1);
   check(`runs ${label}: the state filter narrows the list`, (await calls()).some(c => c.method === 'workflow_runs' && c.state === 'done'));
+  // A run waiting in the line for a slot says so, with its place.
+  await page.evaluate(() => window.__ptaQueueRun('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e03', 2));
+  await page.selectOption('#runs-state', 'coding');
+  await page.waitForFunction(() => [...document.querySelectorAll('#run-rows [data-run]')].map(r => r.dataset.state).join() === 'coding');
+  check(`runs ${label}: a run waiting for a slot shows its place in the line`, /Esperando un turno, posición 2/.test(await page.locator('#run-rows').innerText()));
+  const queuedScan = await scan(page);
+  check(`runs ${label}: the list with a run waiting for a slot passes WCAG 2.2 AA`, queuedScan.length === 0, JSON.stringify(queuedScan));
+  await page.evaluate(() => window.__ptaQueueRun('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e03', null));
   await page.selectOption('#runs-state', '');
   await page.waitForFunction(() => document.querySelectorAll('#run-rows [data-run]').length === 5);
   // The detail of the coding run: timeline, children with sessions and pull requests, block outcomes, a summary and its send.
@@ -2621,9 +2735,19 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   // The run that needs attention: resume, then cancel, each on a second press.
   await page.click('#run-detail-back');
   await page.waitForSelector('#run-rows [data-run]');
+  await page.evaluate(() => window.__ptaDeliverTask('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e04'));
   await page.click('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e04"]');
   await page.waitForSelector('#run-attention');
   check(`runs ${label}: a run that needs attention says why`, /permission prompt/.test(await detailText()));
+  const taskFacts = await page.locator('#run-children .resource-facts').first().textContent();
+  check(`runs ${label}: a task's branches in other repositories, their pull requests and the ignored lines are shown`,
+    /Rama feature\/5012-rounding ·/.test(taskFacts ?? '') && /Rama feature\/5012-rounding-web en payments-web/.test(taskFacts ?? '')
+    && /payments-web\/pullrequest\/52/.test(await page.locator('#run-children .run-pulls').first().innerHTML())
+    && /repositorios que este workflow no tiene: billing/.test(await page.locator('.run-child-ignored').first().textContent() ?? ''), taskFacts);
+  const taskScan = await scan(page);
+  check(`runs ${label}: a task with branches in several repositories passes WCAG 2.2 AA`, taskScan.length === 0, JSON.stringify(taskScan));
+  const stoppedWhy = await page.locator('#run-failure').textContent().catch(() => '');
+  check(`runs ${label}: the cause its machine reported is shown in the user's language`, /^Por qué se detuvo .*solicitud de permiso/.test(stoppedWhy ?? '') && /solicitud de permiso/.test(await page.locator('.run-child-failure').first().textContent()), stoppedWhy);
   await page.locator('.run-actions button', { hasText: 'Reanudar' }).click();
   await page.locator('.run-actions button', { hasText: 'Confirmar reanudar' }).click();
   await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_run_resume'));
@@ -2634,6 +2758,57 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_run_cancel'));
   await page.waitForFunction(() => document.querySelector('#run-detail-content .run-head .badge')?.textContent === 'Cancelada');
   check(`runs ${label}: cancel ends the run`, (await calls()).some(c => c.method === 'workflow_run_cancel' && c.confirmed) && await page.locator('.run-actions button', { hasText: 'Cancelar ejecución' }).count() === 0);
+  // Restart with a handover note: the note starts from the record, nothing happens before the second press, and the new
+  // run links the one it continues and shows the note.
+  await page.click('#run-detail-back');
+  await page.waitForSelector('#run-rows [data-run]');
+  await page.click('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e03"]');
+  await page.waitForSelector('#run-restart-open');
+  await page.click('#run-restart-open');
+  await page.waitForSelector('#run-restart-note');
+  const draft = await page.inputValue('#run-restart-note');
+  check(`runs ${label}: the handover note starts from the run's branches and pull requests`, /^Hecho en la ejecución anterior/.test(draft) && /Rama feature\/6001-receipt-download/.test(draft) && /Pull request !41/.test(draft) && /Falta por hacer:/.test(draft), draft);
+  await page.fill('#run-restart-note', `${draft}abrir el pull request de 6002`);
+  check(`runs ${label}: the note shows how many characters it has`, /de 4000 caracteres/.test(await page.locator('#run-restart-count').textContent() ?? ''));
+  const restartScan = await scan(page);
+  check(`runs ${label}: the restart form passes WCAG 2.2 AA`, restartScan.length === 0, JSON.stringify(restartScan));
+  await page.screenshot({ path: `${out}/${label}-workflow-run-restart.png`, fullPage: true });
+  await page.locator('#run-restart button', { hasText: 'Reiniciar' }).first().click();
+  check(`runs ${label}: restart waits for a second press`, !(await calls()).some(c => c.method === 'workflow_run_restart'));
+  await page.locator('#run-restart button', { hasText: 'Confirmar reinicio' }).click();
+  await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_run_restart'));
+  await page.waitForSelector('#run-continues');
+  const restarted = (await calls()).find(c => c.method === 'workflow_run_restart');
+  check(`runs ${label}: the restart sends the note and opens the new run, which links the old one and shows the note`,
+    restarted?.confirmed && restarted.run === '3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e03' && /abrir el pull request de 6002$/.test(restarted.note ?? '')
+    && await page.isVisible('#run-handover') && /Continúa la ejecución/.test(await detailText()), JSON.stringify(restarted));
+  await page.click('#run-continues');
+  await page.waitForSelector('#run-restarted-as');
+  check(`runs ${label}: the old run is cancelled and links the run that restarted it`, /Cancelada/.test(await page.locator('#run-detail-content .run-head .badge').first().textContent() ?? '') && await page.locator('#run-restart-open').count() === 0);
+  // Pause: the choice for the live sessions has no default, nothing happens before the second press, the pause shows
+  // on the list and on each run it holds, and unpause ends it.
+  await page.click('#run-detail-back');
+  await page.waitForSelector('#run-rows [data-run]');
+  await page.click('#runs-pause-open');
+  await page.waitForSelector('#runs-pause-panel');
+  check(`runs ${label}: pausing waits for the choice of what happens to the sessions`, await page.isDisabled('#runs-pause-confirm'));
+  await page.locator('#runs-pause-panel label', { hasText: 'Dejarlas terminar' }).locator('input').check();
+  const pauseScan = await scan(page);
+  check(`runs ${label}: the pause form passes WCAG 2.2 AA`, pauseScan.length === 0, JSON.stringify(pauseScan));
+  await page.click('#runs-pause-confirm');
+  check(`runs ${label}: pause waits for a second press`, !(await calls()).some(c => c.method === 'workflow_runs_pause'));
+  await page.click('#runs-pause-confirm');
+  await page.waitForSelector('#runs-pauses .run-pause');
+  const paused = (await calls()).find(c => c.method === 'workflow_runs_pause');
+  check(`runs ${label}: the pause covers every project and lets the sessions finish`, paused?.confirmed && paused.sessions === 'finish' && !paused.project, JSON.stringify(paused));
+  check(`runs ${label}: the list says the runs are paused and marks each held run`, /Todas las ejecuciones de workflow están en pausa/.test(await page.locator('#runs-pauses').innerText())
+    && await page.locator('#run-rows .badge', { hasText: 'En pausa' }).count() >= 1);
+  const pausedScan = await scan(page);
+  check(`runs ${label}: the paused list passes WCAG 2.2 AA`, pausedScan.length === 0, JSON.stringify(pausedScan));
+  await page.locator('#runs-pauses button', { hasText: 'Quitar la pausa' }).click();
+  await page.locator('#runs-pauses button', { hasText: 'Confirmar quitar la pausa' }).click();
+  await page.waitForFunction(() => !document.querySelector('#runs-pauses .run-pause'));
+  check(`runs ${label}: unpause ends the pause`, (await calls()).some(c => c.method === 'workflow_runs_unpause' && c.confirmed) && await page.locator('#run-rows .badge', { hasText: 'En pausa' }).count() === 0);
   // The gate from Home: the waiting run's row opens its detail, Review plan shows the children, a second press creates them.
   await page.evaluate(() => showTab('overview'));
   await page.waitForSelector('#workflow-attention [data-run]');
@@ -2663,7 +2838,88 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.locator('#todo-list [data-run]').first().click();
   await page.waitForSelector('#run-detail-content #run-timeline');
   check(`runs ${label}: the card's link opens the run`, await page.isVisible('#workflow-run-detail'));
+  // The supervisor's look: its assessment, a report claim it could not verify, its drafts; a proposed restart is the
+  // only restart control and uses its drafted note, carried out as that proposal on a second press.
+  await page.evaluate(() => window.__ptaSuperviseRun('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01'));
+  await page.click('#run-detail-back');
+  await page.waitForSelector('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01"]');
+  await page.click('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01"]');
+  await page.waitForSelector('#run-supervision .run-look');
+  const lookText = await page.locator('#run-supervision').innerText();
+  check(`runs ${label}: the supervisor's look shows what was done, what is left and what it recommends`, /Hecho/.test(lookText) && /Pendiente/.test(lookText) && /Recomienda/.test(lookText), lookText);
+  check(`runs ${label}: a report claim the provider contradicts is marked not verified, with code's fact`,
+    await page.locator('#run-supervision .run-check[data-result="not_verified"] .badge', { hasText: 'Sin verificar' }).count() === 1
+    && await page.locator('#run-supervision .run-check[data-result="verified"]').count() === 1);
+  check(`runs ${label}: a proposed restart replaces the run's own restart control`, await page.locator('#run-restart-open').count() === 1
+    && await page.locator('#run-supervision #run-restart-open').count() === 1);
+  const lookScan = await scan(page);
+  check(`runs ${label}: the supervisor's look passes WCAG 2.2 AA`, lookScan.length === 0, JSON.stringify(lookScan));
+  await page.screenshot({ path: `${out}/${label}-workflow-run-supervisor.png`, fullPage: true });
+  check(`runs ${label}: no sideways scroll with the supervisor's look`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.locator('#run-supervision .run-proposal[data-action="post_summary"] button', { hasText: 'Descartar' }).click();
+  await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_supervision_dismiss'));
+  check(`runs ${label}: a proposal can be set aside`, (await calls()).some(c => c.method === 'workflow_supervision_dismiss' && c.action === 'a3'));
+  await page.waitForSelector('#run-supervision .run-proposal[data-action="post_summary"][data-state="dismissed"]');
+  await page.click('#run-supervision #run-restart-open');
+  await page.waitForSelector('#run-restart-note');
+  check(`runs ${label}: the restart starts from the supervisor's drafted note, and says whose it is`, /feature\/5012-rounding/.test(await page.inputValue('#run-restart-note'))
+    && /El supervisor redactó esta nota/.test(await page.locator('#run-restart').innerText()));
+  await page.locator('#run-restart button', { hasText: 'Reiniciar' }).first().click();
+  check(`runs ${label}: the proposed restart waits for a second press`, !(await calls()).some(c => c.method === 'workflow_supervision_act'));
+  await page.locator('#run-restart button', { hasText: 'Confirmar reinicio' }).click();
+  await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_supervision_act'));
+  await page.waitForSelector('#run-continues');
+  const acted = (await calls()).find(c => c.method === 'workflow_supervision_act');
+  check(`runs ${label}: the proposal is carried out once, with the unedited draft and the confirmation`, acted?.confirmed && acted.action === 'a1' && !('note' in acted)
+    && (await calls()).filter(c => c.method === 'workflow_supervision_act').length === 1, JSON.stringify(acted));
+  // The supervisor's latest audit, under the runs list: per run, the merged branches still there, the findings.
+  await page.evaluate(() => window.__ptaAudit());
+  await page.click('#run-detail-back').catch(() => {});
+  await page.click('#runs-refresh');
+  await page.waitForSelector('#run-audit');
+  const auditText = await page.locator('#run-audit').innerText();
+  check(`runs ${label}: the audit lists its runs, the merged branches still there and the findings left in comments`,
+    /feature\/5990-ledger-export/.test(auditText) && /necesita un elemento de trabajo/.test(auditText) && /Auditoría/.test(auditText), auditText);
+  const auditScan = await scan(page);
+  check(`runs ${label}: the audit passes WCAG 2.2 AA`, auditScan.length === 0, JSON.stringify(auditScan));
+  await page.click('#runs-audit-ask');
+  await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_supervise' && c.audit === true));
+  check(`runs ${label}: an audit can be asked for`, (await calls()).some(c => c.method === 'workflow_supervise' && c.audit === true));
+  await page.screenshot({ path: `${out}/${label}-workflow-audit.png`, fullPage: true });
   check(`runs ${label}: no client errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+// Agent sessions as a source: added off and without audiences, the owner sees what it reads,
+// and the thread context setting is saved; at desktop and phone widths.
+for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } }]]) {
+  const { context, page, errors } = await open({ axe: true, ...options });
+  await page.addScriptTag({ content: axeSource });
+  await page.evaluate(() => { showTab('knowledge'); selectTab($('#knowledge-tabs'), 'sources'); });
+  check(`agent sessions ${label}: the offer shows while the map has no such source`, await page.isVisible('#sessions-offer'));
+  await page.click('#add-sessions-source');
+  check(`agent sessions ${label}: adding it hides the offer`, await page.isHidden('#sessions-offer'));
+  const source = page.locator('.resource', { has: page.locator('strong', { hasText: /^agent-sessions$/ }) });
+  await source.locator('button', { hasText: 'Ver lo que lee' }).click();
+  await page.waitForSelector('.session-preview .session-summary');
+  check(`agent sessions ${label}: the preview lists the summaries newest first`, await source.locator('.session-summary').count() === 2
+    && (await source.locator('.session-summary').first().innerText()).includes('payments-api'));
+  check(`agent sessions ${label}: a PTA run links its work item`, await source.locator('.session-summary a[href$="/edit/4101"]').count() === 1);
+  check(`agent sessions ${label}: an offline machine is unavailable, not empty`, (await source.locator('.session-preview').innerText()).includes('Sesiones de Desk no disponibles: sin conexión.'));
+  const violations = await page.evaluate(async () => (await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'] } })).violations);
+  check(`agent sessions ${label}: the source and its preview pass WCAG 2.2 AA`, violations.length === 0, JSON.stringify(violations.map(v => v.id)));
+  await source.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${out}/${label}-agent-sessions.png`, fullPage: false });
+  await source.locator('input[type=number]').fill('20');
+  await page.evaluate(() => { showTab('settings'); selectTab($('#settings-tabs'), 'general'); });
+  check(`agent sessions ${label}: the thread context defaults to 10`, await page.inputValue('#history-messages') === '10');
+  await page.fill('#history-messages', '15');
+  await page.click('#save'); await page.waitForTimeout(300);
+  const saved = await page.evaluate(() => window.__ptaLastSave);
+  const added = saved?.map.resources.find(r => r.tool?.type === 'agent_sessions');
+  check(`agent sessions ${label}: it is saved disabled, without audiences or external processing`, added && !added.enabled && !added.external_processing
+    && !added.allowed_conversations.length && !added.allowed_senders.length && added.tool.sessions === 20, JSON.stringify(added));
+  check(`agent sessions ${label}: the thread context setting is saved`, saved?.config.policy.history_messages === 15);
+  check(`agent sessions ${label}: no client errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }
 await browser.close();

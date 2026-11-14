@@ -301,19 +301,27 @@ Account variables
                            --settings also replaces this computer's portable settings with the account's (backed up).
                            Repeat the same command to resume an interrupted migration; originals are never changed.
   variables migrate status    The durable outcome of the migration for the signed-in account.
-  variables launcher list     Local launchers, proposed and approved (owner's trusted machine only).
+  variables launcher list     Local launchers, proposed and approved, with each one's time limit and, while it runs,
+                           when it started, when its limit stops it and the seconds left (owner's trusted machine
+                           only).
   variables launcher define NAME --description TEXT --program PATH --directory DIR --env ENV=ID [--env ...]
                            [--arg ARG ...] [--timeout SECONDS] --confirmed
+                           --timeout is its time limit, 1 to 3600 seconds (60 by default); the limit is part of
+                           what the owner approves.
                            Proposes a program to receive the named variables as environment variables of that one
                            process (never arguments). Protected settings such as PATH or LD_* are refused. It runs
                            nothing until the owner approves it (launcher approve, or Settings › Credentials in the
                            application pta app open shows, or the owner's portal).
   variables launcher approve NAME [--digest SHA256] --confirmed
                            The owner approves a proposed launcher on this machine. Without --confirmed it shows the
-                           program, its SHA-256, arguments, folder and variables to review; --digest pins the
-                           reviewed SHA-256, so a definition that changed since is refused.
+                           program, its SHA-256, arguments, folder, variables and time limit to review; --digest
+                           pins the reviewed SHA-256, so a definition that changed since is refused.
   variables launcher run NAME [--pin ENV=VERSION ...] --confirmed
-                           Runs it with the values resolved now; prints status and references, never output or values.
+                           Runs it with the values resolved now and waits for it to end; prints status and
+                           references, never output or values. Launchers with different names run side by side
+                           (up to 3 at a time); the same launcher never runs twice at once.
+  variables launcher stop NAME
+                           Stops a running launcher and everything it started; its run ends as stopped.
   variables launcher remove NAME [--confirmed]
                            Removes a launcher (proposed or approved); it needs no confirmation, and --confirmed is
                            accepted so the same command line as define and run works.
@@ -396,7 +404,13 @@ Knowledge
   sources enable|disable ID
   sources audience ID      JSON on stdin: allowed_conversations, allowed_senders, external_processing.
                            A whole repository is a source too: {\"kind\":\"repository\",\"repository\":\"ALIAS\",...};
-                           the verified notes: {\"kind\":\"notes\",...} (optional \"contexts\" keeps only theirs).
+                           the verified notes: {\"kind\":\"notes\",...} (optional \"contexts\" keeps only theirs);
+                           recent agent sessions: {\"kind\":\"tool\",\"tool\":{\"type\":\"agent_sessions\",\"sessions\":10}}.
+  sources sessions [--limit N]  What an agent sessions source reads now: the newest Claude Code, Codex and
+                           OpenCode sessions of the account's machines (default 10, at most 50), summarized;
+                           fixed rules drop lines that look like secrets, code and directory names, which is
+                           not a guarantee: authorize the source only for audiences you would trust with what
+                           your sessions discuss. Offline machines are listed as unavailable.
   contexts list | contexts show ID | contexts add | contexts edit ID | contexts remove ID
                            Subjects such as «cobros»: JSON on stdin with id, name, description, keywords,
                            sources (IDs) and instructions. A request naming one reads its sources.
@@ -425,19 +439,24 @@ Knowledge
                            Azure task type with the bugs). The implementation agents follow them.
   prompts list | prompts show ID         The implementation agents' instructions (plan, code, request, direct).
   prompts edit ID | prompts reset ID     JSON on stdin: {\"instructions\": TEXT}; reset restores the default.
-  workflows list | workflows show ID     Workflows: recipes for implementing the items of one Azure DevOps project.
+  workflows list | workflows show ID     Workflows: recipes for implementing the items of one Azure DevOps project,
+                           with how much of each limit they use (usage: instructions, blocks, context).
   workflows save [--confirmed]   JSON on stdin: id, name, description, enabled, auto_start, organization
                            (https://dev.azure.com/NAME), project, repositories [{id, name}], machine (ID),
                            checkouts {REPOSITORY_ID: DIRECTORY}, agent {provider, model, effort},
-                           instructions (at most 8000 characters), blocks (IDs) and allow: what its coding
-                           runs may do that the fixed rules forbid (work_items, teams, merge, deploy;
-                           empty by default; any of them needs --confirmed). Checked against the
-                           project's catalog, the machine's roots and checkouts and its installed CLIs;
-                           what cannot be verified comes back as warnings. Saved on the coordinator only.
+                           instructions (at most 20000 characters), blocks (IDs, at most 20) and allow:
+                           what its coding runs may do that the fixed rules forbid (work_items, teams,
+                           merge, deploy; empty by default; any of them needs --confirmed). A run gets
+                           its instructions and instruction blocks whole: a workflow whose largest run
+                           context would exceed 100000 characters is refused with the numbers. Checked
+                           against the project's catalog, the machine's roots and checkouts and its
+                           installed CLIs; what cannot be verified comes back as warnings. Saved on the
+                           coordinator only.
   workflows enable ID | workflows disable ID   Changes only whether the workflow is enabled.
   workflows remove ID --confirmed        Removes a workflow (its definition cannot be recovered).
   workflows blocks list                  Blocks and the workflows that use them.
-  workflows blocks save [--confirmed]    JSON on stdin: id, name, kind (instruction: text; teams_notification:
+  workflows blocks save [--confirmed]    JSON on stdin: id, name, kind (instruction: text of at most 8000
+                           characters, refused when a workflow that lists it would no longer fit; teams_notification:
                            stage, chat {id, name}, mentions, template with {item} {id} {title} {link}
                            {pull_requests} {summary} {state}, needs --confirmed and a chat you belong to; launcher: stage, launcher
                            {id, digest}, only from the local page or the owner's portal, never here).
@@ -473,13 +492,48 @@ Knowledge
                            is coded directly.
                            --director lets the workflow director choose (none leaves it unassigned).
   workflows runs [--state STATE] [--workflow WORKFLOW] [--limit N]
-                           Runs, newest first, and those waiting on you (attention).
+                           Runs, newest first, and those waiting on you (attention); a run waiting
+                           for a slot has waiting_for_slot and its queue_position (1 is next); the
+                           pauses in force are in paused, and a run one holds has paused: true.
   workflows status RUN                   One run: stages, implementation runs, children, pull requests.
+                           A session that did not end with its answer shows why (failure: a fixed cause).
   workflows resume RUN --confirmed       Continues a failed, interrupted or needs_attention run from its
                            stage, accepting what stopped it; never submits a plan or starts a started
                            coding run again.
-  workflows cancel RUN --confirmed       Cancels the run and its active implementation run.
+  workflows cancel RUN --confirmed       Cancels the run and its active implementation run, and stops
+                           every session the run started that is still alive.
+  workflows restart RUN [--note TEXT | --note-file PATH] --confirmed
+                           Cancels the run as cancel does and starts a new run of its workflow for its
+                           work item from the first stage. The handover note (at most 4000 characters;
+                           PATH is read here, at most 16 KiB) goes to each of its coding runs under
+                           «Handover from the previous run» and is posted nowhere. The runs name each
+                           other (continues, restarted_as) in workflows status.
+  workflows pause [--project NAME] --sessions stop|finish --confirmed
+                           Pauses every run, or one project's: nothing new starts (no slot, director,
+                           planning or coding run, acting block, nor a watcher start) until unpause.
+                           stop stops their live sessions now (a run whose active implementation run
+                           is stopped becomes interrupted); finish lets them finish. Order is kept.
+  workflows unpause [--project NAME] --confirmed
+                           Ends that project's pause, or every pause; the runs go on in their order.
   workflows assign RUN WORKFLOW --confirmed   Gives an unassigned run an enabled workflow of its project.
+  workflows supervise RUN  The workflow supervisor looks at the run now (settings supervisor.*): code reads
+                           the run, why its sessions stopped, their summaries, the work item with its
+                           comments and history, its pull requests and branches; the supervisor's
+                           assessment, report checks (not_verified marks what code could not confirm),
+                           drafts and proposed actions are stored on the run. One look at a time.
+  workflows supervise --audit [--since TIME]
+                           An audit of the runs created since the last audit (or TIME, RFC 3339):
+                           each run's item, state, pull requests and unverified claims, the merged
+                           branches that still exist, and the findings left only in comments.
+  workflows supervision RUN              The supervisor's looks at the run, and any queued or running.
+  workflows audits [ID|latest]           The supervisor's audits, or one of them.
+  workflows act RUN LOOK ACTION [--note TEXT | --note-file PATH] [--chat ID] [--mention NAME…] --confirmed
+                           Carries out one action a look proposed (its id, a1…, or name), once, through
+                           the operation that does it: restart (with the drafted note, or yours),
+                           resume, cancel, pause_project, post_summary (to --chat). create_work_item
+                           prints the draft for Create request.
+  workflows dismiss RUN LOOK ACTION      Sets a proposed action aside.
+  workflows requeue RUN --ahead|--back   Moves a run that waits for a slot ahead, or back in its place.
   workflows summary RUN    The workflow director writes a progress summary of the run from its record
                            (stages, children, pull requests, block outcomes; Markdown, at most 4000
                            characters, the verified links appended by code) and it is stored on the run.
@@ -623,6 +677,7 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--variable"
                 | "--timeout"
                 | "--pin"
+                | "--digest"
                 | "--destination"
                 | "--name"
                 | "--existing"
@@ -650,6 +705,9 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--text-file"
                 | "--summary"
                 | "--state"
+                | "--note"
+                | "--note-file"
+                | "--sessions"
         ) {
             skip = 1;
         } else if !arg.starts_with("--") {
@@ -911,6 +969,9 @@ fn update_text(data: &Value) -> Option<String> {
             },
             data["running"].as_str().unwrap_or("current")
         ),
+        "staging" if data["waiting_for_archive"].is_object() => format!(
+            "Version {target} is published, but its archive for {place} is not attached to the release yet. It is prepared and installed by itself once the archive appears (it waits up to 30 minutes) and nothing would be interrupted. {follow}"
+        ),
         "staging" => format!(
             "Preparing version {target} on {place}; it is installed by itself once ready and nothing would be interrupted. {follow}"
         ),
@@ -1001,6 +1062,8 @@ fn settings_update(sets: &[(String, String)]) -> Result<Value> {
     let mut body = json!({});
     let mut director = Value::Null;
     let mut director_changed = false;
+    let mut supervisor = Value::Null;
+    let mut supervisor_changed = false;
     let mut ready = Vec::new();
     // Each project's own director, in the order first named: `{project, director}`.
     let mut projects: Vec<Value> = Vec::new();
@@ -1070,6 +1133,39 @@ fn settings_update(sets: &[(String, String)]) -> Result<Value> {
                 director[&field["director.".len()..]] = json!(value);
                 director_changed = true;
             }
+            "supervisor" => {
+                ensure!(
+                    value == "none",
+                    "supervisor takes none (turns it off and clears it); set its fields with supervisor.enabled, .machine, .provider, .model, .effort and its bounds"
+                );
+                supervisor = Value::Null;
+                supervisor_changed = true;
+            }
+            _ if key.starts_with("supervisor.") => {
+                let field = &key["supervisor.".len()..];
+                if !supervisor.is_object() {
+                    supervisor = json!({});
+                }
+                supervisor[field] = match field {
+                    "enabled" => json!(match value.as_str() {
+                        "true" | "on" => true,
+                        "false" | "off" => false,
+                        _ => anyhow::bail!("supervisor.enabled takes true or false"),
+                    }),
+                    "machine" | "provider" | "model" | "effort" => json!(value),
+                    "looks_per_day"
+                    | "min_interval_minutes"
+                    | "wait_hours"
+                    | "offline_minutes"
+                    | "session_seconds" => json!(
+                        value
+                            .parse::<u32>()
+                            .with_context(|| format!("{key} takes a whole number"))?
+                    ),
+                    _ => anyhow::bail!("unknown setting {key}; consult --help"),
+                };
+                supervisor_changed = true;
+            }
             "ready_states" => {
                 let entry: Value = serde_json::from_str(value)
                     .context("ready_states takes JSON {organization?, project, states}")?;
@@ -1091,6 +1187,9 @@ fn settings_update(sets: &[(String, String)]) -> Result<Value> {
     }
     if director_changed {
         body["director"] = director;
+    }
+    if supervisor_changed {
+        body["supervisor"] = supervisor;
     }
     if !ready.is_empty() {
         body["ready_states"] = json!(ready);
@@ -1148,6 +1247,25 @@ pub(super) fn summary_send(
     }
     body["confirmed"] = json!(true);
     Ok(Ok(body))
+}
+
+/// The longest handover note file the CLI reads: 4000 characters of UTF-8 fit in it.
+const NOTE_FILE_BYTES: u64 = 16 * 1024;
+/// A handover note from a file on this computer, read here by the CLI (never by the host from a
+/// path it was given) and bounded.
+fn note_file(path: &str) -> Result<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).with_context(|| format!("cannot read {path}"))?;
+    let mut bytes = Vec::new();
+    file.take(NOTE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("cannot read {path}"))?;
+    ensure!(
+        bytes.len() as u64 <= NOTE_FILE_BYTES,
+        "{path} is larger than {} KiB; a handover note holds at most 4000 characters",
+        NOTE_FILE_BYTES / 1024
+    );
+    String::from_utf8(bytes).with_context(|| format!("{path} is not UTF-8 text"))
 }
 
 /// Workflows and their blocks: the same host operations as the MCP workflow tools.
@@ -1313,6 +1431,57 @@ async fn workflows_command(args: &[String]) -> Result<Reply> {
             }
             (method, json!({"run":run,"confirmed":true}))
         }
+        (Some("restart"), _) => {
+            let mut body = json!({"run":id(2)?});
+            match (option(args, "--note"), option(args, "--note-file")) {
+                (Some(_), Some(_)) => {
+                    anyhow::bail!("give --note TEXT or --note-file PATH, not both")
+                }
+                (Some(text), None) => body["note"] = json!(text),
+                (None, Some(path)) => body["note"] = json!(note_file(path)?),
+                (None, None) => {}
+            }
+            // The run's item and workflow, read from the coordinator for the question.
+            if !confirmed {
+                let question = super::tools::question("workflow_run_restart", &body)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                if let Some(reply) = unconfirmed(args, question) {
+                    return Ok(reply);
+                }
+            }
+            body["confirmed"] = json!(true);
+            ("workflow_run_restart", body)
+        }
+        (Some(action @ ("pause" | "unpause")), _) => {
+            let method = if action == "pause" {
+                "workflow_runs_pause"
+            } else {
+                "workflow_runs_unpause"
+            };
+            let mut body = json!({});
+            if let Some(project) = option(args, "--project") {
+                body["project"] = json!(project);
+            }
+            if action == "pause" {
+                let sessions = option(args, "--sessions").context(
+                    "choose --sessions stop (stop the live sessions now) or --sessions finish (let them finish)",
+                )?;
+                ensure!(
+                    matches!(sessions, "stop" | "finish"),
+                    "--sessions is stop or finish"
+                );
+                body["sessions"] = json!(sessions);
+            }
+            let question = super::tools::confirmation(method, &body).unwrap_or_default();
+            if let Some(reply) = unconfirmed(args, question) {
+                return Ok(reply);
+            }
+            body["confirmed"] = json!(true);
+            (method, body)
+        }
         (Some("assign"), _) => {
             let (run, workflow) = (id(2)?, id(3)?);
             let question = super::tools::confirmation(
@@ -1348,6 +1517,60 @@ async fn workflows_command(args: &[String]) -> Result<Reply> {
                 Ok(body) => ("workflow_summary_send", body),
                 Err(reply) => return Ok(reply),
             }
+        }
+        (Some("supervise"), _) if args.iter().any(|a| a == "--audit") => {
+            let mut body = json!({"audit":true});
+            if let Some(since) = option(args, "--since") {
+                body["since"] = json!(since);
+            }
+            ("workflow_supervise", body)
+        }
+        (Some("supervise"), _) => ("workflow_supervise", json!({"run":id(2)?})),
+        (Some("supervision"), _) => ("workflow_supervision", json!({"run":id(2)?})),
+        (Some("audits"), _) => match words.get(2) {
+            Some(id) => ("workflow_supervision", json!({"audit":id})),
+            None => ("workflow_supervision", json!({"audits":true})),
+        },
+        (Some("act"), _) => {
+            let mut body = json!({"run":id(2)?,"look":id(3)?,"action":id(4)?});
+            match (option(args, "--note"), option(args, "--note-file")) {
+                (Some(_), Some(_)) => {
+                    anyhow::bail!("give --note TEXT or --note-file PATH, not both")
+                }
+                (Some(text), None) => body["note"] = json!(text),
+                (None, Some(path)) => body["note"] = json!(note_file(path)?),
+                (None, None) => {}
+            }
+            if let Some(chat) = option(args, "--chat") {
+                body["chat"] = json!(chat);
+            }
+            let mentions = options(args, "--mention");
+            if !mentions.is_empty() {
+                body["mentions"] = json!(mentions);
+            }
+            // The look's exact draft, read from the coordinator for the question.
+            if !confirmed {
+                let question = super::tools::question("workflow_supervision_act", &body)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                if let Some(reply) = unconfirmed(args, question) {
+                    return Ok(reply);
+                }
+            }
+            body["confirmed"] = json!(true);
+            ("workflow_supervision_act", body)
+        }
+        (Some("dismiss"), _) => (
+            "workflow_supervision_dismiss",
+            json!({"run":id(2)?,"look":id(3)?,"action":id(4)?}),
+        ),
+        (Some("requeue"), _) => {
+            let ahead = args.iter().any(|a| a == "--ahead");
+            let back = args.iter().any(|a| a == "--back");
+            ensure!(ahead != back, "give --ahead or --back");
+            ("workflow_run_requeue", json!({"run":id(2)?,"ahead":ahead}))
         }
         (Some("repositories"), _) => {
             let mut body =
@@ -1921,6 +2144,9 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
             )
             .await
         }
+        ("launcher", Some("stop")) => {
+            call("variable_launcher_stop", json!({"id":word(3)?}), None, true).await
+        }
         ("launcher", Some("define")) => {
             let env = pairs(options(args, "--env"), |v| Some(v.to_owned()), "--env")?;
             let program = option(args, "--program").context("--program is required")?;
@@ -1942,56 +2168,7 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
             call("variable_launcher_define", body, None, true).await
         }
         ("launcher", Some("approve")) => {
-            let name = word(3)?;
-            let listed = call("variable_consumer_list", json!({}), None, true).await?;
-            if !listed.ok {
-                return Ok(listed);
-            }
-            let Some(launcher) = listed.data["launchers"]
-                .as_array()
-                .and_then(|all| all.iter().find(|l| l["id"] == name))
-            else {
-                return Ok(Reply::error(
-                    "invalid_input",
-                    2,
-                    "There is no launcher with that name on this machine.",
-                ));
-            };
-            let digest = launcher["digest"].as_str().unwrap_or_default();
-            // A digest given is the one the user reviewed: a definition changed since is refused.
-            let digest = option(args, "--digest").unwrap_or(digest);
-            let variables: Vec<String> = launcher["variables"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|v| {
-                    let named = v["variable"]["name"].as_str().or(v["id"].as_str());
-                    format!(
-                        "{}={}",
-                        v["env"].as_str().unwrap_or_default(),
-                        named.unwrap_or_default()
-                    )
-                })
-                .collect();
-            if let Some(reply) = unconfirmed(
-                args,
-                format!(
-                    "Approve launcher {name}: program {} (SHA-256 {digest}) with arguments {} in {}, receiving the variables {} as environment variables whenever it runs?",
-                    launcher["program"],
-                    launcher["args"],
-                    launcher["directory"],
-                    serde_json::to_string(&variables)?
-                ),
-            ) {
-                return Ok(reply);
-            }
-            call(
-                "variable_launcher_approve",
-                json!({"id":name,"digest":digest}),
-                None,
-                true,
-            )
-            .await
+            approve_launcher(args, |method, body| call(method, body, None, true)).await
         }
         ("launcher", Some("run")) => {
             let name = word(3)?;
@@ -2026,6 +2203,69 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
         ("key", Some("rotate")) => call("variable_key_rotate", json!({}), None, true).await,
         _ => anyhow::bail!("unknown command or invalid argument count"),
     }
+}
+/// `variables launcher approve NAME [--digest SHA256]`: shows the definition the host lists and,
+/// once confirmed, approves it by digest; a pinned digest is the one the user reviewed.
+pub(super) async fn approve_launcher<F, Fut>(args: &[String], send: F) -> Result<Reply>
+where
+    F: Fn(&'static str, Value) -> Fut,
+    Fut: std::future::Future<Output = Result<Reply>>,
+{
+    let name = words(args)
+        .get(3)
+        .copied()
+        .context("missing argument; consult --help")?;
+    let listed = send("variable_consumer_list", json!({})).await?;
+    if !listed.ok {
+        return Ok(listed);
+    }
+    let Some(launcher) = listed.data["launchers"]
+        .as_array()
+        .and_then(|all| all.iter().find(|l| l["id"] == name))
+    else {
+        return Ok(Reply::error(
+            "invalid_input",
+            2,
+            "There is no launcher with that name on this machine.",
+        ));
+    };
+    // A digest given is the one the user reviewed: a definition changed since is refused.
+    let digest = option(args, "--digest").map_or_else(
+        || launcher["digest"].as_str().unwrap_or_default().to_owned(),
+        str::to_ascii_lowercase,
+    );
+    let variables: Vec<String> = launcher["variables"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|v| {
+            let named = v["variable"]["name"].as_str().or(v["id"].as_str());
+            format!(
+                "{}={}",
+                v["env"].as_str().unwrap_or_default(),
+                named.unwrap_or_default()
+            )
+        })
+        .collect();
+    let limit = launcher["timeout_seconds"].as_u64();
+    if let Some(reply) = unconfirmed(
+        args,
+        format!(
+            "Approve launcher {name}: program {} (SHA-256 {digest}) with arguments {} in {}, receiving the variables {} as environment variables whenever it runs, and stopped after {} seconds at the latest?",
+            launcher["program"],
+            launcher["args"],
+            launcher["directory"],
+            serde_json::to_string(&variables)?,
+            launcher["timeout_seconds"]
+        ),
+    ) {
+        return Ok(reply);
+    }
+    send(
+        "variable_launcher_approve",
+        json!({"id":name,"digest":digest,"timeout_seconds":limit}),
+    )
+    .await
 }
 fn positional(args: &[String], index: usize) -> Result<&str> {
     args.get(index)
@@ -2126,12 +2366,16 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | "--adopt"
             | "--mine"
             | "--forget-service-token"
-            | "--director" => {}
+            | "--director"
+            | "--ahead"
+            | "--back"
+            | "--audit" => {}
             "--destination" | "--name" | "--existing" | "--to" | "--target" | "--label"
             | "--token-expires" | "--keep" | "--machine" | "--since" | "--until" | "--before"
             | "--from" | "--chat" | "--query" | "--wiki" | "--author" | "--project"
             | "--organization" | "--workflow" | "--state" | "--send" | "--mention"
-            | "--text-file" | "--summary" | "--image" | "--alt" => {
+            | "--text-file" | "--summary" | "--image" | "--alt" | "--note" | "--note-file"
+            | "--sessions" => {
                 i += 1;
                 ensure!(
                     args.get(i)
@@ -2176,6 +2420,14 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
                 ensure!(
                     args.get(i).is_some_and(|v| v.parse::<u64>().is_ok()),
                     "invalid timeout"
+                );
+            }
+            "--digest" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())),
+                    "invalid SHA-256 digest"
                 );
             }
             "--expected-version" => {
@@ -2318,7 +2570,7 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | [
                 "variables",
                 "launcher",
-                "define" | "approve" | "remove" | "run",
+                "define" | "approve" | "remove" | "run" | "stop",
                 _
             ]
             | [
@@ -2394,7 +2646,7 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | ["repos", "list"]
             | ["repos", "add" | "edit" | "clone", _, _]
             | ["repos", "remove" | "sync", _]
-            | ["sources", "list" | "add"]
+            | ["sources", "list" | "add" | "sessions"]
             | [
                 "sources",
                 "show" | "edit" | "remove" | "enable" | "disable" | "audience",
@@ -2433,10 +2685,21 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | ["contexts", "show" | "edit" | "remove", _]
             | ["workflows", "list" | "save" | "repositories" | "settings"]
             | ["workflows", "classify", _]
-            | ["workflows", "runs"]
-            | ["workflows", "run" | "status" | "resume" | "cancel", _]
+            | ["workflows", "runs" | "pause" | "unpause"]
+            | [
+                "workflows",
+                "run" | "status" | "resume" | "cancel" | "restart",
+                _
+            ]
             | ["workflows", "assign", _, _]
-            | ["workflows", "summary", _]
+            | [
+                "workflows",
+                "summary" | "supervise" | "supervision" | "requeue",
+                _
+            ]
+            | ["workflows", "act" | "dismiss", _, _, _]
+            | ["workflows", "audits"]
+            | ["workflows", "audits", _]
             | ["workflows", "show" | "remove" | "enable" | "disable", _]
             | ["workflows", "blocks", "list" | "save"]
             | ["workflows", "blocks", "remove", _]
@@ -2446,6 +2709,9 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | ["index", "status" | "refresh"]
             | ["index", "refresh", _]
     );
+    // An audit is asked without a run, a look with one.
+    let valid = valid
+        || (p.as_slice() == ["workflows", "supervise"] && args.iter().any(|a| a == "--audit"));
     ensure!(valid, "unknown command or invalid argument count");
     for (flag, allowed) in [
         ("--offline", p[0] == "doctor"),
@@ -2523,7 +2789,15 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
                     p.as_slice(),
                     [
                         "workflows",
-                        "run" | "resume" | "cancel" | "assign" | "summary",
+                        "run"
+                            | "resume"
+                            | "cancel"
+                            | "assign"
+                            | "summary"
+                            | "restart"
+                            | "pause"
+                            | "unpause"
+                            | "act",
                         ..
                     ]
                 )
@@ -2648,7 +2922,8 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             ["audit", "logs", "notes", "variables"].contains(&p[0])
                 || (p[0] == "teams" && p.get(1) != Some(&"send"))
                 || p.as_slice().starts_with(&["azure", "wiki", "search"])
-                || p.as_slice() == ["workflows", "runs"],
+                || p.as_slice() == ["workflows", "runs"]
+                || p.as_slice() == ["sources", "sessions"],
         ),
         (
             "--offset",
@@ -2676,7 +2951,8 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             "--since",
             p.as_slice().starts_with(&["teams", "messages"])
                 || p.as_slice().starts_with(&["teams", "search"])
-                || p.as_slice() == ["audit", "list"],
+                || p.as_slice() == ["audit", "list"]
+                || p.as_slice() == ["workflows", "supervise"],
         ),
         (
             "--until",
@@ -2691,7 +2967,11 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice() == ["audit", "list"],
         ),
         ("--mine", p.as_slice() == ["teams", "messages"]),
-        ("--chat", p.as_slice().starts_with(&["teams", "search"])),
+        (
+            "--chat",
+            p.as_slice().starts_with(&["teams", "search"])
+                || matches!(p.as_slice(), ["workflows", "act", _, _, _]),
+        ),
         ("--from", p.as_slice().starts_with(&["teams", "search"])),
         (
             "--source",
@@ -2716,12 +2996,39 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
         ),
         ("--state", p.as_slice() == ["workflows", "runs"]),
         (
+            "--note",
+            matches!(
+                p.as_slice(),
+                ["workflows", "restart", _] | ["workflows", "act", _, _, _]
+            ),
+        ),
+        (
+            "--note-file",
+            matches!(
+                p.as_slice(),
+                ["workflows", "restart", _] | ["workflows", "act", _, _, _]
+            ),
+        ),
+        (
+            "--ahead",
+            matches!(p.as_slice(), ["workflows", "requeue", _]),
+        ),
+        ("--audit", p.as_slice() == ["workflows", "supervise"]),
+        (
+            "--back",
+            matches!(p.as_slice(), ["workflows", "requeue", _]),
+        ),
+        ("--sessions", p.as_slice() == ["workflows", "pause"]),
+        (
             "--send",
             matches!(p.as_slice(), ["workflows", "summary", _]),
         ),
         (
             "--mention",
-            matches!(p.as_slice(), ["workflows", "summary", _]),
+            matches!(
+                p.as_slice(),
+                ["workflows", "summary", _] | ["workflows", "act", _, _, _]
+            ),
         ),
         ("--image", matches!(p.as_slice(), ["teams", "send", _])),
         ("--alt", matches!(p.as_slice(), ["teams", "send", _])),
@@ -2745,7 +3052,7 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
                 p.as_slice(),
                 [
                     "workflows",
-                    "repositories" | "settings" | "classify" | "run",
+                    "repositories" | "settings" | "classify" | "run" | "pause" | "unpause",
                     ..
                 ]
             ),
@@ -2884,7 +3191,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"workflows_support":true,"workflow_director_support":true,"workflow_runs_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true,"teams_read_support":true,"teams_images_support":true,"audit_pages_support":true,"service_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"workflows_support":true,"workflow_director_support":true,"workflow_runs_support":true,"workflow_supervisor_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true,"teams_read_support":true,"teams_images_support":true,"audit_pages_support":true,"service_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -3020,6 +3327,18 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             }
             _ => call("answer_send", json!({"resource":resource}), None, true).await,
         };
+    }
+    if command == "sources" && action == "sessions" {
+        let limit = option(&args, "--limit")
+            .map(|v| v.parse::<u64>().context("invalid limit"))
+            .transpose()?;
+        return call(
+            "implementation_recent_sessions",
+            json!({"limit":limit}),
+            None,
+            true,
+        )
+        .await;
     }
     if ["notes", "knowledge", "index"].contains(&command) {
         let flag = |name: &str| {
@@ -4293,8 +4612,91 @@ mod wiki_tests {
                 "--organization",
                 "https://dev.azure.com/x",
             ],
+            &["workflows", "restart"],
+            &["workflows", "restart", "r", "--sessions", "stop"],
+            &["workflows", "restart", "r", "--note"],
+            &["workflows", "resume", "r", "--note", "done"],
+            &["workflows", "pause", "r", "--sessions", "stop"],
+            &["workflows", "pause", "--sessions"],
+            &["workflows", "pause", "--note", "x", "--sessions", "stop"],
+            &["workflows", "unpause", "--sessions", "finish"],
+            &["workflows", "supervise"],
+            &["workflows", "supervise", "r", "--note", "x"],
+            &["workflows", "supervise", "r", "--audit"],
+            &["workflows", "audits", "a", "b"],
+            &["workflows", "runs", "--audit"],
+            &["workflows", "act", "r", "look"],
+            &["workflows", "dismiss", "r", "look", "a1", "--confirmed"],
+            &["workflows", "requeue", "r", "--confirmed"],
+            &["workflows", "status", "r", "--ahead"],
+            &["workflows", "summary", "r", "--chat", "19:x"],
         ] {
             assert!(check(args).is_err(), "{args:?}");
+        }
+        for args in [
+            &["workflows", "supervise", "r"][..],
+            &["workflows", "supervision", "r"],
+            &[
+                "workflows",
+                "act",
+                "r",
+                "look",
+                "a1",
+                "--chat",
+                "19:x",
+                "--mention",
+                "Ana",
+                "--confirmed",
+            ],
+            &[
+                "workflows",
+                "act",
+                "r",
+                "look",
+                "restart",
+                "--note-file",
+                "n.md",
+            ],
+            &["workflows", "dismiss", "r", "look", "a2"],
+            &["workflows", "supervise", "--audit"],
+            &[
+                "workflows",
+                "supervise",
+                "--audit",
+                "--since",
+                "2026-11-10T00:00:00Z",
+            ],
+            &["workflows", "audits"],
+            &["workflows", "audits", "latest"],
+            &["workflows", "requeue", "r", "--ahead"],
+            &["workflows", "requeue", "r", "--back"],
+        ] {
+            assert!(check(args).is_ok(), "{args:?}");
+        }
+        let body = settings_update(&[
+            ("supervisor.enabled".into(), "true".into()),
+            ("supervisor.model".into(), "sonnet".into()),
+            ("supervisor.looks_per_day".into(), "12".into()),
+        ])
+        .unwrap();
+        assert_eq!(
+            body,
+            json!({"supervisor":{"enabled":true,"model":"sonnet","looks_per_day":12}})
+        );
+        assert_eq!(
+            settings_update(&[("supervisor".into(), "none".into())]).unwrap(),
+            json!({"supervisor":null})
+        );
+        for bad in [
+            ("supervisor.enabled", "maybe"),
+            ("supervisor.colour", "red"),
+            ("supervisor.session_seconds", "long"),
+            ("supervisor", "off"),
+        ] {
+            assert!(
+                settings_update(&[(bad.0.into(), bad.1.into())]).is_err(),
+                "{bad:?}"
+            );
         }
         for args in [
             &[
@@ -4329,9 +4731,55 @@ mod wiki_tests {
             &["workflows", "resume", "r", "--confirmed"],
             &["workflows", "cancel", "r", "--confirmed"],
             &["workflows", "assign", "r", "payments", "--confirmed"],
+            &["workflows", "restart", "r", "--confirmed"],
+            &[
+                "workflows",
+                "restart",
+                "r",
+                "--note",
+                "Branch pushed; open the pull request.",
+                "--confirmed",
+            ],
+            &["workflows", "restart", "r", "--note-file", "note.md"],
+            &["workflows", "pause", "--sessions", "finish", "--confirmed"],
+            &[
+                "workflows",
+                "pause",
+                "--project",
+                "Payments",
+                "--sessions",
+                "stop",
+            ],
+            &["workflows", "unpause", "--confirmed"],
+            &[
+                "workflows",
+                "unpause",
+                "--project",
+                "Payments",
+                "--confirmed",
+            ],
         ] {
             assert!(check(args).is_ok(), "{args:?}");
         }
+    }
+    #[test]
+    fn a_handover_note_file_is_read_here_and_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("note.md");
+        std::fs::write(
+            &note,
+            "Hecho: la rama está publicada.\nFalta: abrir el pull request.",
+        )
+        .unwrap();
+        assert_eq!(
+            note_file(note.to_str().unwrap()).unwrap(),
+            "Hecho: la rama está publicada.\nFalta: abrir el pull request."
+        );
+        std::fs::write(&note, "x".repeat(NOTE_FILE_BYTES as usize + 1)).unwrap();
+        assert!(note_file(note.to_str().unwrap()).is_err());
+        std::fs::write(&note, [0xff, 0xfe]).unwrap();
+        assert!(note_file(note.to_str().unwrap()).is_err());
+        assert!(note_file(dir.path().join("missing").to_str().unwrap()).is_err());
     }
     #[test]
     fn workflow_settings_changes_become_one_update() {
@@ -4730,5 +5178,22 @@ mod help_tests {
             Some("Assistant running.")
         );
         assert!(human("config show", &json!({})).is_none());
+    }
+
+    #[test]
+    fn an_update_that_waits_for_its_release_archive_says_so() {
+        let waiting = json!({"outcome": "staging", "target": "0.12.22", "machine": "Windows",
+            "waiting_for_archive": {"version": "0.12.22"}});
+        let text = human("update", &waiting).unwrap();
+        assert!(
+            text.starts_with("Version 0.12.22 is published, but its archive for machine Windows is not attached to the release yet."),
+            "{text}"
+        );
+        let preparing = json!({"outcome": "staging", "target": "0.12.22"});
+        assert!(
+            human("update", &preparing)
+                .unwrap()
+                .starts_with("Preparing version 0.12.22 on this computer")
+        );
     }
 }

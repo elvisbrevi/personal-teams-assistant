@@ -1,7 +1,8 @@
 // Settings › Workflows: the ready states and own director of each project, the watcher's
 // interval, how many runs advance at once, the pull-request wait and the account's workflow
 // director (`workflow_settings`, `workflow_settings_update`), and which director each project
-// gets and where it comes from (`directors`). Its edits are unsaved Settings edits like any other category's:
+// gets and where it comes from (`directors`), and the workflow supervisor (on or off, its machine,
+// agent and bounds). Its edits are unsaved Settings edits like any other category's:
 // the save bar saves them (`saveWorkflowSettings`) after the profile, and Discard drops them.
 import { t, tn, tx, uiLocale } from './i18n.js';
 import { invoke } from './control.js';
@@ -23,6 +24,8 @@ let form = null;
 let pending = false;
 /** The director is sent only when the person changed it, never because a catalog filled it in. */
 let directorTouched = false;
+/** The supervisor's agent is sent only when the person changed it. */
+let supervisorTouched = false;
 /** The projects whose own director the person changed (`projectKey`). */
 const projectDirectorsTouched = new Set();
 let machines = [];
@@ -34,10 +37,20 @@ let loadGeneration = 0;
 const FIELDS = [['#workflow-interval', 'watch_interval_minutes'], ['#workflow-concurrency', 'concurrency'], ['#workflow-pr-wait', 'pull_request_wait_days']];
 const FALLBACK = { watch_interval_minutes: [1, 60], concurrency: [1, 4], pull_request_wait_days: [1, 60] };
 const range = field => workflowSettings?.bounds?.[field] ?? FALLBACK[field];
+/** The supervisor's numbers and their host field. */
+const SUPERVISOR_FIELDS = [['#workflow-supervisor-looks', 'looks_per_day'], ['#workflow-supervisor-interval', 'min_interval_minutes'],
+  ['#workflow-supervisor-wait', 'wait_hours'], ['#workflow-supervisor-offline', 'offline_minutes'], ['#workflow-supervisor-seconds', 'session_seconds']];
+const SUPERVISOR_FALLBACK = { looks_per_day: [1, 100], min_interval_minutes: [10, 1440], wait_hours: [1, 48], offline_minutes: [5, 240], session_seconds: [60, 600] };
+const supervisorRange = field => workflowSettings?.bounds?.supervisor?.[field] ?? SUPERVISOR_FALLBACK[field];
 const RANGE_TEXT = {
   watch_interval_minutes: bounds => t('Check every {min} to {max} minutes.', bounds),
   concurrency: bounds => t('Let {min} to {max} runs advance at once.', bounds),
   pull_request_wait_days: bounds => t('Wait {min} to {max} days for pull requests.', bounds),
+  looks_per_day: bounds => t('Let the supervisor look {min} to {max} times a day.', bounds),
+  min_interval_minutes: bounds => t('Leave {min} to {max} minutes between two looks at a run.', bounds),
+  wait_hours: bounds => t('Look at a waiting run after {min} to {max} hours.', bounds),
+  offline_minutes: bounds => t('Look after a machine is unseen for {min} to {max} minutes.', bounds),
+  session_seconds: bounds => t('Give a look {min} to {max} seconds.', bounds),
 };
 
 const message = error => tx(String(error?.message ?? error));
@@ -59,7 +72,9 @@ function resetForm() {
   form = structuredClone(workflowSettings.settings);
   form.ready_states ??= [];
   form.project_directors ??= [];
+  form.supervisor ??= structuredClone(workflowSettings.defaults?.supervisor ?? {});
   directorTouched = false;
+  supervisorTouched = false;
   projectDirectorsTouched.clear();
 }
 
@@ -133,10 +148,10 @@ function directorLine(project) {
  * A machine and its CLI, model and effort for one director (`director` is edited in place); an
  * empty machine means none. `touched` runs when the person changes it.
  * @param {{ machine: string, provider: string, model: string, effort: string }} director
- * @param {{ editable: boolean, empty: string, touched: () => void,
+ * @param {{ editable: boolean, empty: string, touched: () => void, where?: string,
  *   ids?: { machine?: string, provider?: string, model?: string, effort?: string } }} options
  */
-function directorPicker(director, { editable, empty, ids = {}, touched }) {
+function directorPicker(director, { editable, empty, ids = {}, touched, where = t('Where the director\'s CLI runs.') }) {
   const machine = el('select', { id: ids.machine, disabled: !editable }, el('option', { value: '', textContent: empty }),
     ...machines.map(m => el('option', { value: m.id, textContent: `${m.name} · ${m.os}${m.online ? '' : ` · ${t('Offline')}`}` })));
   machine.value = director.machine ?? '';
@@ -168,7 +183,7 @@ function directorPicker(director, { editable, empty, ids = {}, touched }) {
   };
   machine.onchange = () => { director.machine = machine.value; touched(); load(); };
   load();
-  return [el('label', {}, t('Machine'), ' ', el('small', { textContent: t('Where the director\'s CLI runs.') }), machine),
+  return [el('label', {}, t('Machine'), ' ', el('small', { textContent: where }), machine),
     el('label', {}, t('CLI'), selects.provider), el('label', {}, t('Model'), selects.model), el('label', {}, t('Effort'), selects.effort), note];
 }
 
@@ -233,7 +248,7 @@ function renderWorkflowSettings({ director = true } = {}) {
     input.oninput = () => { form[field] = Number(input.value); edited(); };
   }
   renderWatcher(workflowSettings.watcher);
-  if (director) renderDirector(editable);
+  if (director) { renderDirector(editable); renderSupervisor(editable); }
 }
 
 /** What the watcher on this computer is doing and its last poll since the host started. */
@@ -253,6 +268,10 @@ function renderWatcher(watcher) {
       lines.push(poll.started
         ? tn(poll.started, 'Last check at {time}: 1 run started.', 'Last check at {time}: {n} runs started.', { time: when(poll.at) })
         : t('Last check at {time}: nothing new.', { time: when(poll.at) }));
+      const seen = poll.seen_by_category;
+      if (seen && (seen.requirement || seen.bug || seen.task)) {
+        lines.push(t('Items seen in that check: HUs {hu}, bugs {bug}, tasks {task}.', { hu: seen.requirement ?? 0, bug: seen.bug ?? 0, task: seen.task ?? 0 }));
+      }
       if (poll.partial) lines.push(t('Part of what it reads was not covered in that check; it continues at the next one.'));
       for (const project of poll.projects ?? []) {
         if (project.skipped && !project.waiting_for_director) lines.push(`${project.project}: ${tx(project.skipped)}`);
@@ -271,6 +290,28 @@ function renderDirector(editable) {
     touched: () => { directorTouched = true; edited(); } }));
 }
 
+/** The supervisor: on or off, its machine and agent (the director's picker) and its bounds. */
+function renderSupervisor(editable) {
+  const supervisor = form.supervisor;
+  for (const field of ['machine', 'provider', 'model', 'effort']) supervisor[field] ??= '';
+  // The picker edits the supervisor's agent fields in place, as it does the director's.
+  $('#workflow-supervisor').replaceChildren(...directorPicker(supervisor, { editable, empty: t('No supervisor yet'), where: t('Where the supervisor\'s CLI runs.'),
+    ids: { machine: 'workflow-supervisor-machine', provider: 'workflow-supervisor-provider', model: 'workflow-supervisor-model', effort: 'workflow-supervisor-effort' },
+    touched: () => { supervisorTouched = true; edited(); } }));
+  const enabled = /** @type {HTMLInputElement} */ ($('#workflow-supervisor-enabled'));
+  enabled.checked = Boolean(supervisor.enabled);
+  enabled.disabled = !editable;
+  enabled.onchange = () => { supervisor.enabled = enabled.checked; edited(); };
+  for (const [id, field] of SUPERVISOR_FIELDS) {
+    const [min, max] = supervisorRange(field);
+    const input = /** @type {HTMLInputElement} */ ($(id));
+    input.value = String(supervisor[field] ?? '');
+    input.min = String(min); input.max = String(max);
+    input.disabled = !editable;
+    input.oninput = () => { supervisor[field] = Number(input.value); edited(); };
+  }
+}
+
 /** What would be refused, checked before the save bar writes anything; it opens the category. */
 function checkWorkflowSettings() {
   if (!pending || !form) return;
@@ -278,6 +319,12 @@ function checkWorkflowSettings() {
     const [min, max] = range(field);
     return !Number.isInteger(form[field]) || form[field] < min || form[field] > max;
   }).map(field => { const [min, max] = range(field); return RANGE_TEXT[field]({ min, max }); });
+  for (const [, field] of SUPERVISOR_FIELDS) {
+    const [min, max] = supervisorRange(field);
+    const value = form.supervisor?.[field];
+    if (!Number.isInteger(value) || value < min || value > max) wrong.push(RANGE_TEXT[field]({ min, max }));
+  }
+  if (form.supervisor?.enabled && !form.supervisor.machine) wrong.push(t('Choose the supervisor\'s machine and agent before turning it on.'));
   if (!wrong.length) return;
   showTab('settings', 'panel-workflow-watcher');
   $('#workflow-settings-problem').hidden = false;
@@ -313,6 +360,18 @@ async function saveWorkflowSettings() {
     return JSON.stringify(director) === JSON.stringify(stored) ? null : { organization: p.organization, project: p.project, director };
   }).filter(Boolean);
   if (projectDirectors.length) args.project_directors = projectDirectors;
+  // The supervisor: only the fields that changed; its agent only when the person changed it.
+  const supervisor = {};
+  const before = saved.supervisor ?? workflowSettings.defaults?.supervisor ?? {};
+  for (const field of ['enabled', ...SUPERVISOR_FIELDS.map(([, f]) => f)]) {
+    if (form.supervisor?.[field] !== before[field]) supervisor[field] = form.supervisor[field];
+  }
+  if (supervisorTouched) {
+    for (const field of ['machine', 'provider', 'model', 'effort']) {
+      if ((form.supervisor?.[field] ?? '') !== (before[field] ?? '')) supervisor[field] = form.supervisor[field];
+    }
+  }
+  if (Object.keys(supervisor).length) args.supervisor = supervisor;
   if (Object.keys(args).length) {
     try {
       const reply = await invoke('workflow_settings_update', args);
@@ -367,6 +426,7 @@ function projectsWaitingForDirector() {
 
 $('#workflow-settings-refresh').onclick = () => busy($('#workflow-settings-refresh'), loadWorkflowSettings);
 $('#workflow-director-prompt').onclick = () => showAgentPrompt('direct');
+$('#workflow-supervisor-prompt').onclick = () => showAgentPrompt('supervise');
 
 export {
   workflowSettings, loadWorkflowSettings, ensureWorkflowSettings, projectsWithoutReadyState, projectsWaitingForDirector, checkWorkflowSettings,

@@ -12,6 +12,9 @@ type Stream = tokio::net::UnixStream;
 #[cfg(windows)]
 type Stream = tokio::net::windows::named_pipe::NamedPipeClient;
 
+/// How long naming a thread may delay its run.
+const NAME_WAIT: Duration = Duration::from_secs(5);
+
 pub(super) struct Client {
     ws: WebSocketStream<Stream>,
     pending: VecDeque<Value>,
@@ -194,12 +197,14 @@ impl Client {
         }
         Ok(params)
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute(
         mut self,
         choice: (&str, &str),
         directories: &[PathBuf],
         prompt: &str,
         schema: Option<Value>,
+        name: &SessionName,
         observer: SessionObserver<'_>,
         remote: mobile::Observer,
     ) -> Result<Outcome> {
@@ -213,6 +218,16 @@ impl Client {
             .ok_or_else(|| anyhow::anyhow!("Codex did not report a thread ID."))?
             .to_owned();
         uuid::Uuid::parse_str(&thread)?;
+        // The thread's name in the person's session list; a Codex without thread names refuses
+        // it and the run goes on unnamed.
+        let _ = tokio::time::timeout(
+            NAME_WAIT,
+            self.rpc(
+                "thread/name/set",
+                json!({"threadId":thread,"name":name.as_str()}),
+            ),
+        )
+        .await;
         observer(None)?;
         observer(Some(&thread))?;
         self.access.session_id = Some(thread.clone());
@@ -251,15 +266,24 @@ impl Client {
                 }
                 if method == "turn/completed" && p["turn"]["id"] == turn_id {
                     interrupt.complete = true;
-                    return Ok::<_, anyhow::Error>(p["turn"]["status"] == "completed" && !text.trim().is_empty());
+                    return Ok::<_, anyhow::Error>(p["turn"]["status"] == "completed");
                 }
             }
         }).await;
         // At the limit the turn is interrupted (`Interrupt`) and the run records why.
-        let Ok(ok) = ok else {
-            return Outcome::redacted(false, LIMIT_REACHED, &prompts);
+        let Ok(completed) = ok else {
+            return Ok(Outcome::redacted(false, LIMIT_REACHED, &prompts)?
+                .because(Failure::of(Cause::Timeout)));
         };
-        Outcome::redacted(ok?, &text, &prompts)
+        let completed = completed?;
+        let ok = completed && !text.trim().is_empty();
+        Ok(
+            Outcome::redacted(ok, &text, &prompts)?.because(Failure::of(if completed {
+                Cause::NoReport
+            } else {
+                Cause::AgentError
+            })),
+        )
     }
 }
 /// Server requests of the app-server protocol that wait for a person: approvals, questions and
@@ -458,6 +482,7 @@ mod tests {
                     "initialized" => continue,
                     "initialize" => json!({}),
                     "thread/start" => json!({"thread":{"id":THREAD}}),
+                    "thread/name/set" => json!({}),
                     "turn/start" => json!({"turn":{"id":"active-turn"}}),
                     _ => panic!("Unexpected {method}"),
                 };
@@ -513,6 +538,7 @@ mod tests {
                     &[directory],
                     "Synthetic task",
                     None,
+                    &SessionName::default(),
                     &|_| Ok(()),
                     std::sync::Arc::new(|_| Ok(())),
                 )
@@ -536,6 +562,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut named = false;
             while let Some(Ok(Message::Text(message))) = ws.next().await {
                 let request: Value = serde_json::from_str(&message).unwrap();
                 let method = request["method"].as_str().unwrap();
@@ -560,7 +587,17 @@ mod tests {
                         );
                         json!({"thread":{"id":THREAD}})
                     }
+                    "thread/name/set" => {
+                        assert_eq!(request["params"]["threadId"], THREAD);
+                        assert_eq!(
+                            request["params"]["name"],
+                            "Teams Assistant - new user story"
+                        );
+                        named = true;
+                        json!({})
+                    }
                     "turn/start" => {
+                        assert!(named, "The thread is named before its turn.");
                         assert_eq!(request["params"]["threadId"], THREAD);
                         assert_eq!(request["params"]["effort"], "low");
                         assert!(request["params"]["outputSchema"].is_object());
@@ -605,6 +642,7 @@ mod tests {
                 &[root.path().into()],
                 "Synthetic request",
                 Some(json!({"type":"object"})),
+                &SessionName::request("hu"),
                 &|id| {
                     if let Some(id) = id {
                         *native.lock().unwrap() = id.into();
@@ -654,6 +692,17 @@ mod tests {
                         assert_eq!(request["params"]["approvalPolicy"], "never");
                         json!({"thread":{"id":THREAD}})
                     }
+                    // A Codex without thread names: the run goes on unnamed.
+                    "thread/name/set" => {
+                        ws.send(Message::Text(
+                            json!({"id":request["id"],"error":{"code":-32601,"message":"Method not found"}})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                        continue;
+                    }
                     "turn/start" => json!({"turn":{"id":"turn-1"}}),
                     _ => panic!("Unexpected method {method}"),
                 };
@@ -679,6 +728,7 @@ mod tests {
                 &[root.path().into()],
                 "Synthetic task",
                 None,
+                &SessionName::item(4211, "Fix rounding"),
                 &|_| Ok(()),
                 std::sync::Arc::new(|_| Ok(())),
             )

@@ -18,6 +18,7 @@ pub(super) mod login;
 mod management;
 pub(super) mod paths;
 mod requests;
+pub(super) mod sessions;
 mod store;
 pub(super) use fleet::register;
 pub(crate) use store::Database;
@@ -84,6 +85,17 @@ struct Machine {
     /// Whether its last poll said another device may ask it to update itself (`machine_upgrade`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     upgrade: bool,
+    /// Whether its last poll said it summarizes its agent sessions (`agent_sessions_local`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    agent_sessions: bool,
+    /// Whether its last poll said a director's call may carry the item for the session's name
+    /// (`session_names_support`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    session_names: bool,
+    /// Whether its last poll said it runs the workflow supervisor's looks (`workflow_direct`
+    /// with `task: "supervise"` and its own session bound).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    workflow_supervise: bool,
 }
 impl Machine {
     /// Trusted and seen in its last polls (a worker polls every two seconds).
@@ -308,6 +320,10 @@ pub(crate) struct Run {
     /// The permission prompts the CLI still raised and nobody answered (bounded, redacted).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) prompts: Vec<String>,
+    /// Why a run that did not end with its answer ended so, chosen in code on its machine
+    /// (`llm::implementation::Failure`); none in a record from an older host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) failure: Option<crate::llm::implementation::Failure>,
 }
 /// The final state of a coding run that stopped on a permission prompt, recorded with its text
 /// so its cause can be removed; distinct from `needs_attention`.
@@ -329,6 +345,10 @@ struct SessionSummary {
     created_at: String,
     started_at: Option<String>,
     finished_at: Option<String>,
+    /// Why the run did not end with its answer. Sent to a coordinator only when it says it
+    /// reads the field (`session_failure_support`): an older one refuses unknown fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure: Option<crate::llm::implementation::Failure>,
 }
 impl From<Run> for SessionSummary {
     fn from(run: Run) -> Self {
@@ -347,6 +367,7 @@ impl From<Run> for SessionSummary {
             created_at: run.created_at,
             started_at: run.started_at,
             finished_at: run.finished_at,
+            failure: run.failure,
         }
     }
 }
@@ -573,6 +594,10 @@ pub(super) struct MachineFacts {
     pub inspect: bool,
     /// It runs the workflow director (`workflow_direct`).
     pub direct: bool,
+    /// It runs the workflow supervisor's looks (`workflow_supervise_support`).
+    pub supervise: bool,
+    /// When it was last seen (Unix seconds); now for this installation.
+    pub seen: i64,
 }
 /// The machine `id` of this account, or none when it is unknown, revoked or another account's.
 pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<MachineFacts>> {
@@ -587,6 +612,8 @@ pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<M
             roots: own_roots,
             inspect: true,
             direct: true,
+            supervise: true,
+            seen: now(),
         }));
     }
     Ok(data
@@ -600,7 +627,50 @@ pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<M
             roots: m.roots.clone(),
             inspect: m.checkout_inspect,
             direct: m.workflow_direct,
+            supervise: m.workflow_supervise,
+            seen: m.seen,
         }))
+}
+/// The account's other machines whose last poll did not say they run the workflow supervisor
+/// (`workflow_supervise_support`), by name: a version that predates it, which refuses the
+/// account's map once the supervisor's settings are not their defaults.
+pub(in crate::app) async fn machines_before_supervisor(host: &Arc<Host>) -> Result<Vec<String>> {
+    let version = management::version(host)?;
+    let data = host.state.implementation.registry.lock().await;
+    Ok(data
+        .machines
+        .iter()
+        .filter(|m| {
+            !m.revoked && m.id != data.id && m.account_version == version && !m.workflow_supervise
+        })
+        .map(|m| m.name.clone())
+        .collect())
+}
+/// The account's trusted machines whose host runs `until` or an older release, or reports no
+/// version (hosts older than the reports), as `name (version)`.
+pub(super) async fn machines_until(host: &Arc<Host>, until: &str) -> Result<Vec<String>> {
+    use crate::maintenance::Version;
+    let version = management::version(host)?;
+    let until = Version::parse(until).context("Invalid release.")?;
+    let data = host.state.implementation.registry.lock().await;
+    Ok(data
+        .machines
+        .iter()
+        .filter(|m| !m.revoked && m.account_version == version)
+        .filter(|m| {
+            m.host_version
+                .as_deref()
+                .and_then(Version::parse)
+                .is_none_or(|v| v <= until)
+        })
+        .map(|m| {
+            format!(
+                "{} ({})",
+                m.name,
+                m.host_version.as_deref().unwrap_or("unknown version")
+            )
+        })
+        .collect())
 }
 /// The one-shot calls a workflow save makes on its machine: its installed CLIs and a checkout.
 pub(super) async fn machine_call(
@@ -662,6 +732,7 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
         | "implementation_request_status"
         | "implementation_history" => requests::operate(host, method, args).await,
         "implementation_sessions" => fleet::session_index(host, args).await,
+        "implementation_recent_sessions" => sessions::operate(host, args).await,
         "implementation_mobile_session" => {
             ensure!(
                 args["confirmed"] == true,
@@ -872,8 +943,10 @@ pub(super) struct Planned {
 pub(super) async fn launch_planned(host: &Arc<Host>, planned: Planned) -> Result<Value> {
     uuid(&planned.id)?;
     uuid(&planned.machine)?;
+    // A workflow's context is whole (`engine::fitted`); a worker reads it without a limit of
+    // its own, older ones included.
     ensure!(
-        planned.context.len() <= 32_000,
+        planned.context.chars().count() <= crate::workflows::MAX_CONTEXT,
         "Implementation context is too long."
     );
     let request = Start {
@@ -951,6 +1024,29 @@ pub(super) async fn test_creation(host: &Host, plan: &str, record: Value) {
     data.creations.insert(plan.into(), record);
     state.save(&data).unwrap();
 }
+/// The directories this machine gave a run, its working directory first (tests).
+#[cfg(all(test, unix))]
+pub(super) fn test_directories(host: &Host, id: &str) -> Vec<PathBuf> {
+    let run = host.state.implementation.db.get(id).unwrap().unwrap();
+    run.launch.request.directories
+}
+/// A machine of the account that polled once, saying whether it runs the workflow supervisor
+/// (tests).
+#[cfg(test)]
+pub(in crate::app) async fn test_worker(host: &Arc<Host>, name: &str, supervise: bool) -> String {
+    let worker = uuid::Uuid::new_v4().to_string();
+    let registration = fleet::register(host, &json!({"id":worker,"name":name,"os":"macos"}))
+        .await
+        .unwrap();
+    let token = registration["token"].as_str().unwrap().to_owned();
+    fleet::protocol(
+        host,
+        &json!({"id":worker,"token":token,"action":"poll","workflow_supervise_support":supervise}),
+    )
+    .await
+    .unwrap();
+    worker
+}
 /// End an in-flight run in `state` as its machine would record it (tests).
 #[cfg(all(test, unix))]
 pub(super) fn test_finish(host: &Host, id: &str, state: &str, output: &str) {
@@ -1022,6 +1118,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
     let state = &host.state.implementation;
     match method {
         "machine_browse" => browse_machine(host, args),
+        "agent_sessions_local" => sessions::local(host, args).await,
         "checkout_inspect" => {
             let allowed = roots(host).await?;
             checkout::inspect_all(&args["paths"], &allowed)
@@ -1064,11 +1161,14 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
             let mut runs = Vec::new();
             let mut size = 0;
             let mut partial = false;
+            let own = state.registry.lock().await.id.clone();
             for run in state
                 .db
                 .list(args["work_item_url"].as_str(), args["id"].as_str(), false)?
             {
-                let value = json!({"id":run.launch.id,"item":run.launch.detail.item,"planning":run.launch.planning,"state":run.state,"created_at":run.created_at,"started_at":run.started_at,"finished_at":run.finished_at,"session_id":run.session_id,"remote":run.remote,"provider":run.launch.request.provider,"model":run.launch.request.model,"effort":run.launch.request.effort,"machine":run.launch.request.machine,"output":run.output,"plan":run.plan,"permission_mode":run.permission_mode,"prompts":run.prompts});
+                let mut value = json!({"id":run.launch.id,"item":run.launch.detail.item,"planning":run.launch.planning,"state":run.state,"created_at":run.created_at,"started_at":run.started_at,"finished_at":run.finished_at,"session_id":run.session_id,"remote":run.remote,"provider":run.launch.request.provider,"model":run.launch.request.model,"effort":run.launch.request.effort,"machine":run.launch.request.machine,"output":run.output,"plan":run.plan,"permission_mode":run.permission_mode,"prompts":run.prompts,"failure":run.failure});
+                with_failure(&mut value);
+                mark_session(&mut value, &own).await;
                 size += serde_json::to_vec(&value)?.len();
                 if size > 800_000 && !runs.is_empty() {
                     partial = true;
@@ -1082,6 +1182,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
             let id = args["id"].as_str().context("Choose a run.")?;
             uuid(id)?;
             let run = state.db.get(id)?;
+            let session = run.as_ref().and_then(|run| run.session_id.clone());
             let task = state.tasks.lock().await.remove(id);
             if let Some(task) = task {
                 task.abort();
@@ -1096,7 +1197,18 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
                 // Keep the run active, and its directories reserved, until the daemon confirms stop.
                 crate::llm::implementation::mobile::cancel_codex(&session).await?;
             }
+            let _ = state.db.failure(
+                id,
+                &crate::llm::implementation::Failure::of(
+                    crate::llm::implementation::Cause::Cancelled,
+                ),
+            );
             LocalImplementation::new(&state.db).finish_run(id, "cancelled", "", None)?;
+            // A finished run's session kept after it (or opened again by the user) stops too:
+            // cancelling ends every process of the run.
+            if let Some(session) = session {
+                crate::llm::implementation::mobile::close(&session).await;
+            }
             Ok(json!({"cancelled":true}))
         }
         "implementation_launch" => {
@@ -1150,6 +1262,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
                 session_id: None,
                 started_at: None,
                 remote: None,
+                failure: None,
                 permission_mode: Some(
                     crate::llm::implementation::permission_mode(
                         &launch.request.provider,
@@ -1188,8 +1301,9 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
     let id = args["id"].as_str().context("Choose a recorded run.")?;
     uuid(id)?;
     let db = &host.state.implementation.db;
-    let (provider, model, effort, session, working, planning, active, reported) =
+    let (provider, model, effort, session, working, planning, active, reported, name) =
         if let Some(run) = db.get(id)? {
+            let name = run_name(&run.launch);
             let request = run.launch.request;
             ensure!(
                 request.machine == host.state.implementation.registry.lock().await.id,
@@ -1204,6 +1318,7 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
                 run.launch.planning,
                 ["running", "planning"].contains(&run.state.as_str()),
                 run.remote,
+                name,
             )
         } else {
             let record = db
@@ -1219,6 +1334,7 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
                 true,
                 record["state"] == "generating",
                 serde_json::from_value::<mobile::Access>(record["remote"].clone()).ok(),
+                recorded_name(&record),
             )
         };
     let session = session.context("The agent has not reported a session ID yet.")?;
@@ -1269,7 +1385,7 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
                 &session,
                 reported.as_ref().and_then(|r| r.session_id.as_deref()),
                 &working,
-                planning,
+                (planning, &name),
                 observer.clone(),
             )
             .await?;
@@ -1286,6 +1402,24 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
             Ok(json!({"remote":access,"pairing":pairing}))
         }
         _ => anyhow::bail!("Choose connect, pair or close for this mobile session."),
+    }
+}
+
+/// A coding or planning run's session name, from the work item the launch carries.
+fn run_name(launch: &Launch) -> crate::llm::implementation::SessionName {
+    let item = &launch.detail.item;
+    crate::llm::implementation::SessionName::item(item.id, &item.title)
+}
+/// The session name of a recorded request, classification or summary session.
+fn recorded_name(record: &Value) -> crate::llm::implementation::SessionName {
+    use crate::llm::implementation::{DirectTask, SessionName};
+    let item = record["item"]["id"].as_u64();
+    match record["purpose"].as_str() {
+        Some("request") => SessionName::request(record["kind"].as_str().unwrap_or_default()),
+        Some("classification") => DirectTask::Classify.session_name(item),
+        Some("summary") => DirectTask::Summarize.session_name(item),
+        Some("supervision") => DirectTask::Supervise.session_name(item),
+        _ => SessionName::default(),
     }
 }
 
@@ -1317,6 +1451,7 @@ async fn run(host: &Arc<Host>, launch: Launch) {
         host.state.implementation.db.session(&launch.id, session)
     };
     let remote = remote_observer(host, &launch.id);
+    let name = run_name(&launch);
     let result = if launch.planning {
         async {
             let plan = crate::llm::implementation::plan(
@@ -1324,6 +1459,7 @@ async fn run(host: &Arc<Host>, launch: Launch) {
                 &request.directories,
                 &instructions,
                 &input,
+                &name,
                 &observer,
                 remote.clone(),
             )
@@ -1336,7 +1472,7 @@ async fn run(host: &Arc<Host>, launch: Launch) {
             for child in children {
                 validate_child(child)?;
             }
-            Ok((true, String::new(), Some(plan), Vec::new()))
+            Ok((true, String::new(), Some(plan), Vec::new(), None))
         }
         .await
     } else {
@@ -1349,23 +1485,161 @@ async fn run(host: &Arc<Host>, launch: Launch) {
             &request.directories,
             &prompt,
             &launch.allow,
+            &name,
             &observer,
             remote,
         )
         .await
-        .map(|outcome| (outcome.ok, outcome.text, None, outcome.prompts))
+        .map(|outcome| {
+            let failure = outcome.failure;
+            (outcome.ok, outcome.text, None, outcome.prompts, failure)
+        })
     };
-    let (status, output, plan, prompts) = match result {
-        Ok((ok, output, plan, prompts)) => (final_state(ok, plan.is_some(), &prompts), output, plan, prompts),
-        Err(_) => ("failed", "The selected CLI did not complete. Check its login, permissions and model availability on the execution machine.".into(), None, Vec::new()),
+    use crate::llm::implementation::{Cause, Failure};
+    let (status, output, plan, prompts, failure) = match result {
+        Ok((ok, output, plan, prompts, failure)) => {
+            let status = final_state(ok, plan.is_some(), &prompts);
+            let failure = match status {
+                "done" | "plan_ready" => None,
+                PERMISSION_PROMPT => Some(Failure::of(Cause::PermissionPrompt)),
+                _ => Some(failure.unwrap_or(Failure::of(Cause::Unknown))),
+            };
+            (status, output, plan, prompts, failure)
+        }
+        // What the session's error carries; a plan that is not a valid child plan is an
+        // invalid answer. Its text is the cause's sentence, never the error's.
+        Err(error) => {
+            let failure = crate::llm::implementation::of_error(
+                &error,
+                if launch.planning {
+                    Cause::InvalidAnswer
+                } else {
+                    Cause::Unknown
+                },
+            );
+            (
+                "failed",
+                failure.sentence(),
+                None,
+                Vec::new(),
+                Some(failure),
+            )
+        }
     };
+    let db = &host.state.implementation.db;
     if authority::invocation(&host.state).is_ok_and(|i| i.scope.owner) {
-        let db = &host.state.implementation.db;
         if !prompts.is_empty() {
             let _ = db.prompts(&launch.id, &prompts);
         }
+        if let Some(failure) = &failure {
+            let _ = db.failure(&launch.id, failure);
+        }
         let _ = LocalImplementation::new(db).finish_run(&launch.id, status, &output, plan);
     }
+    // Only a run that ended with its answer hands its session to the user (`KEPT_AFTER`); any
+    // other ending stops the session the provider kept, so it acts no more unobserved.
+    if !KEPT_AFTER.contains(&status)
+        && let Ok(Some(run)) = db.get(&launch.id)
+        && let Some(session) = run.session_id
+    {
+        crate::llm::implementation::mobile::close(&session).await;
+    }
+}
+/// The endings after which a run's Claude session stays reachable through Remote Control, for
+/// up to two hours, and belongs to the user: a coding run `done`, a planning run `plan_ready`.
+const KEPT_AFTER: [&str; 2] = ["done", "plan_ready"];
+
+/// Give a recorded run or session its `failure` as operations show it: the identifiers and the
+/// sentence (`Failure::view`), read within the vocabulary; for a record from before causes
+/// that did not end with its answer, what its state says or `unknown`.
+pub(super) fn with_failure(value: &mut Value) {
+    value["failure"] = crate::llm::implementation::Failure::of_record(value)
+        .map_or(Value::Null, |failure| failure.view());
+}
+
+/// Mark a recorded agent run or session (this machine's record, or the summary the coordinator
+/// keeps) with whether its agent process exists now (`session_alive`) and whether it outlived
+/// its run, so it belongs to the user (`handed_to_user`). This machine's own Claude sessions are
+/// looked up among the live ones; another machine's are read from its last report: in flight
+/// with a session, or a Claude session still connected before its deadline.
+pub(super) async fn mark_session(value: &mut Value, own: &str) {
+    let state = value["state"].as_str().unwrap_or_default();
+    let active = crate::store::implementation::RUNS_IN_FLIGHT.contains(&state)
+        || crate::store::implementation::REQUESTS_IN_FLIGHT.contains(&state);
+    let alive = match value["session_id"].as_str() {
+        None => false,
+        Some(_) if active => true,
+        Some(_) if value["provider"] != "claude" => false,
+        Some(session) if value["machine"] == own => {
+            crate::llm::implementation::mobile::alive(session).await
+        }
+        Some(_) => {
+            value["remote"]["status"] == "connected"
+                && value["remote"]["expires_at"]
+                    .as_i64()
+                    .is_some_and(|t| t > now())
+        }
+    };
+    value["session_alive"] = json!(alive);
+    value["handed_to_user"] = json!(alive && !active);
+}
+/// Implementation run `id`'s session as this host knows it (`mark_session`): its machine,
+/// `session_alive` and `handed_to_user`; none without a record of the run.
+/// The bounded summaries of the native sessions of these implementation runs (the workflow
+/// supervisor's look at a run): read through the same machine channel and scrubbing as the
+/// agent sessions source, whether or not that source is enabled, so a `#private` session is
+/// never read and an offline machine is not asked. The flag says some session was not found
+/// while a machine could not be read.
+pub(in crate::app) async fn run_session_summaries(
+    host: &Arc<Host>,
+    runs: Vec<String>,
+) -> Result<(Vec<Value>, bool)> {
+    let state = &host.state.implementation;
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for id in runs {
+        if let Some(session) = state
+            .db
+            .summary(&id)
+            .ok()
+            .flatten()
+            .and_then(|s| s["session_id"].as_str().map(str::to_owned))
+        {
+            wanted.push((id, session));
+        }
+    }
+    if wanted.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    let listing = tokio::time::timeout(
+        Duration::from_secs(crate::sessions::READ_SECONDS),
+        sessions::gather(host, crate::sessions::MAX_LIMIT),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("The agent sessions did not answer in time."))??;
+    let found: Vec<Value> = wanted
+        .iter()
+        .filter_map(|(run, session)| {
+            listing
+                .sessions
+                .iter()
+                .find(|s| &s.session_id == session)
+                .map(|s| {
+                    json!({"implementation_run": run, "updated_at": s.updated_at, "asked": s.asked,
+                        "latest": s.latest, "concluded": s.concluded, "open": s.open})
+                })
+        })
+        .collect();
+    let missing = found.len() < wanted.len() && !listing.unavailable.is_empty();
+    Ok((found, missing))
+}
+pub(in crate::app) async fn session_life(host: &Arc<Host>, id: &str) -> Option<Value> {
+    let state = &host.state.implementation;
+    let mut summary = state.db.summary(id).ok()??;
+    let own = state.registry.lock().await.id.clone();
+    mark_session(&mut summary, &own).await;
+    Some(
+        json!({"machine":summary["machine"],"session_alive":summary["session_alive"],"handed_to_user":summary["handed_to_user"]}),
+    )
 }
 /// How a finished run ends. A run is fully autonomous, so a permission prompt the CLI still
 /// raised is its own state with the prompt recorded, never `needs_attention`.
@@ -1574,6 +1848,22 @@ fn validate_child(child: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_reconnected_session_keeps_the_name_of_its_purpose_and_item() {
+        let name = |record: Value| recorded_name(&record).as_str().to_owned();
+        for (purpose, expected) in [
+            ("classification", "Teams Assistant - director 41"),
+            ("summary", "Teams Assistant - summary 41"),
+            ("supervision", "Teams Assistant - supervision 41"),
+        ] {
+            assert_eq!(name(json!({"purpose":purpose,"item":{"id":41}})), expected);
+        }
+        assert_eq!(
+            name(json!({"purpose":"request","kind":"bug","item":null})),
+            "Teams Assistant - new bug"
+        );
+        assert_eq!(name(json!({"purpose":"other"})), "Teams Assistant");
+    }
     #[test]
     fn a_permission_prompt_never_ends_a_run_in_needs_attention() {
         let prompt = vec!["Bash: git push".to_owned()];
@@ -1972,6 +2262,7 @@ mod tests {
                     instructions: "Choose.",
                     input: "{}".into(),
                     item: &item,
+                    seconds: None,
                 },
             )
             .await
@@ -1998,6 +2289,41 @@ mod tests {
             json!({"id":worker,"token":token,"action":"poll","workflow_direct_support":true});
         fleet::protocol(&host, &poll).await.unwrap();
         assert!(machine_facts(&host, &worker).await.unwrap().unwrap().direct);
+        // A worker that runs the director but not the supervisor is never asked for a look.
+        assert!(
+            !machine_facts(&host, &worker)
+                .await
+                .unwrap()
+                .unwrap()
+                .supervise
+        );
+        let look = |host: Arc<Host>,
+                    director: crate::workflows::director::Director,
+                    item: crate::tools::todo::Item| async move {
+            director::ask(
+                &host,
+                director::Ask {
+                    machine: &director.machine,
+                    director: &director,
+                    task: crate::llm::implementation::DirectTask::Supervise,
+                    instructions: "Look.",
+                    input: "{}".into(),
+                    item: &item,
+                    seconds: Some(180),
+                },
+            )
+            .await
+        };
+        let refused = look(host.clone(), director.clone(), item.clone())
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            refused
+                .to_string()
+                .contains("Update the workflow supervisor's machine"),
+            "{refused}"
+        );
         // The call is not reachable from the worker protocol's coordinator side.
         assert!(
             fleet::protocol(
@@ -2022,6 +2348,11 @@ mod tests {
         assert_eq!(command["method"], "workflow_direct");
         assert_eq!(command["args"]["provider"], "claude");
         assert_eq!(command["args"]["instructions"], "Choose.");
+        // A worker that does not say it names sessions gets no item: it would refuse the field.
+        assert!(command["args"].get("item").is_none());
+        // A classification carries neither the supervisor's task nor its bound, so an older
+        // worker still reads it.
+        assert!(command["args"].get("task").is_none() && command["args"].get("seconds").is_none());
         // In flight, the session is in Agent history as generating, on the worker.
         let generating = host.state.implementation.db.requests(None).unwrap();
         assert!(
@@ -2057,7 +2388,69 @@ mod tests {
             recorded["item"]["url"],
             "https://dev.azure.com/example/Payments/_workitems/edit/41"
         );
+        // Once it says it runs the supervisor, a look is asked of it with its task and bound.
+        let mut supervising = poll.clone();
+        supervising["workflow_supervise_support"] = json!(true);
+        fleet::protocol(&host, &supervising).await.unwrap();
+        assert!(
+            machine_facts(&host, &worker)
+                .await
+                .unwrap()
+                .unwrap()
+                .supervise
+        );
+        let looking = tokio::spawn(look(host.clone(), director.clone(), item.clone()));
+        let command = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let reply = fleet::protocol(&host, &supervising).await.unwrap();
+                if !reply["command"].is_null() {
+                    break reply["command"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(command["args"]["task"], "supervise");
+        assert_eq!(command["args"]["seconds"], 180);
+        // Without `session_names_support` it still gets the look, without the item.
+        assert!(command["args"].get("item").is_none());
+        let mut answered = supervising.clone();
+        answered["results"] =
+            json!([{"id":command["id"],"result":{"ok":false,"failure":{"cause":"timeout"}}}]);
+        fleet::protocol(&host, &answered).await.unwrap();
+        assert!(looking.await.unwrap().is_err());
+        let recorded = host.state.implementation.db.history().unwrap();
+        assert!(
+            recorded
+                .iter()
+                .any(|r| r["purpose"] == "supervision" && r["state"] == "failed")
+        );
+        // A worker that also names sessions gets the item's ID with the look.
+        supervising["session_names_support"] = json!(true);
+        fleet::protocol(&host, &supervising).await.unwrap();
+        let looking = tokio::spawn(look(host.clone(), director.clone(), item.clone()));
+        let command = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let reply = fleet::protocol(&host, &supervising).await.unwrap();
+                if !reply["command"].is_null() {
+                    break reply["command"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(command["args"]["task"], "supervise");
+        assert_eq!(command["args"]["item"], 41);
+        let mut answered = supervising.clone();
+        answered["results"] =
+            json!([{"id":command["id"],"result":{"ok":false,"failure":{"cause":"timeout"}}}]);
+        fleet::protocol(&host, &answered).await.unwrap();
+        assert!(looking.await.unwrap().is_err());
         // A session ID that is not one is dropped, and the answer is kept.
+        let mut poll = poll.clone();
+        poll["session_names_support"] = json!(true);
         let asking = tokio::spawn(ask(host.clone(), director.clone(), item.clone()));
         let command = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -2070,6 +2463,8 @@ mod tests {
         })
         .await
         .unwrap();
+        // A worker that names sessions gets the item's ID for the director's session name.
+        assert_eq!(command["args"]["item"], 41);
         let result = json!({"ok":true,"data":{"answer":{"workflow":"payments","reason":"Pagos."},"problem":"Free text the worker made up",
             "session_id":"../../etc/passwd","started_at":"yesterday","finished_at":null}});
         let mut answered = poll.clone();

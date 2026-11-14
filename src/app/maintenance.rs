@@ -35,6 +35,11 @@ const AUTO_DUE: i64 = 6 * 60 * 60;
 const RETRY_STAGE: i64 = 60 * 60;
 /// How many unattended-updating events the status keeps.
 const HISTORY: usize = 50;
+/// How long an update asked for before its release archive was attached waits for it, and how long
+/// the background check keeps looking at a release that lacks it on every pass.
+const ARCHIVE_WAIT: i64 = 30 * 60;
+/// How often a waiting update looks at the release again.
+const ARCHIVE_POLL: u64 = 60;
 /// Why an unattended update waits while the assistant's Microsoft session needs renewal.
 pub(super) const RENEWAL: &str = "The Microsoft session needs renewal, so the assistant would not start again after a restart. Sign in to Microsoft again (Settings > Microsoft Teams, or pta auth microsoft login); the update is installed afterwards.";
 /// Why an unattended update waits for the person on a Mac whose credentials are in the Keychain.
@@ -68,6 +73,9 @@ pub(super) struct Environment {
     pub release: Option<core::release::Source>,
     /// Whether the Keychain holds this installation's credentials; `None` detects it (macOS).
     pub keychain: Option<bool>,
+    /// How often a waiting update looks for its archive, and for how long (seconds).
+    pub archive_poll: Duration,
+    pub archive_wait: i64,
 }
 
 #[cfg(test)]
@@ -90,6 +98,8 @@ fn environment() -> Environment {
         manual: false,
         release: core::release::Source::official().ok(),
         keychain: None,
+        archive_poll: Duration::from_secs(ARCHIVE_POLL),
+        archive_wait: ARCHIVE_WAIT,
     }
 }
 
@@ -120,6 +130,31 @@ struct Saved {
     observed: Option<String>,
     /// The audit of unattended updating: changes of the setting and every attempt, newest last.
     history: Vec<Event>,
+    /// Archive installations: the newest release whose archive for this computer's target was not
+    /// in its release at the last check. It is not offered until the archive is there.
+    archive_missing: Option<Missing>,
+    /// An update asked for before its release archive was attached: prepared (and installed, when
+    /// that was asked) once the archive appears, or ended after [`ARCHIVE_WAIT`].
+    pending: Option<Pending>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Missing {
+    version: String,
+    /// When the archive was first found missing.
+    since: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Pending {
+    version: String,
+    since: i64,
+    until: i64,
+    /// Install once prepared (`pta update`, another device), not only prepare (`update stage`).
+    #[serde(default)]
+    install: bool,
+    /// `cli`, `local_page` or `remote`.
+    by: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -251,14 +286,32 @@ pub(super) fn is_local_owner(scope: &authority::Scope, transport: Transport) -> 
 // ---------------------------------------------------------------------------------------------
 // Reading the state.
 
-/// The newest release that is worth offering: newer than both the installed and the running one.
-fn available(
-    latest: Option<&str>,
-    running: Version,
-    installed: Option<Version>,
-) -> Option<Version> {
+/// The newest release that is worth offering: newer than both the installed and the running one
+/// and, for an archive installation, with its archive already in the release.
+fn available(saved: &Saved, running: Version, installed: Option<Version>) -> Option<Version> {
     let baseline = installed.map_or(running, |i| i.max(running));
-    latest.and_then(Version::parse).filter(|l| *l > baseline)
+    saved
+        .latest
+        .as_deref()
+        .and_then(Version::parse)
+        .filter(|l| *l > baseline)
+        .filter(|l| {
+            saved
+                .archive_missing
+                .as_ref()
+                .is_none_or(|m| m.version != l.to_string())
+        })
+}
+
+/// A newer release that is published but not offered yet: its archive for this computer is not in
+/// the release.
+fn late(saved: &Saved, running: Version, installed: Option<Version>) -> Option<Version> {
+    let baseline = installed.map_or(running, |i| i.max(running));
+    saved
+        .archive_missing
+        .as_ref()
+        .and_then(|m| Version::parse(&m.version))
+        .filter(|v| *v > baseline)
 }
 
 fn stage_json(stage: &Stage) -> Value {
@@ -292,7 +345,8 @@ fn status(host: &Host, env: &Environment) -> Value {
     let applying = last.as_ref().is_some_and(|j| !j.phase.finished());
     let installation = core::inspect(&env.exe);
     let installed = installation.as_ref().ok().map(|i| i.version);
-    let offer = available(saved.latest.as_deref(), env.running, installed);
+    let offer = available(&saved, env.running, installed);
+    let late = late(&saved, env.running, installed);
     let in_flight = live().get(dir.parent().unwrap()).cloned();
     // A build recorded as running by a process that is gone was interrupted.
     let recorded = match (&in_flight, &saved.stage) {
@@ -315,6 +369,7 @@ fn status(host: &Host, env: &Environment) -> Value {
     ) {
         _ if applying => "applying",
         (Some(_), ..) => "staging",
+        (None, ..) if saved.pending.is_some() => "waiting",
         (None, Some(_), _) if saved.deferred.is_some() => "deferred",
         (None, Some(_), _) => "staged",
         (None, None, Some("failed")) => "failed",
@@ -356,9 +411,10 @@ fn status(host: &Host, env: &Environment) -> Value {
             "at": e.at, "event": e.event, "version": e.version, "detail": e.detail, "by": e.by,
         })).collect::<Vec<_>>(),
     });
-    // A failure about a release that is no longer on offer is stale.
-    let shown = recorded
-        .filter(|s| s.state == "staging" || offer.is_some_and(|o| o.to_string() == s.version));
+    // A failure about a release that is no longer on offer (or waited for) is stale.
+    let shown = recorded.filter(|s| {
+        s.state == "staging" || offer.or(late).is_some_and(|o| o.to_string() == s.version)
+    });
     json!({
         "managed": "local",
         "state": state,
@@ -370,7 +426,9 @@ fn status(host: &Host, env: &Environment) -> Value {
         "check_error": saved.check_error,
         "dismissed": offer.is_some_and(|o| saved.dismissed.as_deref() == Some(&o.to_string())),
         "install": install,
-        "can_stage": installation.is_ok() && offer.is_some() && !matches!(state, "staging" | "applying"),
+        // A release whose archive is not attached yet can be asked for: it is prepared once it is.
+        "can_stage": installation.is_ok() && offer.or(late).is_some()
+            && !matches!(state, "staging" | "applying" | "waiting"),
         "can_apply": can_apply,
         "apply_unsupported": unsupported,
         "apply": result,
@@ -378,6 +436,13 @@ fn status(host: &Host, env: &Environment) -> Value {
             "version": d.version, "since": d.at, "reasons": d.reasons, "unattended": d.unattended,
         })),
         "unattended": unattended,
+        "archive_missing": late.zip(saved.archive_missing.as_ref()).map(|(v, m)| json!({
+            "version": v.to_string(), "since": m.since,
+        })),
+        "waiting_for_archive": saved.pending.as_ref().filter(|_| state == "waiting").map(|p| json!({
+            "version": p.version, "since": p.since, "until": p.until, "install": p.install,
+            "message": waiting_text(&p.version),
+        })),
         "stage": shown.as_ref().map(stage_json),
         "staged": manifest.map(|m| json!({
             "version": m.version, "staged_at": m.staged_at, "features": m.features,
@@ -385,6 +450,23 @@ fn status(host: &Host, env: &Environment) -> Value {
             "binaries": m.binaries.keys().collect::<Vec<_>>(),
         })),
     })
+}
+
+/// What a waiting update says about itself.
+fn waiting_text(version: &str) -> String {
+    format!(
+        "Waiting for the archive of {version}: the release is published, but its archive for this computer is not attached yet. The update goes ahead by itself when it appears, for up to {} minutes.",
+        ARCHIVE_WAIT / 60
+    )
+}
+
+/// How a wait for an archive that never appeared ends.
+fn never_text(version: &str, target: &str) -> String {
+    format!(
+        "The archive of version {version} for this computer ({target}) did not appear in its release within {} minutes, so nothing was prepared or installed. Look at the release's assets at {}/releases/tag/v{version} (re-running its binaries workflow attaches a missing archive), then update again.",
+        ARCHIVE_WAIT / 60,
+        core::release::REPOSITORY.trim_end_matches('/'),
+    )
 }
 
 fn kind(installation: &Installation) -> &'static str {
@@ -412,15 +494,16 @@ pub(super) fn report(host: &Host) -> Value {
         return json!({"state": "unsupported", "pending": null, "failed": null,
             "unattended": unattended_on(&saved)});
     };
-    let offer = available(
-        saved.latest.as_deref(),
-        env.running,
-        Some(installation.version),
-    );
+    let offer = available(&saved, env.running, Some(installation.version));
+    let waiting = saved
+        .pending
+        .as_ref()
+        .and_then(|p| Version::parse(&p.version));
     let last = journal::read(&dir);
+    // A wait for the release archive reads as preparing: the fixed states every coordinator knows.
     let state = if last.as_ref().is_some_and(|j| !j.phase.finished()) {
         "applying"
-    } else if live().contains_key(dir.parent().unwrap()) {
+    } else if live().contains_key(dir.parent().unwrap()) || waiting.is_some() {
         "staging"
     } else if saved.deferred.is_some() && offer.is_some() {
         "deferred"
@@ -442,7 +525,7 @@ pub(super) fn report(host: &Host) -> Value {
                 .map(|j| j.to)
         })
         .filter(|v| Version::parse(v).is_some_and(|v| v > installation.version.max(env.running)));
-    json!({"state": state, "pending": offer.map(|v| v.to_string()), "failed": failed,
+    json!({"state": state, "pending": offer.or(waiting).map(|v| v.to_string()), "failed": failed,
         "unattended": unattended_on(&saved)})
 }
 
@@ -506,7 +589,14 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             Err(_) => Reply::error("invalid_input", 2, "This operation takes no arguments."),
         },
         "crate_update_stage" => match serde_json::from_value::<VersionArgs>(request.args.clone()) {
-            Ok(args) => stage(host, &env, &args.version).await,
+            Ok(args) => {
+                let by = if invocation.transport == Transport::Window {
+                    By::LocalPage
+                } else {
+                    By::Cli
+                };
+                stage(host, &env, &args.version, Some(by.label())).await
+            }
             Err(_) => Reply::error(
                 "invalid_input",
                 2,
@@ -566,7 +656,27 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
     }
 }
 
-/// Reads the registry and remembers what it listed. Never installs or stages anything.
+/// Whether the release of `version` holds this computer's archive yet: `None` when that does not
+/// matter (not an archive installation, or nothing newer), otherwise the answer of the release host.
+async fn archive_published(
+    env: &Environment,
+    version: Version,
+) -> Option<std::result::Result<bool, String>> {
+    let installation = core::inspect(&env.exe).ok().filter(|i| i.archive)?;
+    if version <= env.running.max(installation.version) {
+        return None;
+    }
+    let source = env.release.as_ref()?;
+    let target = installation.target.as_deref()?;
+    Some(
+        core::release::published(source, &version, target)
+            .await
+            .map_err(|e| e.to_string()),
+    )
+}
+
+/// Reads the registry and remembers what it listed and, for an archive installation, whether the
+/// newest release's archive is attached yet. Never installs or stages anything.
 async fn refresh(
     host: &Host,
     env: &Environment,
@@ -576,23 +686,44 @@ async fn refresh(
         core::newest_stable(&body)
     }
     .await;
+    let archive = match &result {
+        Ok(Some(release)) => archive_published(env, release.version).await,
+        _ => None,
+    };
     let dir = directory(host);
     let at = now();
     let outcome = match &result {
         Ok(release) => Ok(release.as_ref().map(|r| r.version.to_string())),
         Err(error) => Err(error.to_string()),
     };
+    let probe_error = archive.as_ref().and_then(|a| a.as_ref().err().cloned());
     let _ = save(&dir, |saved| {
         saved.checked_at = Some(at);
         match &outcome {
             Ok(latest) => {
                 saved.latest = latest.clone();
-                saved.check_error = None;
+                saved.check_error = probe_error.clone();
+                // Not known to be attached (missing, or the release host did not answer): not
+                // offered. The first time it was missing is kept, so waits stay bounded.
+                saved.archive_missing = match (&archive, latest) {
+                    (Some(Ok(true)) | None, _) | (_, None) => None,
+                    (Some(_), Some(version)) => Some(Missing {
+                        version: version.clone(),
+                        since: saved
+                            .archive_missing
+                            .as_ref()
+                            .filter(|m| &m.version == version)
+                            .map_or(at, |m| m.since),
+                    }),
+                };
             }
             Err(message) => saved.check_error = Some(message.clone()),
         }
     });
-    result.map_err(|e| e.to_string())
+    match (result, probe_error) {
+        (Ok(_), Some(message)) => Err(message),
+        (result, _) => result.map_err(|e| e.to_string()),
+    }
 }
 
 async fn check(host: &Host, env: &Environment) -> Reply {
@@ -688,7 +819,9 @@ impl Drop for Building {
     }
 }
 
-async fn stage(host: &Host, env: &Environment, requested: &str) -> Reply {
+/// Prepares `requested`, which must be the newest release. When its archive is not attached yet,
+/// `wait` (who asked) keeps the request until it is; without it, nothing starts.
+async fn stage(host: &Arc<Host>, env: &Environment, requested: &str, wait: Option<&str>) -> Reply {
     let Some(version) = Version::parse(requested) else {
         return Reply::error("invalid_input", 2, "That is not a release version.");
     };
@@ -754,6 +887,20 @@ async fn stage(host: &Host, env: &Environment, requested: &str) -> Reply {
     }
     if version <= env.running.max(installation.version) {
         return Reply::error("state_conflict", 6, "That version is already installed.");
+    }
+    if late(&load(&dir), env.running, Some(installation.version)) == Some(version) {
+        drop(building);
+        let Some(by) = wait else {
+            return Reply::error(
+                "not_ready",
+                3,
+                &format!(
+                    "The archive of version {version} for this computer is not in its release yet, so nothing was staged."
+                ),
+            );
+        };
+        wait_for_archive(host, env, version, false, by);
+        return Reply::success(status(host, env));
     }
     let (cargo, source, build_env) = if installation.archive {
         // An archive installation downloads the release's own archive: no Cargo, no compiler.
@@ -1027,6 +1174,10 @@ pub(super) async fn schedule(host: Arc<Host>) {
     if !is_local_owner(&host.state.authority, Transport::Local) {
         return;
     }
+    // A wait for a release archive that a restart interrupted goes on, within its bound.
+    if load(&directory(&host)).pending.is_some() {
+        watch(host.clone(), environment());
+    }
     tokio::join!(daily(host.clone()), apply::retry_deferred(host));
 }
 
@@ -1036,9 +1187,13 @@ async fn daily(host: Arc<Host>) {
     tidy(&host);
     loop {
         let env = environment();
-        let due = load(&directory(&host))
-            .checked_at
-            .is_none_or(|at| now() - at > AUTO_DUE);
+        let saved = load(&directory(&host));
+        // A release whose archive is not attached yet is looked at again on every pass, for a while.
+        let due = saved.checked_at.is_none_or(|at| now() - at > AUTO_DUE)
+            || saved
+                .archive_missing
+                .as_ref()
+                .is_some_and(|m| now() - m.since < env.archive_wait);
         if due && core::inspect(&env.exe).is_ok() {
             let _ = refresh(&host, &env).await;
         }
@@ -1060,6 +1215,8 @@ pub(super) enum Pass {
     Skipped,
     /// A failed staging of this release waits before it is tried again.
     Pausing,
+    /// The newest release's archive is not attached yet: nothing is tried or recorded meanwhile.
+    Waiting,
     Staging,
     /// Waiting for work in progress (or the Microsoft session) before installing.
     Deferred,
@@ -1134,12 +1291,16 @@ pub(super) async fn unattended(host: &Arc<Host>, env: &Environment) -> Pass {
     }
     observe(&dir, last.as_ref());
     let saved = load(&dir);
-    let Some(offer) = available(
-        saved.latest.as_deref(),
-        env.running,
-        Some(installation.version),
-    ) else {
-        return Pass::Current;
+    // A person's update waits for the release archive: its own task prepares it.
+    if saved.pending.is_some() {
+        return Pass::Waiting;
+    }
+    let Some(offer) = available(&saved, env.running, Some(installation.version)) else {
+        return if late(&saved, env.running, Some(installation.version)).is_some() {
+            Pass::Waiting
+        } else {
+            Pass::Current
+        };
     };
     if saved
         .skip
@@ -1160,25 +1321,13 @@ pub(super) async fn unattended(host: &Arc<Host>, env: &Environment) -> Pass {
         if paused {
             return Pass::Pausing;
         }
-        let reply = stage(host, env, &offer.to_string()).await;
+        let reply = stage(host, env, &offer.to_string(), None).await;
         if !reply.ok {
             // Refused before it began (the registry unreachable, a newer release meanwhile): the
             // same pause as a failed download, so a lasting problem is not retried every pass.
             let message = reply.message.clone();
             let _ = save(&dir, |saved| {
-                saved.stage = Some(Stage {
-                    version: offer.to_string(),
-                    state: "failed".into(),
-                    phase: "done".into(),
-                    started_at: now(),
-                    finished_at: Some(now()),
-                    crates: 0,
-                    current: None,
-                    error: message,
-                    tail: Vec::new(),
-                    received: 0,
-                    total: None,
-                })
+                saved.stage = Some(failed_stage(offer, now(), message));
             });
         }
         audit(
@@ -1259,8 +1408,31 @@ pub(super) async fn latest(host: &Arc<Host>, env: &Environment, by: By) -> Reply
     }
     let saved = load(&dir);
     let installed = core::inspect(&env.exe).ok().map(|i| i.version);
-    let Some(offer) = available(saved.latest.as_deref(), env.running, installed) else {
-        return with_outcome(status(host, env), "current", None);
+    let waiting = saved
+        .pending
+        .as_ref()
+        .and_then(|p| Version::parse(&p.version));
+    let Some(offer) = available(&saved, env.running, installed).filter(|_| waiting.is_none())
+    else {
+        // Published but its archive is not attached yet: the request waits for it instead of
+        // failing. The outcome is `staging`, which requesters of every version read correctly.
+        let Some(version) = waiting.or_else(|| late(&saved, env.running, installed)) else {
+            return with_outcome(status(host, env), "current", None);
+        };
+        if by == By::Remote && keychain(env) {
+            return Reply::error("not_ready", 3, KEYCHAIN_REMOTE);
+        }
+        if !saved.pending.as_ref().is_some_and(|p| p.install) {
+            audit(
+                &dir,
+                "update_requested",
+                Some(version),
+                None,
+                Some(by.label()),
+            );
+        }
+        wait_for_archive(host, env, version, true, by.label());
+        return with_outcome(status(host, env), "staging", Some(version));
     };
     if by == By::Remote && keychain(env) {
         return Reply::error("not_ready", 3, KEYCHAIN_REMOTE);
@@ -1300,7 +1472,7 @@ pub(super) async fn latest(host: &Arc<Host>, env: &Environment, by: By) -> Reply
             return with_outcome(reply.data, outcome, Some(offer));
         }
         None => {
-            let reply = stage(host, env, &offer.to_string()).await;
+            let reply = stage(host, env, &offer.to_string(), None).await;
             if !reply.ok {
                 return reply;
             }
@@ -1347,6 +1519,151 @@ fn follow(host: Arc<Host>, env: Environment, version: Version) {
             audit(&dir, "update_apply", Some(version), reply.message, None);
         }
     });
+}
+
+/// A failed preparation of `version`, as the status shows it.
+fn failed_stage(version: Version, started: i64, error: Option<String>) -> Stage {
+    Stage {
+        version: version.to_string(),
+        state: "failed".into(),
+        phase: "done".into(),
+        started_at: started,
+        finished_at: Some(now()),
+        crates: 0,
+        current: None,
+        error,
+        tail: Vec::new(),
+        received: 0,
+        total: None,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Waiting for a release archive.
+
+/// Profiles with a task that waits for a release archive.
+static WATCHING: StdMutex<std::collections::BTreeSet<PathBuf>> =
+    StdMutex::new(std::collections::BTreeSet::new());
+
+/// Removes this profile's entry from `WATCHING` however the task ends.
+struct Watching(PathBuf);
+impl Drop for Watching {
+    fn drop(&mut self) {
+        WATCHING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// Keeps an update asked for before its release archive was attached and makes sure one task
+/// waits for it. Asking again joins the same wait (and its bound); it never starts a second one.
+fn wait_for_archive(
+    host: &Arc<Host>,
+    env: &Environment,
+    version: Version,
+    install: bool,
+    by: &str,
+) {
+    let dir = directory(host);
+    let at = now();
+    let mut fresh = false;
+    let _ = save(&dir, |saved| match &mut saved.pending {
+        Some(pending) if pending.version == version.to_string() => pending.install |= install,
+        _ => {
+            fresh = true;
+            saved.pending = Some(Pending {
+                version: version.to_string(),
+                since: at,
+                until: at + env.archive_wait,
+                install,
+                by: by.to_owned(),
+            });
+        }
+    });
+    if fresh {
+        audit(&dir, "update_waiting", Some(version), None, Some(by));
+    }
+    watch(host.clone(), env.clone());
+}
+
+fn watch(host: Arc<Host>, env: Environment) {
+    let profile = directory(&host).parent().unwrap().to_path_buf();
+    if !WATCHING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(profile.clone())
+    {
+        return;
+    }
+    tokio::spawn(async move {
+        let _watching = Watching(profile);
+        loop {
+            tokio::time::sleep(env.archive_poll).await;
+            if !look_for_archive(&host, &env).await {
+                break;
+            }
+        }
+    });
+}
+
+/// One look at the release for the waiting update; false once the wait is over. When the archive
+/// is there the release is prepared (and installed, when that was asked) exactly once; after the
+/// bound the wait ends with a fixed text and nothing is tried again on its behalf.
+async fn look_for_archive(host: &Arc<Host>, env: &Environment) -> bool {
+    let dir = directory(host);
+    if load(&dir).pending.is_none() {
+        return false;
+    }
+    // A failed look (the registry or the release host unreachable) is only a look: the bound holds.
+    let _ = refresh(host, env).await;
+    let saved = load(&dir);
+    let Some(pending) = saved.pending.clone() else {
+        return false;
+    };
+    let installed = core::inspect(&env.exe).ok().map(|i| i.version);
+    if let Some(offer) = available(&saved, env.running, installed) {
+        let _ = save(&dir, |saved| saved.pending = None);
+        let reply = stage(host, env, &offer.to_string(), None).await;
+        if !reply.ok {
+            let message = reply.message.unwrap_or_default();
+            let _ = save(&dir, |saved| {
+                saved.stage = Some(failed_stage(offer, pending.since, Some(message.clone())));
+            });
+            audit(&dir, "update_stage", Some(offer), Some(message), None);
+        } else if pending.install {
+            follow(host.clone(), env.clone(), offer);
+        }
+        return false;
+    }
+    let Some(newest) = late(&saved, env.running, installed) else {
+        // Nothing newer to wait for any more (installed otherwise, or withdrawn).
+        let _ = save(&dir, |saved| saved.pending = None);
+        return false;
+    };
+    if now() >= pending.until {
+        let target = core::inspect(&env.exe)
+            .ok()
+            .and_then(|i| i.target)
+            .unwrap_or_default();
+        let text = never_text(&pending.version, &target);
+        let version = Version::parse(&pending.version).unwrap_or(newest);
+        let _ = save(&dir, |saved| {
+            saved.pending = None;
+            saved.stage = Some(failed_stage(version, pending.since, Some(text.clone())));
+        });
+        audit(&dir, "update_stage", Some(version), Some(text), None);
+        return false;
+    }
+    if newest.to_string() != pending.version {
+        // A newer release came out meanwhile: the wait follows it, within the same bound.
+        let _ = save(&dir, |saved| {
+            if let Some(pending) = &mut saved.pending {
+                pending.version = newest.to_string();
+            }
+        });
+    }
+    true
 }
 
 /// Whether another device of the account may ask this installation to update itself: this host is

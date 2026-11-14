@@ -131,6 +131,9 @@ struct Session {
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
+    lines: super::lines::Lines,
+    /// An event could not be read within the stream's bounds and was skipped.
+    skipped: bool,
     _tree: ProcessTree,
     stderr: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
     remote_connected: bool,
@@ -145,6 +148,29 @@ impl Drop for Session {
     }
 }
 impl Session {
+    /// Why the CLI's process stopped before its session ended: at once when the session had
+    /// reported nothing (`seen`), with the kind of its first stderr line, or mid-stream. Its
+    /// exit code and stderr are read within a short bound; the stderr text is not kept.
+    async fn stopped(&mut self, seen: bool) -> Failure {
+        let code = tokio::time::timeout(Duration::from_secs(2), self.child.wait())
+            .await
+            .ok()
+            .and_then(|status| status.ok())
+            .and_then(|status| status.code());
+        if seen {
+            return Failure {
+                exit_code: code,
+                ..Failure::of(Cause::StreamEnded)
+            };
+        }
+        let stderr = tokio::time::timeout(Duration::from_secs(2), &mut self.stderr)
+            .await
+            .ok()
+            .and_then(|read| read.ok())
+            .and_then(|read| read.ok())
+            .unwrap_or_default();
+        Failure::exited_at_start(code, &stderr)
+    }
     async fn send(&mut self, value: Value) -> Result<()> {
         let mut bytes = serde_json::to_vec(&value)?;
         bytes.push(b'\n');
@@ -154,16 +180,21 @@ impl Session {
     }
     async fn next(&mut self) -> Result<Value> {
         loop {
-            let mut line = Vec::new();
-            let count = (&mut self.output)
-                .take(256_001)
-                .read_until(b'\n', &mut line)
-                .await?;
-            ensure!(
-                count > 0 && count <= 256_000,
-                "The remote agent connection ended or exceeded its output limit."
-            );
-            if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+            // A line is read in bounded memory: an oversized one is read without its payload
+            // or skipped, never the end of the session.
+            let bytes = self.output.fill_buf().await?;
+            let (used, line) = if bytes.is_empty() {
+                let line = self.lines.finish();
+                ensure!(line.is_some(), "The remote agent connection ended.");
+                (0, line)
+            } else {
+                self.lines.feed(bytes)
+            };
+            self.output.consume(used);
+            if line == Some(super::lines::Line::Skipped) {
+                self.skipped = true;
+            }
+            if let Some(super::lines::Line::Event(value)) = line {
                 // The provider bridge forwards prompts to the signed-in person's app and
                 // injects their response itself. The host never grants an approval.
                 if value["type"] == "control_request" {
@@ -205,13 +236,15 @@ impl Session {
             }
         }).await?
     }
-    async fn enable(&mut self) -> Result<Access> {
+    /// Connect Remote Control, the session listed under `name`: a field of the request, never
+    /// an argument of the CLI.
+    async fn enable(&mut self, name: &SessionName) -> Result<Access> {
         self.control("pta-initialize", json!({"subtype":"initialize"}))
             .await?;
         let result = self
             .control(
                 "pta-remote",
-                json!({"subtype":"remote_control","enabled":true,"name":"Teams Assistant"}),
+                json!({"subtype":"remote_control","enabled":true,"name":name.as_str()}),
             )
             .await?;
         let url = claude_url(result["session_url"].as_str().unwrap_or_default())?;
@@ -276,13 +309,27 @@ pub(crate) async fn close(id: &str) {
         });
     }
 }
-#[cfg(all(test, unix))]
-async fn is_live(id: &str) -> bool {
+/// Whether the session `id` is retained and its process still runs on this machine.
+pub(crate) async fn alive(id: &str) -> bool {
     sessions()
         .lock()
         .await
         .get(id)
         .is_some_and(|live| !live.task.is_finished())
+}
+
+/// Records a connected session `offline` when its follow ends without retaining it, on every
+/// path: an answer, an error, the limit, or the run's task aborted (a cancel) with the session.
+struct Disconnect(Option<Observer>);
+impl Drop for Disconnect {
+    fn drop(&mut self) {
+        if let Some(observer) = self.0.take() {
+            let _ = observer(Access {
+                status: "offline".into(),
+                ..Access::default()
+            });
+        }
+    }
 }
 
 async fn spawn(
@@ -304,7 +351,9 @@ async fn spawn(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    let mut child = command.spawn()?;
+    let mut child = command
+        .spawn()
+        .map_err(|_| Failed::with(Cause::CliMissing, "Coding process did not start."))?;
     Ok(Session {
         _tree: ProcessTree(
             child
@@ -313,6 +362,8 @@ async fn spawn(
         ),
         input: child.stdin.take().unwrap(),
         output: BufReader::new(child.stdout.take().unwrap()),
+        lines: super::lines::Lines::new(),
+        skipped: false,
         stderr: tokio::spawn(tail(child.stderr.take().unwrap())),
         child,
         remote_connected: false,
@@ -407,6 +458,8 @@ impl Activity {
 }
 
 /// Run one Claude session; a coding session (`planning` false) is autonomous until it ends.
+/// With `keep`, a session that ended with its answer stays reachable through Remote Control
+/// for the person (`retain`); any other session's process ends with its run.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute(
     binary: &std::path::Path,
@@ -414,7 +467,8 @@ pub(super) async fn execute(
     directory: &std::path::Path,
     prompt: &str,
     id: &str,
-    planning: bool,
+    (planning, keep): (bool, bool),
+    name: &SessionName,
     observer: SessionObserver<'_>,
     remote: Observer,
 ) -> Result<Outcome> {
@@ -424,7 +478,8 @@ pub(super) async fn execute(
         directory,
         prompt,
         id,
-        planning,
+        (planning, keep),
+        name,
         observer,
         remote,
         (SESSION_LIMIT, SETTLE),
@@ -441,7 +496,8 @@ async fn follow_session(
     directory: &std::path::Path,
     prompt: &str,
     id: &str,
-    planning: bool,
+    (planning, keep): (bool, bool),
+    name: &SessionName,
     observer: SessionObserver<'_>,
     remote: Observer,
     (limit, settle): (Duration, Duration),
@@ -449,14 +505,22 @@ async fn follow_session(
     let mut session = spawn(binary, args, directory).await?;
     observer(None)?;
     let access = session
-        .enable()
+        .enable(name)
         .await
         .unwrap_or_else(|_| Access::unavailable());
     remote(access.clone())?;
+    // Declared after the session, so it is dropped first: the record says offline as the
+    // process tree ends.
+    let mut offline = Disconnect((access.status == "connected").then(|| remote.clone()));
     session.autonomous = !planning;
-    session.send(json!({"type":"user","message":{"role":"user","content":prompt},"parent_tool_use_id":null,"session_id":id})).await?;
+    if session.send(json!({"type":"user","message":{"role":"user","content":prompt},"parent_tool_use_id":null,"session_id":id})).await.is_err() {
+        // Its input closed: the process has already ended.
+        return Err(Failed(session.stopped(false).await).into());
+    }
     let mut events = Events::default();
     let mut activity = Activity::default();
+    // The stream ended while the session still worked (`Failed` with the cause), or an
+    // observer refused the session.
     let followed = tokio::time::timeout(limit, async {
         while !activity.over() {
             let next = if activity.settling() {
@@ -471,9 +535,9 @@ async fn follow_session(
                 Ok(event) => event,
                 // The process exited after its turn: the session is over.
                 Err(_) if activity.ended() => break,
-                Err(error) => return Err(error),
+                Err(_) => return Err(Failed(session.stopped(events.seen).await).into()),
             };
-            events.event("claude", &event, observer, id)?;
+            events.read("claude", &event, session.lines.dropped(), observer, id)?;
             activity.event(&event);
         }
         Ok::<_, anyhow::Error>(())
@@ -490,31 +554,36 @@ async fn follow_session(
         for prompt in std::mem::take(&mut session.prompts) {
             keep_prompt(&mut prompts, &prompt);
         }
-        return Outcome::redacted(false, &text, &prompts);
+        let text = noted(text, session.skipped, planning);
+        return Ok(Outcome::redacted(false, &text, &prompts)?.because(Failure::of(Cause::Timeout)));
     };
     followed?;
     let ok = !events.failed && !events.text.trim().is_empty();
+    let failure = events.failure();
     // After the delegated session the retained connection belongs to the person's mobile app.
     session.autonomous = false;
     for prompt in std::mem::take(&mut session.prompts) {
         keep_prompt(&mut events.prompts, &prompt);
     }
-    if access.status == "connected" {
+    let text = noted(std::mem::take(&mut events.text), session.skipped, planning);
+    if keep && ok && access.status == "connected" {
+        offline.0 = None;
         if retain(id, session, access, remote.clone()).await.is_err() {
             remote(Access::unavailable())?;
         }
     } else {
         let _ = session.child.kill().await;
     }
-    Outcome::redacted(ok, &events.text, &events.prompts)
+    Ok(Outcome::redacted(ok, &text, &events.prompts)?.because(failure))
 }
 
+/// Reconnect a recorded session, under its `name` again (Claude).
 pub(crate) async fn reconnect(
     choice: (&str, &str, &str),
     id: &str,
     remote_id: Option<&str>,
     directories: &[PathBuf],
-    planning: bool,
+    (planning, name): (bool, &SessionName),
     observer: Observer,
 ) -> Result<Access> {
     let (provider, model, effort) = choice;
@@ -550,9 +619,74 @@ pub(crate) async fn reconnect(
         args.extend(["--tools".into(), "".into()]);
     }
     let mut session = spawn(&binary, &args, &directories[0]).await?;
-    let access = session.enable().await?;
+    let access = session.enable(name).await?;
     retain(id, session, access.clone(), observer).await?;
     Ok(access)
+}
+
+/// A fake Claude CLI whose Remote Control connects, for tests here and in the host's.
+#[cfg(all(test, unix))]
+pub(crate) mod fake {
+    use std::path::Path;
+    use std::time::Duration;
+    /// Install at `binary` a Claude CLI that appends its process ID to `log/pids`, connects
+    /// Remote Control, reads the prompt, runs `body` (which prints its turn; the prompt line is
+    /// in `$prompt`), says it is idle and then stays open, as a kept session does.
+    pub(crate) fn connected_cli(binary: &Path, log: &Path, body: &str) {
+        let script = r##"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '--session-id' ]; then shift; session="$1"; fi
+  shift
+done
+echo $$ >> '{log}/pids'
+read -r initialize
+printf '%s
+' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-initialize","response":{}}}'
+read -r remote
+printf '%s
+' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-remote","response":{"session_url":"https://claude.ai/code/session_Remote123"}}}'
+read -r prompt
+printf '{"type":"system","subtype":"init","session_id":"%s"}
+' "$session"
+{body}
+printf '%s
+' '{"type":"system","subtype":"session_state_changed","state":"idle"}'
+while read -r line; do :; done
+"##;
+        crate::llm::agent::install_fake_cli(
+            binary,
+            &script
+                .replace("{log}", &log.display().to_string())
+                .replace("{body}", body),
+        );
+    }
+    /// The process IDs the fake CLIs logged in `log`, in start order.
+    pub(crate) fn pids(log: &Path) -> Vec<String> {
+        std::fs::read_to_string(log.join("pids"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+    /// Whether process `pid` still runs (a zombie has ended).
+    pub(crate) fn runs(pid: &str) -> bool {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&output.stdout);
+        output.status.success() && !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+    }
+    /// Whether process `pid` ends within five seconds.
+    pub(crate) async fn ends(pid: &str) -> bool {
+        for _ in 0..100 {
+            if !runs(pid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
 }
 
 #[cfg(test)]
@@ -590,6 +724,7 @@ read -r initialize
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-initialize","response":{}}}'
 read -r remote
 case "$remote" in *'"enabled":true'*) ;; *) exit 7;; esac
+printf '%s\n' "$remote" > "$(dirname "$0")/remote"
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-remote","response":{"session_url":"https://claude.ai/code/session_Remote123"}}}'
 read -r prompt
 case "$prompt" in *'Synthetic mobile check'*) ;; *) exit 8;; esac
@@ -610,6 +745,7 @@ while read -r control; do :; done
                 &[root.path().into()],
                 "Synthetic mobile check",
                 None,
+                &SessionName::item(4211, "Fix \"rounding\"\nnow"),
                 &|id| {
                     if let Some(id) = id {
                         *native.lock().unwrap() = id.into();
@@ -627,8 +763,16 @@ while read -r control; do :; done
         .unwrap();
         assert!(result.ok);
         assert_eq!(result.text, "Completed synthetic check.");
+        // The session is listed under the item's name, a field of the request.
+        let remote: Value =
+            serde_json::from_str(&std::fs::read_to_string(root.path().join("remote")).unwrap())
+                .unwrap();
+        assert_eq!(
+            remote["request"]["name"],
+            "Teams Assistant - 4211 Fix \"rounding\" now"
+        );
         let id = native.lock().unwrap().clone();
-        assert!(is_live(&id).await);
+        assert!(alive(&id).await);
         {
             let updates = observed.lock().unwrap();
             assert_eq!(
@@ -641,8 +785,134 @@ while read -r control; do :; done
             );
         }
         close(&id).await;
-        assert!(!is_live(&id).await);
+        assert!(!alive(&id).await);
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_a_session_that_answered_and_may_be_kept_outlives_its_run() {
+        // (the turn failed, the session may be kept, it is kept)
+        for (failed, keep, kept) in [
+            (false, true, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let binary = root.path().join("claude-fixture");
+            fake::connected_cli(
+                &binary,
+                root.path(),
+                &format!(
+                    r#"printf '%s\n' '{{"type":"result","is_error":{failed},"result":"Answered."}}'"#
+                ),
+            );
+            let id = uuid::Uuid::new_v4().to_string();
+            let observed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let updates = observed.clone();
+            let args = arguments(
+                "claude",
+                "synthetic-model",
+                "low",
+                &[root.path().into()],
+                false,
+            )
+            .unwrap();
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(10),
+                follow_session(
+                    &binary,
+                    &args,
+                    root.path(),
+                    "Synthetic coding task",
+                    &id,
+                    (false, keep),
+                    &SessionName::default(),
+                    &|_| Ok(()),
+                    Arc::new(move |access| {
+                        updates.lock().unwrap().push(access.status);
+                        Ok(())
+                    }),
+                    (Duration::from_secs(30), Duration::from_secs(5)),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(outcome.ok, !failed);
+            let pid = fake::pids(root.path()).pop().unwrap();
+            let last = || observed.lock().unwrap().last().cloned().unwrap();
+            assert_eq!(alive(&id).await, kept, "{failed} {keep}");
+            if kept {
+                // Handed to the user: reachable until it is closed or its connection expires.
+                assert!(fake::runs(&pid));
+                assert_eq!(last(), "connected");
+                close(&id).await;
+                assert!(!alive(&id).await);
+            }
+            assert!(fake::ends(&pid).await, "{failed} {keep}");
+            assert_eq!(last(), "offline");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cancelled_session_ends_its_process_and_reads_offline() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("claude-fixture");
+        fake::connected_cli(&binary, root.path(), "while :; do sleep 1; done");
+        let observed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let updates = observed.clone();
+        let args = arguments(
+            "claude",
+            "synthetic-model",
+            "low",
+            &[root.path().into()],
+            false,
+        )
+        .unwrap();
+        let following = {
+            let (binary, root) = (binary.clone(), root.path().to_path_buf());
+            tokio::spawn(async move {
+                follow_session(
+                    &binary,
+                    &args,
+                    &root,
+                    "Synthetic coding task",
+                    &uuid::Uuid::new_v4().to_string(),
+                    (false, true),
+                    &SessionName::default(),
+                    &|_| Ok(()),
+                    Arc::new(move |access| {
+                        updates.lock().unwrap().push(access.status);
+                        Ok(())
+                    }),
+                    (Duration::from_secs(60), Duration::from_secs(5)),
+                )
+                .await
+            })
+        };
+        let pid = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !observed.lock().unwrap().is_empty()
+                    && let Some(pid) = fake::pids(root.path()).pop()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(fake::runs(&pid));
+        // `implementation_cancel` aborts the run's task.
+        following.abort();
+        let _ = following.await;
+        assert!(fake::ends(&pid).await);
+        assert_eq!(
+            *observed.lock().unwrap(),
+            ["connected".to_owned(), "offline".to_owned()]
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_claude_coding_turn_never_waits_on_a_prompt_and_records_it() {
@@ -677,6 +947,7 @@ printf '{"type":"result","session_id":"%s","is_error":false,"result":"Opened not
                 &[root.path().into()],
                 "Synthetic coding task",
                 None,
+                &SessionName::default(),
                 &|_| Ok(()),
                 Arc::new(|_| Ok(())),
             ),
@@ -731,6 +1002,14 @@ printf '{{"type":"system","subtype":"init","session_id":"%s"}}\n' "$session"
         root: &std::path::Path,
         limits: (Duration, Duration),
     ) -> Outcome {
+        try_session(binary, root, limits).await.unwrap()
+    }
+    #[cfg(unix)]
+    async fn try_session(
+        binary: &std::path::Path,
+        root: &std::path::Path,
+        limits: (Duration, Duration),
+    ) -> Result<Outcome> {
         let args = arguments("claude", "synthetic-model", "low", &[root.into()], false).unwrap();
         follow_session(
             binary,
@@ -738,13 +1017,101 @@ printf '{{"type":"system","subtype":"init","session_id":"%s"}}\n' "$session"
             root,
             "Synthetic coding task",
             &uuid::Uuid::new_v4().to_string(),
-            false,
+            (false, true),
+            &SessionName::default(),
             &|_| Ok(()),
             Arc::new(|_| Ok(())),
             limits,
         )
         .await
-        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_session_that_stops_early_records_why_and_never_what_its_cli_wrote() {
+        use super::super::failure::Stderr;
+        use super::super::{Cause, Failure, of_error};
+        let limits = (Duration::from_secs(20), Duration::from_secs(5));
+        // A CLI that exits with code 1 before emitting anything, saying on stderr that a
+        // system variable is missing.
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("claude-fixture");
+        crate::llm::agent::install_fake_cli(
+            &binary,
+            "#!/bin/sh\necho 'Error: the SystemRoot environment variable is not set (C:\\Users\\someone, token sk-synthetic)' >&2\nexit 1\n",
+        );
+        let error = try_session(&binary, root.path(), limits).await.unwrap_err();
+        assert_eq!(
+            of_error(&error, Cause::Unknown),
+            Failure {
+                cause: Cause::CliExitedAtStart,
+                exit_code: Some(1),
+                stderr: Some(Stderr::MissingVariable),
+            }
+        );
+        let text = format!("{error:#}");
+        assert!(text.contains("exit code 1"), "{text}");
+        for leaked in ["someone", "sk-synthetic", "SystemRoot environment"] {
+            assert!(!text.contains(leaked), "{text}");
+        }
+        // A CLI that is not there.
+        let error = try_session(&root.path().join("missing"), root.path(), limits)
+            .await
+            .unwrap_err();
+        assert_eq!(of_error(&error, Cause::Unknown).cause, Cause::CliMissing);
+        // A stream that ends while the session still works.
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_session(root.path(), "exit 3");
+        let error = try_session(&binary, root.path(), limits).await.unwrap_err();
+        assert_eq!(
+            of_error(&error, Cause::Unknown),
+            Failure {
+                cause: Cause::StreamEnded,
+                exit_code: Some(3),
+                stderr: None,
+            }
+        );
+        // A turn the CLI reports as an error, one without a report, and a report too large to
+        // read.
+        for (body, cause) in [
+            (
+                r#"printf '%s\n' '{"type":"result","is_error":true,"result":"Synthetic API error."}'"#,
+                Cause::AgentError,
+            ),
+            (
+                r#"printf '%s\n' '{"type":"result","is_error":false,"result":""}'"#,
+                Cause::NoReport,
+            ),
+            (
+                r#"printf '{"type":"result","is_error":false,"result":"%s"}\n' "$(head -c 300000 /dev/zero | tr '\0' R)""#,
+                Cause::OutputLimit,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let binary = fake_session(root.path(), body);
+            let outcome = run_session(&binary, root.path(), limits).await;
+            assert!(!outcome.ok, "{body}");
+            assert_eq!(outcome.failure, Some(Failure::of(cause)), "{body}");
+        }
+        // A session at its time limit.
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_session(root.path(), "while :; do sleep 1; done");
+        let outcome = run_session(
+            &binary,
+            root.path(),
+            (Duration::from_millis(500), Duration::from_secs(5)),
+        )
+        .await;
+        assert_eq!(outcome.failure, Some(Failure::of(Cause::Timeout)));
+        // A session that ends with its answer has no failure.
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_session(
+            root.path(),
+            r#"printf '%s\n' '{"type":"result","is_error":false,"result":"Done."}'"#,
+        );
+        let outcome = run_session(&binary, root.path(), limits).await;
+        assert!(outcome.ok);
+        assert_eq!(outcome.failure, None);
     }
 
     #[cfg(unix)]
@@ -846,6 +1213,121 @@ while read -r line; do :; done"##,
         assert!(!outcome.ok);
         assert!(outcome.text.starts_with(LIMIT_REACHED), "{}", outcome.text);
         assert!(outcome.text.contains("Waiting."));
+    }
+
+    /// A shell function for the fake CLI: `image N` prints Claude Code's line for a tool
+    /// result that read an image of N base64 bytes, which the line carries twice.
+    #[cfg(unix)]
+    const IMAGE: &str = r##"image() {
+  printf '%s' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"read-1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"'
+  head -c "$1" /dev/zero | tr '\0' A
+  printf '%s' '"}}]}]},"parent_tool_use_id":null,"tool_use_result":{"type":"image","file":{"base64":"'
+  head -c "$1" /dev/zero | tr '\0' A
+  printf '%s\n' '","type":"image/png"}}}'
+}
+"##;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reading_large_images_does_not_end_the_session() {
+        let root = tempfile::tempdir().unwrap();
+        // Lines of about 300 KB and 5 MB between ordinary events.
+        let binary = fake_session(
+            root.path(),
+            &format!(
+                r##"{IMAGE}printf '%s\n' '{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"Checking the screenshots."}}]}}}}'
+image 150000
+printf '%s\n' '{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"Checking the larger one."}}]}}}}'
+image 2500000
+printf '%s\n' '{{"type":"result","is_error":false,"result":"Opened the pull request.\nBranch: feature/screenshots"}}'
+printf '%s\n' '{{"type":"system","subtype":"session_state_changed","state":"idle"}}'
+while read -r line; do :; done"##
+            ),
+        );
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_session(
+                &binary,
+                root.path(),
+                (Duration::from_secs(60), Duration::from_secs(5)),
+            ),
+        )
+        .await
+        .expect("The session did not end after its last turn");
+        // `done`: it completed, raised no prompt and its report is the final turn's.
+        assert!(outcome.ok);
+        assert!(outcome.prompts.is_empty());
+        assert_eq!(
+            outcome.text,
+            "Opened the pull request.\nBranch: feature/screenshots"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn events_after_an_oversized_line_are_read_and_a_skipped_one_is_noted_once() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_session(
+            root.path(),
+            &format!(
+                r##"{IMAGE}image 2500000
+printf '%s\n' '{{"type":"control_request","request_id":"ask-1","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":"az boards work-item update"}}}}}}'
+read -r answer
+case "$answer" in *'"request_id":"ask-1"'*) ;; *) exit 11;; esac
+image 150000
+printf '%s\n' '{{"type":"system","subtype":"status","session_id":"22222222-2222-4222-8222-222222222222"}}'
+# Two events that cannot be read: one that is not JSON, one far over the kept bound.
+printf '%s' '{{"type":"user","secret":'; head -c 300000 /dev/zero | tr '\0' 7; printf '%s\n' ']'
+printf '%s' '{{"type":"user","parts":['; i=0; while [ $i -lt 6 ]; do printf '"'; head -c 200000 /dev/zero | tr '\0' S; printf '",'; i=$((i+1)); done; printf '%s\n' '""]}}'
+image 150000
+printf '%s\n' '{{"type":"result","session_id":"22222222-2222-4222-8222-222222222222","is_error":false,"result":"Done.\nBranch: feature/after"}}'
+printf '%s\n' '{{"type":"system","subtype":"session_state_changed","state":"idle"}}'
+while read -r line; do :; done"##
+            ),
+        );
+        let observed = std::sync::Mutex::new(Vec::new());
+        let args = arguments(
+            "claude",
+            "synthetic-model",
+            "low",
+            &[root.path().into()],
+            false,
+        )
+        .unwrap();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            follow_session(
+                &binary,
+                &args,
+                root.path(),
+                "Synthetic coding task",
+                &uuid::Uuid::new_v4().to_string(),
+                (false, true),
+                &SessionName::default(),
+                &|id| {
+                    observed.lock().unwrap().extend(id.map(str::to_owned));
+                    Ok(())
+                },
+                Arc::new(|_| Ok(())),
+                (Duration::from_secs(60), Duration::from_secs(5)),
+            ),
+        )
+        .await
+        .expect("The session did not end after its last turn")
+        .unwrap();
+        assert_eq!(
+            observed.lock().unwrap().last().map(String::as_str),
+            Some("22222222-2222-4222-8222-222222222222")
+        );
+        assert_eq!(
+            outcome.prompts,
+            [r#"Bash: {"command":"az boards work-item update"}"#]
+        );
+        assert!(outcome.ok);
+        assert_eq!(
+            outcome.text,
+            format!("Done.\nBranch: feature/after\n\n{SKIPPED_EVENT}")
+        );
     }
 
     #[test]

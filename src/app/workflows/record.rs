@@ -80,6 +80,10 @@ impl State {
     pub(in crate::app) fn finished(self) -> bool {
         matches!(self, State::Done | State::Cancelled)
     }
+    /// A run that ends here stops every agent session its implementation runs left alive.
+    pub(in crate::app) fn stops_sessions(self) -> bool {
+        matches!(self, State::Failed | State::Cancelled | State::Interrupted)
+    }
     /// Stopped until the user resumes it.
     pub(in crate::app) fn stopped(self) -> bool {
         matches!(
@@ -111,16 +115,14 @@ impl State {
                 | State::Blocks
         )
     }
-    /// The stages that take one of the `concurrency` slots: those where an agent works or the
-    /// run is about to act. Waiting for the user's review or for pull requests takes none.
+    /// The stages that take one of the `concurrency` slots: those where a coding or planning
+    /// agent works or the run is about to act. Waiting for the user's review or for pull
+    /// requests takes none, and neither does classifying (a short read-only director session,
+    /// bounded on its own by the engine).
     pub(in crate::app) fn takes_slot(self) -> bool {
         matches!(
             self,
-            State::Classifying
-                | State::Planning
-                | State::CreatingChildren
-                | State::Coding
-                | State::Blocks
+            State::Planning | State::CreatingChildren | State::Coding | State::Blocks
         )
     }
 }
@@ -170,6 +172,10 @@ pub(in crate::app) struct Implementation {
     /// Its state as the engine last read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// Why it did not end with its answer, as its machine reported it (`unknown` from one that
+    /// predates causes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<crate::llm::implementation::Failure>,
 }
 
 /// A child the run codes (for a task-category item, the item itself).
@@ -197,6 +203,15 @@ pub(in crate::app) struct Child {
     /// The branch its session reported (`Branch: NAME` at the end of its report).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// A task's branches in the workflow's other repositories, as its session reported them
+    /// (`Branch REPOSITORY: NAME`), each for a repository whose checkout the run was given.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<RepositoryBranch>,
+    /// The repositories its report named a branch for that are not the workflow's (or have no
+    /// checkout on its machine): those lines were ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored_branches: Vec<String>,
+    /// The pull requests of every branch it reported, each with its repository.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pull_requests: Vec<PullRequest>,
     /// `done`, or `accepted` when the user resumed the run past a coding run that did not end
@@ -208,6 +223,42 @@ impl Child {
     pub(in crate::app) fn accepted(&self) -> bool {
         self.outcome.as_deref() == Some("accepted")
     }
+    /// Every branch it reported, with its repository: its own repository's first.
+    pub(in crate::app) fn delivered(&self) -> Vec<(crate::workflows::Repository, String)> {
+        let primary = self.repository.clone().zip(self.branch.clone()).into_iter();
+        primary
+            .chain(
+                self.branches
+                    .iter()
+                    .map(|b| (b.repository.clone(), b.branch.clone())),
+            )
+            .collect()
+    }
+    /// Whether it reported any branch.
+    pub(in crate::app) fn reported(&self) -> bool {
+        self.branch.is_some() || !self.branches.is_empty()
+    }
+    /// The repositories of its reported branches that have no pull request yet.
+    pub(in crate::app) fn without_pull_request(&self) -> Vec<String> {
+        self.delivered()
+            .into_iter()
+            .filter(|(r, _)| {
+                !self
+                    .pull_requests
+                    .iter()
+                    .any(|p| p.repository.eq_ignore_ascii_case(&r.id))
+            })
+            .map(|(r, _)| r.name)
+            .collect()
+    }
+}
+
+/// A branch a task's coding session pushed in another of the workflow's repositories.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(in crate::app) struct RepositoryBranch {
+    pub repository: crate::workflows::Repository,
+    pub branch: String,
 }
 
 /// What an acting block did at one occurrence of its stage, or why it did not run. The engine
@@ -221,7 +272,7 @@ pub(in crate::app) struct BlockOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<crate::workflows::Stage>,
     /// A notification: `sent`, `refused` or `uncertain`. A launcher: `succeeded`, `failed`,
-    /// `timed_out`, `not_started` or `uncertain`. `attempting` until the result is recorded.
+    /// `timed_out`, `stopped`, `not_started` or `uncertain`. `attempting` until the result is recorded.
     pub outcome: String,
     /// When the result was recorded (the attempt's time while `attempting`).
     pub at: i64,
@@ -276,9 +327,10 @@ pub(in crate::app) struct Run {
     pub children: Vec<Child>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub block_outcomes: Vec<BlockOutcome>,
-    /// Progress summaries the director wrote (`summary::Summary`: `id`, `text`, `created_at`,
+    /// Progress summaries the director wrote, and the supervisor's drafts posted through it (`by:
+    /// "supervisor"`) (`summary::Summary`: `id`, `text`, `created_at`,
     /// `provider`, `model`, `session_id`), oldest first, at most `summary::MAX_SUMMARIES`.
-    /// A notification block's `{summary}` is rendered from the latest entry (the last).
+    /// A notification block's `{summary}` is rendered from the latest the director wrote.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub summaries: Vec<Value>,
     /// One record per send of a summary to a chat (`summary::Send`), oldest first.
@@ -301,8 +353,7 @@ pub(in crate::app) struct Run {
     /// `ledger_parent`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<String>,
-    /// While classifying: the director could not be reached; it is asked again from then on,
-    /// without a slot meanwhile.
+    /// While classifying: the director could not be reached; it is asked again from then on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_at: Option<i64>,
     /// How many times in a row the director could not be reached (the wait doubles).
@@ -326,6 +377,32 @@ pub(in crate::app) struct Run {
     /// When its pull requests were last read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked_at: Option<i64>,
+    /// The run this one restarted (`workflow_run_restart`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues: Option<String>,
+    /// The run that restarted this one; it was cancelled then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarted_as: Option<String>,
+    /// The user's handover note from the run this one restarted (at most
+    /// [`MAX_HANDOVER`] characters): given to each of its coding runs, posted nowhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handover: Option<String>,
+    /// The handover is the supervisor's draft, which the person did not edit: its coding runs
+    /// get it as the supervisor's untrusted text, not as the person's note.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handover_drafted: bool,
+    /// The workflow supervisor restarted the run this one continues, as its workflow
+    /// pre-approved: a pre-approved restart is never made of this run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preapproved_restart: bool,
+    /// The workflow supervisor's looks at this run (`supervisor::Look`), oldest first, at most
+    /// `supervisor::MAX_LOOKS`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supervision: Vec<super::supervisor::Look>,
+    /// When it was moved ahead in the line for a slot (by the supervisor or the person); the
+    /// mark is cleared when it takes a slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead_since: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -367,6 +444,13 @@ impl Run {
             acting_since: Some(now),
             waiting_since: None,
             checked_at: None,
+            continues: None,
+            restarted_as: None,
+            handover: None,
+            handover_drafted: false,
+            preapproved_restart: false,
+            supervision: Vec::new(),
+            ahead_since: None,
             created_at: now,
             updated_at: now,
             finished_at: None,
@@ -388,6 +472,11 @@ impl Run {
     /// Move to the next stage (or to `done`), closing the current one with `outcome`.
     pub(in crate::app) fn advance(&mut self, next: State, now: i64, outcome: &str) {
         self.close(now, outcome);
+        // A slot is kept only from one stage that takes it to the next; any other run waits in
+        // the line for one, in its place by creation.
+        if !(self.state.takes_slot() && next.takes_slot()) {
+            self.admitted = false;
+        }
         self.state = next;
         self.stopped_in = None;
         self.attention = None;
@@ -401,9 +490,6 @@ impl Run {
                 finished_at: None,
                 outcome: None,
             });
-        }
-        if !next.takes_slot() {
-            self.admitted = false;
         }
         if next == State::Done {
             self.timeline.push(Stage {
@@ -431,7 +517,11 @@ impl Run {
     }
     /// Stop for good: cancelled.
     pub(in crate::app) fn cancel(&mut self, now: i64) {
-        self.close(now, "cancelled");
+        self.cancel_as(now, "cancelled");
+    }
+    /// Stop for good, closing the current stage with `outcome` (`cancelled`, `restarted`).
+    pub(in crate::app) fn cancel_as(&mut self, now: i64, outcome: &str) {
+        self.close(now, outcome);
         self.state = State::Cancelled;
         self.attention = None;
         self.admitted = false;
@@ -450,6 +540,16 @@ impl Run {
                 .and_then(|c| c.coding.as_ref()),
             _ => None,
         }
+    }
+    /// Every implementation run it asked for: the planning run and each child's coding run.
+    pub(in crate::app) fn implementations(&self) -> impl Iterator<Item = &Implementation> {
+        self.planning
+            .iter()
+            .chain(self.children.iter().filter_map(|c| c.coding.as_ref()))
+    }
+    /// It waits in the line for a slot: in a stage that takes one, without one.
+    pub(in crate::app) fn waits_for_slot(&self) -> bool {
+        self.state.takes_slot() && !self.admitted
     }
     /// The run as the operations show it: the whole record, with the stage it is in.
     pub(in crate::app) fn view(&self) -> Value {
@@ -474,11 +574,115 @@ impl Run {
             "children": self.children.len(),
             "pull_requests": self.children.iter().flat_map(|c| c.pull_requests.iter())
                 .map(|p| json!({"url": p.url, "status": p.status})).collect::<Vec<_>>(),
+            "continues": self.continues,
+            "restarted_as": self.restarted_as,
+            "supervision": self.supervision.last().map(|l| json!({
+                "look": l.id, "event": l.event, "outcome": l.outcome, "created_at": l.created_at,
+                "proposed": self.supervision.iter().flat_map(|l| &l.actions).filter(|a| a.state == "proposed").count(),
+                "not_verified": l.checks.iter().filter(|c| c.result == "not_verified").count(),
+            })),
+            "ahead": self.ahead_since.is_some(),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "finished_at": self.finished_at,
         })
     }
+}
+
+/// The longest handover note, in characters.
+pub(in crate::app) const MAX_HANDOVER: usize = 4000;
+
+/// What a pause does to the agent sessions of the runs it covers when it begins.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::app) enum Sessions {
+    /// Stop every live session of those runs at once; each run with one stops `interrupted`.
+    Stop,
+    /// Leave the live sessions to finish; the engine still observes them.
+    Finish,
+}
+
+/// A pause of the workflow runs: of every project, or of one project (by name, in any
+/// organization). While one covers a run, the engine starts nothing for it: no slot, no
+/// director session, no planning or coding run and no acting block; it still observes the
+/// implementation runs already started and reads the creation ledger and pull requests. The
+/// watcher starts no run for a paused project. A paused run keeps its place by creation in the
+/// line for a slot, and takes it again when the pause ends.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(in crate::app) struct Pause {
+    /// The project's name; none for every project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub sessions: Sessions,
+    pub paused_at: i64,
+}
+impl Pause {
+    pub(in crate::app) fn covers(&self, project: &str) -> bool {
+        self.project
+            .as_deref()
+            .is_none_or(|p| p.eq_ignore_ascii_case(project))
+    }
+}
+/// Whether a pause covers a run's project.
+pub(in crate::app) fn paused(pauses: &[Pause], project: &str) -> bool {
+    pauses.iter().any(|p| p.covers(project))
+}
+
+/// The line for the `concurrency` slots, from `runs` oldest first (`Store::list` reversed):
+/// every run waiting for a slot, in creation order, and in its place a classifying run that is
+/// not waiting out a retry, which will need one once classified. A run that gave a slot back
+/// keeps its place, so a run created later never passes it.
+/// A paused run is out of the line while its pause lasts, so it holds up no run of a project
+/// that is not paused, and back in its place when the pause ends.
+/// A run moved ahead (`ahead_since`) goes before every run that was not, the runs moved ahead
+/// in the order they were moved; every other run keeps its place by creation.
+pub(in crate::app) fn line<'a>(runs: &'a [Run], now: i64, pauses: &[Pause]) -> Vec<&'a Run> {
+    let mut line: Vec<&Run> = runs
+        .iter()
+        .filter(|r| {
+            r.waits_for_slot()
+                || (r.state == State::Classifying && r.retry_at.is_none_or(|at| at <= now))
+        })
+        .filter(|r| !paused(pauses, &r.item.project))
+        .collect();
+    // Stable: equal keys keep their order by creation.
+    line.sort_by_key(|r| (r.ahead_since.is_none(), r.ahead_since.unwrap_or_default()));
+    line
+}
+
+/// Whether run `id` takes a slot now: fewer runs are ahead of it in the line than slots are
+/// free.
+pub(in crate::app) fn may_take_slot(
+    runs: &[Run],
+    id: &str,
+    concurrency: usize,
+    now: i64,
+    pauses: &[Pause],
+) -> bool {
+    let taken = runs
+        .iter()
+        .filter(|r| r.admitted && r.state.takes_slot() && r.id != id)
+        .count();
+    let free = concurrency.saturating_sub(taken);
+    line(runs, now, pauses)
+        .iter()
+        .position(|r| r.id == id)
+        .is_some_and(|ahead| ahead < free)
+}
+
+/// The place of each run waiting for a slot (1 is next), by run ID; a paused run has none.
+pub(in crate::app) fn positions(
+    runs: &[Run],
+    now: i64,
+    pauses: &[Pause],
+) -> HashMap<String, usize> {
+    line(runs, now, pauses)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, r)| r.waits_for_slot())
+        .map(|(at, r)| (r.id.clone(), at + 1))
+        .collect()
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -502,7 +706,9 @@ impl Store {
             CREATE INDEX IF NOT EXISTS workflow_runs_workflow ON workflow_runs(workflow_id, created_at);
             CREATE INDEX IF NOT EXISTS workflow_runs_state ON workflow_runs(state, updated_at);
             CREATE UNIQUE INDEX IF NOT EXISTS workflow_runs_active_item ON workflow_runs(item_url)
-                WHERE state NOT IN ('done','cancelled');",
+                WHERE state NOT IN ('done','cancelled');
+            CREATE TABLE IF NOT EXISTS workflow_pauses (
+                scope TEXT PRIMARY KEY, payload TEXT NOT NULL);",
         )?;
         Ok(Self(std::sync::Mutex::new(db)))
     }
@@ -539,6 +745,33 @@ impl Store {
         )?;
         ensure!(changed == 1, "Workflow run {} is not recorded.", run.id);
         Ok(())
+    }
+    /// The pauses in force, every project's first.
+    pub(in crate::app) fn pauses(&self) -> Result<Vec<Pause>> {
+        let db = self.0.lock().unwrap();
+        let mut query = db.prepare("SELECT payload FROM workflow_pauses ORDER BY scope")?;
+        let rows = query.query_map([], |r| r.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+    /// Record a pause, replacing the one of the same scope.
+    pub(in crate::app) fn pause(&self, pause: &Pause) -> Result<()> {
+        let scope = pause.project.as_deref().unwrap_or_default().to_lowercase();
+        self.0.lock().unwrap().execute(
+            "INSERT OR REPLACE INTO workflow_pauses (scope, payload) VALUES (?1, ?2)",
+            params![scope, serde_json::to_string(pause)?],
+        )?;
+        Ok(())
+    }
+    /// End the pause of one project, or every pause; returns how many ended.
+    pub(in crate::app) fn unpause(&self, project: Option<&str>) -> Result<usize> {
+        let db = self.0.lock().unwrap();
+        Ok(match project {
+            Some(project) => db.execute(
+                "DELETE FROM workflow_pauses WHERE scope=?1",
+                [project.to_lowercase()],
+            )?,
+            None => db.execute("DELETE FROM workflow_pauses", [])?,
+        })
     }
     /// Lose a run, as a failing disk would: a test of what is reported when saving fails.
     #[cfg(all(test, unix))]

@@ -4,6 +4,7 @@
 use super::super::synthetic::{self, Catalog};
 use super::*;
 use crate::ado::workflow::PullRequest;
+use crate::llm::implementation::mobile;
 use crate::store::settings::SettingsStore;
 use crate::workflows::{Agent, Repository, Workflow};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -21,21 +22,44 @@ impl Shell for TestShell {
     fn exit(&self) {}
 }
 
-/// The fake provider CLI: a director session prints `director.jsonl`, a planning session
+/// The fake provider CLI: a director session prints `director.jsonl`, a supervisor's look
+/// prints `supervisor.jsonl` (counting itself in `looks`), a planning session
 /// prints `plan.jsonl` (or waits while `plan_mode` is `block`), and a coding session counts
-/// itself in `starts` and then, by `mode`, reports its branch (`done`), waits for `release`
-/// first (`block`), raises a permission prompt nobody answers (`prompt`) or fails (`fail`).
+/// itself in `starts` and then, by `mode`, reports its branch (`done`), its branches in two
+/// repositories and one the workflow does not have (`multi`), waits for `release`
+/// first (`block`), raises a permission prompt nobody answers (`prompt`), fails (`fail`) or
+/// exits at once with code 1, writing on stderr that a system variable is missing (`exit`,
+/// also a `director_mode`).
 const CLI: &str = r#"#!/bin/sh
 LOG='{log}'
 prompt="$LOG/prompt.$$"
 cat > "$prompt"
+exit_at_start() {
+  echo 'Error: the SystemRoot environment variable is not set (C:\Users\someone)' >&2
+  exit 1
+}
 if grep -q 'Choose only the ID of a workflow' "$prompt"; then
   echo x >> "$LOG/directions"
+  [ "$(cat "$LOG/director_mode" 2>/dev/null)" = exit ] && exit_at_start
   printf '%s\n' '{"type":"step_start","sessionID":"ses_direct"}'
   if [ "$(cat "$LOG/director_mode" 2>/dev/null)" = block ]; then
     while [ ! -f "$LOG/release" ]; do sleep 0.05; done
   fi
   cat "$LOG/director.jsonl"
+  exit 0
+fi
+if grep -q 'Task: audit' "$prompt"; then
+  echo x >> "$LOG/audits"
+  cp "$prompt" "$LOG/audit.$(wc -l < "$LOG/audits" | tr -d ' ')"
+  printf '%s\n' '{"type":"step_start","sessionID":"ses_audit"}'
+  cat "$LOG/audit.jsonl"
+  exit 0
+fi
+if grep -q 'outranks any report' "$prompt"; then
+  echo x >> "$LOG/looks"
+  cp "$prompt" "$LOG/look.$(wc -l < "$LOG/looks" | tr -d ' ')"
+  printf '%s\n' '{"type":"step_start","sessionID":"ses_look"}'
+  cat "$LOG/supervisor.jsonl"
   exit 0
 fi
 if grep -q 'Return only JSON matching this schema' "$prompt"; then
@@ -52,11 +76,13 @@ echo x >> "$LOG/starts"
 n=$(wc -l < "$LOG/starts" | tr -d ' ')
 cp "$prompt" "$LOG/coding.$n"
 printf '%s' "$OPENCODE_CONFIG_CONTENT" > "$LOG/config.$n"
+[ "$(cat "$LOG/mode" 2>/dev/null)" = exit ] && exit_at_start
 printf '%s\n' "{\"type\":\"step_start\",\"sessionID\":\"ses_code$n\"}"
 case "$(cat "$LOG/mode" 2>/dev/null)" in
   block) while [ ! -f "$LOG/release" ]; do sleep 0.05; done ;;
   prompt) printf '%s\n' '{"type":"permission.asked","data":{"action":"bash","resources":["git push"]}}' ;;
   fail) printf '%s\n' '{"type":"text","part":{"text":"Could not finish."}}'; exit 1 ;;
+  multi) printf '%s\n' "{\"type\":\"text\",\"part\":{\"text\":\"Changed both.\\nBranch payments-api: feature/old-$n\\nBranch: feature/child-$n\\n**Branch payments-api:** feature/api-$n\\nBranch billing: feature/billing-$n\\nBranch ../x tool: feature/odd\"}}"; exit 0 ;;
 esac
 printf '%s\n' "{\"type\":\"text\",\"part\":{\"text\":\"Implemented change $n.\\nBranch: feature/child-$n\"}}"
 "#;
@@ -517,6 +543,178 @@ async fn a_task_run_codes_the_item_itself_without_a_plan_or_children() {
     assert_eq!((bench.count("plans"), bench.count("starts")), (0, 1));
     assert!(run.planning.is_none() && run.ledger.is_none());
     assert!(bench.catalog.only_reads());
+}
+
+/// The directories the machine gave an implementation run, its working directory first.
+fn launched_directories(bench: &Bench, id: &str) -> Vec<PathBuf> {
+    implementation::test_directories(&bench.host, id)
+}
+
+#[tokio::test]
+async fn a_task_run_works_in_every_repository_of_its_workflow_and_waits_for_each_pull_request() {
+    let bench = Bench::new().await;
+    bench.mode("mode", "multi");
+    let id = bench.start(TASK).await;
+    let run = bench.state(&id, Phase::PullRequests).await;
+    let child = &run.children[0];
+    // Its own repository (the one the item names) is the working directory; the other
+    // checkout is given too.
+    let coding = child.coding.clone().unwrap();
+    assert_eq!(
+        launched_directories(&bench, &coding.id),
+        [bench.web.as_path(), bench.api.as_path()]
+    );
+    assert_eq!(child.directory.as_deref(), Some(bench.web.as_path()));
+    assert_eq!(child.repository.as_ref().unwrap().name, "payments-web");
+    let prompt = fs::read_to_string(bench.log.join("coding.1")).unwrap();
+    assert!(
+        prompt.contains(&format!(
+            "Your working directory is the checkout of repository payments-web at {}",
+            bench.web.display()
+        )),
+        "{prompt}"
+    );
+    assert!(prompt.contains(&format!("payments-api at {}", bench.api.display())));
+    assert!(prompt.contains("each on its own branch with its own pull request"));
+    assert!(prompt.contains("`Branch: NAME`") && prompt.contains("`Branch REPOSITORY: NAME`"));
+    // Its branches: the plain line is its own repository's, the last line of the other wins,
+    // and a repository the workflow does not have is ignored and noted.
+    assert_eq!(child.branch.as_deref(), Some("feature/child-1"));
+    assert_eq!(
+        child.branches,
+        [record::RepositoryBranch {
+            repository: Repository {
+                id: API.into(),
+                name: "payments-api".into()
+            },
+            branch: "feature/api-1".into(),
+        }]
+    );
+    assert_eq!(
+        child.ignored_branches,
+        ["billing", "(not a plain repository name)"]
+    );
+    assert_eq!(
+        bench.reads("feature/billing") + bench.reads("feature/odd"),
+        0
+    );
+
+    // The run waits for the pull request of each branch.
+    bench.pulls(WEB, "payments-web", "feature/child-1", 31, "completed");
+    for _ in 0..3 {
+        bench.tick().await;
+    }
+    let run = bench.run(&id);
+    assert_eq!(run.state, Phase::PullRequests);
+    assert_eq!(run.children[0].pull_requests.len(), 1);
+    assert_eq!(run.children[0].without_pull_request(), ["payments-api"]);
+    bench.pulls(API, "payments-api", "feature/api-1", 32, "active");
+    let run = bench
+        .until(&id, |r| r.children[0].pull_requests.len() == 2)
+        .await;
+    assert_eq!(run.state, Phase::PullRequests);
+    bench.pulls(API, "payments-api", "feature/api-1", 32, "completed");
+    let run = bench.state(&id, Phase::Done).await;
+    let urls: Vec<&str> = run.children[0]
+        .pull_requests
+        .iter()
+        .map(|p| p.url.as_str())
+        .collect();
+    assert_eq!(
+        urls,
+        [
+            "https://dev.azure.com/example/Payments/_git/payments-web/pullrequest/31",
+            "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/32"
+        ]
+    );
+    assert_eq!(
+        run.timeline
+            .iter()
+            .find(|s| s.stage == Phase::PullRequests)
+            .unwrap()
+            .outcome
+            .as_deref(),
+        Some("completed: 2 pull requests")
+    );
+    assert_eq!(bench.count("starts"), 1);
+    assert!(bench.catalog.only_reads());
+    // The record shows them in the status.
+    let shown = bench
+        .op("workflow_run_status", json!({"run":id}))
+        .await
+        .unwrap();
+    assert_eq!(
+        shown["run"]["children"][0]["branches"][0]["branch"],
+        "feature/api-1"
+    );
+    assert_eq!(
+        shown["run"]["children"][0]["ignored_branches"][0],
+        "billing"
+    );
+}
+
+#[tokio::test]
+async fn a_planned_child_keeps_its_one_repository_and_two_task_runs_of_a_workflow_never_overlap() {
+    let bench = Bench::new().await;
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflow_settings.concurrency = 2;
+    bench.host.state.settings.save_map(&map).unwrap();
+    // One task names payments-web, the other payments-api: each has its own working directory,
+    // but both are given both checkouts, so the second waits for the first.
+    bench.catalog.add(
+        synthetic::detail(201, "Task", "task", "Second task", "In payments-api."),
+        true,
+    );
+    bench.mode("mode", "block");
+    let first = bench.start(TASK).await;
+    let second = bench.start(201).await;
+    bench
+        .until(&first, |r| {
+            r.children[0].coding.as_ref().is_some_and(|c| c.started)
+        })
+        .await;
+    let waiting = bench
+        .until(&second, |r| {
+            r.error
+                .as_deref()
+                .is_some_and(|e| e.contains("Another run is using these directories"))
+        })
+        .await;
+    assert!(waiting.admitted);
+    assert!(!waiting.children[0].coding.as_ref().unwrap().started);
+    // The first run's CLI logs its start a moment after its launch is accepted.
+    while bench.count("starts") == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(bench.count("starts"), 1);
+    // A single `Branch:` line behaves as before: one branch, one pull request to wait for.
+    bench.mode("mode", "done");
+    bench.release();
+    let run = bench.state(&first, Phase::PullRequests).await;
+    assert_eq!(run.children[0].branch.as_deref(), Some("feature/child-1"));
+    assert!(run.children[0].branches.is_empty() && run.children[0].ignored_branches.is_empty());
+    bench.pulls(WEB, "payments-web", "feature/child-1", 41, "completed");
+    bench.state(&first, Phase::Done).await;
+    bench.state(&second, Phase::PullRequests).await;
+    assert_eq!(bench.count("starts"), 2);
+
+    // A planned child is coded in the one repository it names, with the single-branch prompt.
+    let _ = fs::remove_file(bench.log.join("release"));
+    bench.mode("mode", "multi");
+    let hu = bench.start(HU).await;
+    let run = bench.state(&hu, Phase::PlanReview).await;
+    bench.confirm(&run, "created", &[101]).await;
+    let run = bench.state(&hu, Phase::PullRequests).await;
+    let child = &run.children[0];
+    assert_eq!(
+        launched_directories(&bench, &child.coding.as_ref().unwrap().id),
+        [bench.web.as_path()]
+    );
+    let prompt = fs::read_to_string(bench.log.join("coding.3")).unwrap();
+    assert!(prompt.contains("in the checkout of repository payments-web at"));
+    assert!(!prompt.contains("Branch REPOSITORY"));
+    assert_eq!(child.branch.as_deref(), Some("feature/child-3"));
+    assert!(child.branches.is_empty() && child.ignored_branches.is_empty());
 }
 
 #[tokio::test]
@@ -1050,6 +1248,481 @@ async fn a_coding_run_holds_its_slot_and_directories_until_the_session_ends_not_
         .await;
 }
 
+/// Code with a Claude CLI whose Remote Control connects and whose turn runs `body`.
+fn connected_claude(bench: &Bench, body: &str) {
+    let cli = bench.log.join("claude");
+    crate::llm::implementation::mobile::fake::connected_cli(&cli, &bench.log, body);
+    crate::llm::implementation::use_test_cli(Some(cli));
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflows[0].agent = Agent {
+        provider: "claude".into(),
+        model: "synthetic-model".into(),
+        effort: "low".into(),
+    };
+    bench.host.state.settings.save_map(&map).unwrap();
+}
+/// The session of implementation run `id` as Agent history shows it.
+async fn history_session(bench: &Bench, id: &str) -> Value {
+    let history = implementation::operate(&bench.host, "implementation_history", &json!({}))
+        .await
+        .unwrap();
+    let run = history["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id);
+    let run = run.unwrap();
+    json!({"session_alive":run["session_alive"],"handed_to_user":run["handed_to_user"]})
+}
+
+/// A Claude CLI that logs each Remote Control request to `names` and answers as the director
+/// (in its private directory), as a planning session (with a schema) or as a coding session.
+const NAMED_CLAUDE: &str = r#"#!/bin/sh
+schema=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-id) shift; session="$1" ;;
+    --json-schema) schema=1 ;;
+  esac
+  shift
+done
+read -r initialize
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-initialize","response":{}}}'
+read -r remote
+printf '%s\n' "$remote" >> '{log}/names'
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-remote","response":{"session_url":"https://claude.ai/code/session_Remote123"}}}'
+read -r prompt
+printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$session"
+case "$PWD" in
+  */directors/*) cat '{log}/claude-director.jsonl' ;;
+  *) if [ -n "$schema" ]; then cat '{log}/claude-plan.jsonl'; else cat '{log}/claude-code.jsonl'; fi ;;
+esac
+printf '%s\n' '{"type":"system","subtype":"session_state_changed","state":"idle"}'
+"#;
+
+#[tokio::test]
+async fn the_sessions_a_workflow_starts_carry_the_work_item_in_their_name() {
+    let bench = Bench::new().await;
+    // A schema session answers with `structured_output`, a coding session with its text.
+    for (file, answer) in [
+        (
+            "claude-director.jsonl",
+            json!({"workflow":"payments","reason":"Pagos."}),
+        ),
+        (
+            "claude-plan.jsonl",
+            json!({"children":[{"title":"API","description":"Change the endpoint.","type":"Task","fields":[]}]}),
+        ),
+        (
+            "claude-code.jsonl",
+            json!("Implemented.\nBranch: feature/named"),
+        ),
+    ] {
+        let line = match answer {
+            Value::String(text) => json!({"type":"result","is_error":false,"result":text}),
+            other => {
+                json!({"type":"result","is_error":false,"result":"","structured_output":other})
+            }
+        };
+        fs::write(bench.log.join(file), format!("{line}\n")).unwrap();
+    }
+    let cli = bench.log.join("claude");
+    crate::llm::agent::install_fake_cli(
+        &cli,
+        &NAMED_CLAUDE.replace("{log}", &bench.log.display().to_string()),
+    );
+    crate::llm::implementation::use_test_cli(Some(cli));
+    bench.director();
+    let claude = Agent {
+        provider: "claude".into(),
+        model: "synthetic-model".into(),
+        effort: "low".into(),
+    };
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflows[0].agent = claude.clone();
+    let director = map.workflow_settings.director.as_mut().unwrap();
+    (director.provider, director.model, director.effort) =
+        (claude.provider, claude.model, claude.effort);
+    // A title with line breaks, quotes and more than the name holds.
+    let title = format!("Fix \"rounding\"\r\nin totals {}", "x".repeat(300));
+    bench.catalog.add(
+        synthetic::detail(201, "Task", "task", &title, "In payments-web."),
+        true,
+    );
+    bench.host.state.settings.save_map(&map).unwrap();
+
+    // The director's session, then the planning run of the item it classified.
+    let planned = bench.start_director(HU).await;
+    bench.state(&planned, Phase::PlanReview).await;
+    // A coding run.
+    let coded = bench.start(201).await;
+    bench.state(&coded, Phase::PullRequests).await;
+    let names: Vec<String> = fs::read_to_string(bench.log.join("names"))
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let request: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(request["request"]["subtype"], "remote_control");
+            request["request"]["name"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(names.len(), 3, "{names:?}");
+    assert_eq!(names[0], format!("Teams Assistant - director {HU}"));
+    assert_eq!(names[1], format!("Teams Assistant - {HU} Pay by card"));
+    let expected: String = format!(
+        "Teams Assistant - 201 Fix \"rounding\" in totals {}",
+        "x".repeat(300)
+    )
+    .chars()
+    .take(crate::llm::implementation::name::NAME_CHARS - 1)
+    .collect();
+    assert_eq!(names[2], format!("{expected}…"));
+    // The name is not an argument, and nothing records it.
+    for line in fs::read_to_string(bench.log.join("names")).unwrap().lines() {
+        assert!(!line.contains('\r') && !line.contains("\\r"));
+    }
+    let status = bench
+        .op("workflow_run_status", json!({"run":coded}))
+        .await
+        .unwrap();
+    assert!(!status.to_string().contains("Teams Assistant"));
+}
+
+#[tokio::test]
+async fn a_done_coding_session_is_handed_to_the_user_until_its_workflow_run_is_cancelled() {
+    let bench = Bench::new().await;
+    connected_claude(
+        &bench,
+        r#"printf '%s\n' '{"type":"result","is_error":false,"result":"Implemented.\nBranch: feature/kept"}'"#,
+    );
+    let id = bench.start(TASK).await;
+    let run = bench.state(&id, Phase::PullRequests).await;
+    let coding = run.children[0].coding.clone().unwrap().id;
+    assert_eq!(bench.implementation(&coding).await, "done");
+    let pid = mobile::fake::pids(&bench.log).pop().unwrap();
+    // The run ended done: its session stays reachable and belongs to the user now.
+    assert!(mobile::fake::runs(&pid));
+    let kept = json!({"session_alive":true,"handed_to_user":true});
+    let status = bench
+        .op("workflow_run_status", json!({"run":id}))
+        .await
+        .unwrap();
+    let shown = &status["run"]["children"][0]["coding"];
+    assert_eq!(
+        json!({"session_alive":shown["session_alive"],"handed_to_user":shown["handed_to_user"]}),
+        kept
+    );
+    assert_eq!(history_session(&bench, &coding).await, kept);
+
+    // Cancelling the workflow run stops every session it started, a kept one included.
+    let cancelled = bench
+        .op("workflow_run_cancel", json!({"run":id,"confirmed":true}))
+        .await
+        .unwrap();
+    assert_eq!(cancelled["sessions_stopped"], json!([coding]));
+    assert!(cancelled["warning"].is_null());
+    assert!(mobile::fake::ends(&pid).await);
+    let gone = json!({"session_alive":false,"handed_to_user":false});
+    let status = bench
+        .op("workflow_run_status", json!({"run":id}))
+        .await
+        .unwrap();
+    let shown = &status["run"]["children"][0]["coding"];
+    assert_eq!(
+        json!({"session_alive":shown["session_alive"],"handed_to_user":shown["handed_to_user"]}),
+        gone
+    );
+    assert_eq!(history_session(&bench, &coding).await, gone);
+}
+
+#[tokio::test]
+async fn a_coding_run_that_does_not_end_done_stops_its_session() {
+    // A turn that answered but raised a prompt nobody answered (`permission_prompt`), and one
+    // that failed (`needs_attention`).
+    for (body, ended) in [
+        (
+            r#"printf '%s\n' '{"type":"control_request","request_id":"ask-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push"}}}'
+read -r answer
+printf '%s\n' '{"type":"result","is_error":false,"result":"Pushed nothing.\nBranch: feature/asked"}'"#,
+            "permission_prompt",
+        ),
+        (
+            r#"printf '%s\n' '{"type":"result","is_error":true,"result":"Could not finish."}'"#,
+            "needs_attention",
+        ),
+    ] {
+        let bench = Bench::new().await;
+        connected_claude(&bench, body);
+        let id = bench.start(TASK).await;
+        let run = bench.state(&id, Phase::NeedsAttention).await;
+        let coding = run.children[0].coding.clone().unwrap().id;
+        assert_eq!(bench.implementation(&coding).await, ended);
+        let pid = mobile::fake::pids(&bench.log).pop().unwrap();
+        assert!(mobile::fake::ends(&pid).await, "{ended}");
+        assert_eq!(
+            history_session(&bench, &coding).await,
+            json!({"session_alive":false,"handed_to_user":false})
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_run_stops_a_kept_session_on_a_worker_machine() {
+    let bench = Bench::new().await;
+    let worker = uuid::Uuid::new_v4().to_string();
+    let registration = implementation::fleet::register(
+        &bench.host,
+        &json!({"id":worker,"name":"Worker","os":"linux"}),
+    )
+    .await
+    .unwrap();
+    let token = registration["token"].as_str().unwrap().to_owned();
+    // The worker reports a coding run that ended done, its Claude session kept for the user.
+    let coding = uuid::Uuid::new_v4().to_string();
+    let url = "https://dev.azure.com/example/Payments/_workitems/edit/300";
+    let poll = json!({"id":worker,"token":token,"action":"poll","sessions":[{"id":coding,
+        "machine":worker,"item":{"id":300,"title":"Worker task","url":url,"project":"Payments",
+        "state":"Active","kind":"Task","created_at":null,"dates":[]},"provider":"claude",
+        "model":"synthetic-model","effort":"low","state":"done",
+        "session_id":"77777777-7777-4777-8777-777777777777",
+        "remote":{"status":"connected","url":"https://claude.ai/code/session_Remote123",
+            "expires_at":chrono::Utc::now().timestamp() + 3600},
+        "created_at":"2026-11-14T10:00:00+00:00","started_at":null,"finished_at":null}]});
+    implementation::fleet::protocol(&bench.host, &poll)
+        .await
+        .unwrap();
+    let mut run = Run::new(
+        Item {
+            id: 300,
+            url: url.into(),
+            ..Default::default()
+        },
+        bench.now(),
+    );
+    run.state = Phase::PullRequests;
+    run.children = vec![record::Child {
+        id: 300,
+        title: "Worker task".into(),
+        url: url.into(),
+        coding: Some(record::Implementation {
+            id: coding.clone(),
+            machine: worker.clone(),
+            started: true,
+            state: Some("done".into()),
+            failure: None,
+        }),
+        outcome: Some("done".into()),
+        ..Default::default()
+    }];
+    assert!(bench.host.state.workflows.db.insert(&run).unwrap());
+    let status = bench
+        .op("workflow_run_status", json!({"run":run.id}))
+        .await
+        .unwrap();
+    assert_eq!(
+        status["run"]["children"][0]["coding"]["handed_to_user"],
+        true
+    );
+    let cancelling = {
+        let (host, azure, id) = (bench.host.clone(), bench.azure.clone(), run.id.clone());
+        tokio::spawn(async move {
+            operation(
+                &host,
+                "workflow_run_cancel",
+                &json!({"run":id,"confirmed":true}),
+                &azure,
+            )
+            .await
+        })
+    };
+    let poll = json!({"id":worker,"token":token,"action":"poll"});
+    let command = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let reply = implementation::fleet::protocol(&bench.host, &poll)
+                .await
+                .unwrap();
+            if !reply["command"].is_null() {
+                break reply["command"].clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // The worker is asked to stop that run's session (it closes it, the run is finished).
+    assert_eq!(command["method"], "implementation_cancel");
+    assert_eq!(command["args"]["id"], coding.as_str());
+    let mut answered = poll.clone();
+    answered["results"] =
+        json!([{"id":command["id"],"result":{"ok":true,"data":{"cancelled":true}}}]);
+    implementation::fleet::protocol(&bench.host, &answered)
+        .await
+        .unwrap();
+    let cancelled = cancelling.await.unwrap().unwrap();
+    assert_eq!(cancelled["sessions_stopped"], json!([coding]));
+    assert_eq!(cancelled["run"]["state"], "cancelled");
+}
+
+#[test]
+fn the_line_for_a_slot_is_creation_order_and_a_retrying_run_keeps_its_place() {
+    let item = |id: u64| Item {
+        id,
+        url: format!("https://dev.azure.com/example/Payments/_workitems/edit/{id}"),
+        ..Default::default()
+    };
+    // Oldest first: a run retrying its classification until 200, then three waiting to code.
+    let mut runs: Vec<Run> = (1..=4).map(|id| Run::new(item(id), 100)).collect();
+    runs[0].retry_at = Some(200);
+    runs[0].retries = 1;
+    for run in &mut runs[1..] {
+        run.state = Phase::Coding;
+    }
+    let ids: Vec<String> = runs.iter().map(|r| r.id.clone()).collect();
+    // A run created later never takes the slot first, whichever asks first.
+    assert!(!record::may_take_slot(&runs, &ids[2], 1, 150, &[]));
+    assert!(!record::may_take_slot(&runs, &ids[3], 1, 150, &[]));
+    // Waiting out its retry, the retrying run is out of the line.
+    assert!(record::may_take_slot(&runs, &ids[1], 1, 150, &[]));
+    // Once its retry is due it is back in its place: nobody created after it passes it.
+    assert!(!record::may_take_slot(&runs, &ids[1], 1, 200, &[]));
+    let places = record::positions(&runs, 200, &[]);
+    assert_eq!(places.get(&ids[0]), None);
+    assert_eq!(places[&ids[1]], 2);
+    runs[0].state = Phase::Coding;
+    runs[0].retry_at = None;
+    assert!(record::may_take_slot(&runs, &ids[0], 1, 200, &[]));
+    // A slot held is not free; a second slot goes to the next in the line only.
+    runs[0].admitted = true;
+    assert!(!record::may_take_slot(&runs, &ids[1], 1, 200, &[]));
+    assert!(record::may_take_slot(&runs, &ids[1], 2, 200, &[]));
+    assert!(!record::may_take_slot(&runs, &ids[2], 2, 200, &[]));
+    let places = record::positions(&runs, 200, &[]);
+    assert_eq!(places.get(&ids[0]), None);
+    assert_eq!(
+        (places[&ids[1]], places[&ids[2]], places[&ids[3]]),
+        (1, 2, 3)
+    );
+    // A slot is kept from one stage that takes it to the next, never from classifying.
+    let mut classified = Run::new(item(5), 100);
+    classified.admitted = true;
+    classified.advance(Phase::Coding, 110, "chosen: payments");
+    assert!(classified.waits_for_slot());
+}
+
+/// The item each coding session was asked to implement, in the order they started.
+fn coded(bench: &Bench) -> Vec<u64> {
+    (1..=bench.count("starts"))
+        .map(|n| {
+            let prompt = fs::read_to_string(bench.log.join(format!("coding.{n}"))).unwrap();
+            [TASK, 201, 202, 203, 204, 205]
+                .into_iter()
+                .find(|id| prompt.contains(&format!("You are implementing Task {id} ")))
+                .unwrap()
+        })
+        .collect()
+}
+
+fn place(listed: &Value, id: &str) -> (bool, Value) {
+    let run = listed["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap();
+    (
+        run["waiting_for_slot"].as_bool().unwrap(),
+        run["queue_position"].clone(),
+    )
+}
+
+#[tokio::test]
+async fn runs_are_coded_in_the_order_they_were_created_with_one_slot() {
+    let bench = Bench::new().await;
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflow_settings.concurrency = 1;
+    bench.host.state.settings.save_map(&map).unwrap();
+    bench.director();
+    let mut ids = Vec::new();
+    for item in 201..=205 {
+        bench.catalog.add(
+            synthetic::detail(item, "Task", "task", &format!("Task {item}"), "Anywhere."),
+            true,
+        );
+        ids.push(bench.start_director(item).await);
+    }
+    for id in &ids {
+        bench.state(id, Phase::PullRequests).await;
+    }
+    assert_eq!(coded(&bench), vec![201, 202, 203, 204, 205]);
+}
+
+#[tokio::test]
+async fn a_run_whose_director_failed_twice_is_coded_before_the_runs_created_after_it() {
+    let bench = Bench::new().await;
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflow_settings.concurrency = 1;
+    bench.host.state.settings.save_map(&map).unwrap();
+    bench.director();
+    for item in [201, 202, 203] {
+        bench.catalog.add(
+            synthetic::detail(item, "Task", "task", &format!("Task {item}"), "Anywhere."),
+            true,
+        );
+    }
+    // The only slot codes.
+    bench.mode("mode", "block");
+    let first = bench.start(TASK).await;
+    bench
+        .until(&first, |r| {
+            r.children[0].coding.as_ref().is_some_and(|c| c.started)
+        })
+        .await;
+    let retried = bench.start_director(201).await;
+    let second = bench.start_director(202).await;
+    let third = bench.start_director(203).await;
+    // The director cannot read the oldest of the three for now.
+    bench.catalog.failing_items.lock().unwrap().insert(201);
+    // The two created after it are classified while the slot codes, and wait for it.
+    let run = bench.state(&second, Phase::Coding).await;
+    assert!(!run.admitted);
+    let run = bench.state(&third, Phase::Coding).await;
+    assert!(!run.admitted);
+    assert_eq!(bench.count("directions"), 2);
+    assert_eq!(bench.count("starts"), 1);
+    bench.until(&retried, |r| r.retries == 1).await;
+    bench.offset.store(61, Ordering::SeqCst);
+    let run = bench.until(&retried, |r| r.retries == 2).await;
+    assert_eq!(run.state, Phase::Classifying);
+    // Waiting out its retry, it is not in the line.
+    let listed = bench.op("workflow_runs", json!({})).await.unwrap();
+    assert_eq!(place(&listed, &retried), (false, Value::Null));
+    assert_eq!(place(&listed, &second), (true, json!(1)));
+    assert_eq!(place(&listed, &third), (true, json!(2)));
+    assert_eq!(place(&listed, &first), (false, Value::Null));
+    // It answers on its next try and takes its place, before the two created after it.
+    bench.catalog.failing_items.lock().unwrap().remove(&201);
+    bench.offset.store(61 + 121, Ordering::SeqCst);
+    bench.state(&retried, Phase::Coding).await;
+    let listed = bench.op("workflow_runs", json!({})).await.unwrap();
+    assert_eq!(place(&listed, &retried), (true, json!(1)));
+    assert_eq!(place(&listed, &second), (true, json!(2)));
+    assert_eq!(place(&listed, &third), (true, json!(3)));
+    let status = bench
+        .op("workflow_run_status", json!({"run": third}))
+        .await
+        .unwrap();
+    assert_eq!(status["run"]["waiting_for_slot"], true);
+    assert_eq!(status["run"]["queue_position"], 3);
+    assert_eq!(bench.count("starts"), 1);
+    // The slot frees.
+    bench.mode("mode", "done");
+    bench.release();
+    for id in [&first, &retried, &second, &third] {
+        bench.state(id, Phase::PullRequests).await;
+    }
+    assert_eq!(coded(&bench), vec![TASK, 201, 202, 203]);
+}
+
 #[tokio::test]
 async fn a_start_needs_an_enabled_workflow_of_the_items_project_an_assigned_item_and_confirmation()
 {
@@ -1200,6 +1873,19 @@ fn a_reported_branch_is_the_last_branch_line_and_a_child_names_its_repository() 
         }
     }
     assert_eq!(reported_branch("No branch here."), None);
+    // Lines for other repositories are not the primary's, and the last of each counts.
+    use super::engine::reported_repository_branches as others;
+    let report = "Branch api: feature/1\nBranch: feature/main\n- **Branch `api`:** `refs/heads/feature/2`\nBranch web: feature/3 (pushed)\nBranch notes: two words\nBranches: feature/x";
+    assert_eq!(reported_branch(report).as_deref(), Some("feature/main"));
+    assert_eq!(
+        others(report),
+        [
+            ("api".to_owned(), "feature/2".to_owned()),
+            ("web".to_owned(), "feature/3".to_owned())
+        ]
+    );
+    assert!(others("Branch: feature/1").is_empty());
+    assert!(others("Branch x: bad name").is_empty());
     let w = workflow(
         &uuid::Uuid::new_v4().to_string(),
         Path::new("/w/api"),
@@ -1307,7 +1993,7 @@ async fn a_run_with_no_child_created_needs_attention_instead_of_finishing() {
 }
 
 #[tokio::test]
-async fn an_unreachable_director_releases_its_slot_and_is_asked_again_later() {
+async fn an_unreachable_director_holds_up_no_other_run_and_is_asked_again_later() {
     let bench = Bench::new().await;
     let mut map = bench.host.state.settings.map().unwrap();
     map.workflow_settings.concurrency = 1;
@@ -1450,6 +2136,7 @@ async fn cancel_warns_when_a_recorded_run_may_be_running_on_an_unreachable_machi
         machine: machine.clone(),
         started: false,
         state: None,
+        failure: None,
     });
     bench.save(&run);
     let cancelled = bench
@@ -1493,3 +2180,308 @@ async fn a_ledger_entry_for_another_parent_is_planned_again_on_resume_not_looped
 }
 
 mod acting;
+mod limits;
+mod pause;
+
+/// Why the session of run `id` did not end with its answer, as Agent history shows it.
+async fn history_failure(bench: &Bench, id: &str) -> Value {
+    let history = implementation::operate(&bench.host, "implementation_history", &json!({}))
+        .await
+        .unwrap();
+    history["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap()["failure"]
+        .clone()
+}
+
+/// A worker machine registered on the bench's coordinator and seen once, as a poll would make
+/// it: its ID and token.
+async fn worker(bench: &Bench) -> (String, String) {
+    let worker = uuid::Uuid::new_v4().to_string();
+    let registration = implementation::fleet::register(
+        &bench.host,
+        &json!({"id":worker,"name":"Worker","os":"linux"}),
+    )
+    .await
+    .unwrap();
+    let token = registration["token"].as_str().unwrap().to_owned();
+    let poll = json!({"id":worker,"token":token,"action":"poll","management_support":true,
+        "roots":[],"workflow_direct_support":true});
+    let reply = implementation::fleet::protocol(&bench.host, &poll)
+        .await
+        .unwrap();
+    // A coordinator says it reads a session's failure, so a worker sends it.
+    assert_eq!(reply["session_failure_support"], true);
+    (worker, token)
+}
+/// Answer, as the worker, every call it is given with `answer`, until `until` finishes.
+async fn serve<T>(
+    bench: &Bench,
+    (worker, token): (&str, &str),
+    until: tokio::task::JoinHandle<T>,
+    answer: impl AsyncFn(&serde_json::Map<String, Value>) -> Value,
+) -> (T, Vec<String>) {
+    let poll = json!({"id":worker,"token":token,"action":"poll","management_support":true,
+        "roots":[],"workflow_direct_support":true});
+    let mut methods = Vec::new();
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if until.is_finished() {
+                break until.await.unwrap();
+            }
+            let reply = implementation::fleet::protocol(&bench.host, &poll)
+                .await
+                .unwrap();
+            if let Some(command) = reply["command"].as_object() {
+                methods.push(command["method"].as_str().unwrap().to_owned());
+                let mut answered = poll.clone();
+                answered["results"] = json!([{"id":command["id"],"result":answer(command).await}]);
+                implementation::fleet::protocol(&bench.host, &answered)
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the coordinator kept waiting");
+    (finished, methods)
+}
+
+#[tokio::test]
+async fn a_cli_that_exits_at_once_names_its_cause_in_the_record_and_the_attention_text() {
+    let bench = Bench::new().await;
+    bench.mode("mode", "exit");
+    let id = bench.start(TASK).await;
+    let run = bench.state(&id, Phase::NeedsAttention).await;
+    let attention = run.attention.clone().unwrap();
+    assert!(
+        attention.contains("ended needs_attention: The CLI exited as soon as it started with exit code 1. It reported a missing system variable"),
+        "{attention}"
+    );
+    let coding = run.children[0].coding.clone().unwrap();
+    let expected = json!({"cause":"cli_exited_at_start","exit_code":1,"stderr":"missing_variable"});
+    assert_eq!(serde_json::to_value(coding.failure).unwrap(), expected);
+    // The machine's record and Agent history say the same, with the sentence; the status too.
+    let runs = implementation::operate(
+        &bench.host,
+        "implementation_runs",
+        &json!({"machine":bench.machine,"id":coding.id}),
+    )
+    .await
+    .unwrap();
+    let record = &runs["runs"][0];
+    assert_eq!(record["state"], "needs_attention");
+    assert_eq!(record["failure"]["cause"], "cli_exited_at_start");
+    assert_eq!(record["failure"]["exit_code"], 1);
+    assert_eq!(record["failure"]["stderr"], "missing_variable");
+    assert!(
+        record["failure"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("missing system variable")
+    );
+    assert_eq!(
+        history_failure(&bench, &coding.id).await["cause"],
+        "cli_exited_at_start"
+    );
+    let status = bench
+        .op("workflow_run_status", json!({"run":id}))
+        .await
+        .unwrap();
+    assert_eq!(status["run"]["children"][0]["coding"]["failure"], expected);
+    // What the CLI wrote on stderr is in no record.
+    let history = implementation::operate(&bench.host, "implementation_history", &json!({}))
+        .await
+        .unwrap();
+    for text in [
+        runs.to_string(),
+        history.to_string(),
+        status.to_string(),
+        serde_json::to_string(&run).unwrap(),
+    ] {
+        assert!(
+            !text.contains("someone") && !text.contains("is not set"),
+            "{text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_director_that_gives_no_answer_names_its_cause_in_the_attention_text_and_the_status() {
+    let bench = Bench::new().await;
+    bench.director();
+    bench.mode("director_mode", "exit");
+    let id = bench.start_director(HU).await;
+    let run = bench.state(&id, Phase::Unassigned).await;
+    let attention = run.attention.clone().unwrap();
+    assert!(
+        attention.starts_with("The workflow director gave no answer: The CLI exited as soon as it started with exit code 1. It reported a missing system variable")
+            && attention.ends_with("Assign a workflow to this run."),
+        "{attention}"
+    );
+    let status = bench
+        .op("workflow_run_status", json!({"run":id}))
+        .await
+        .unwrap();
+    let failure = &status["run"]["classification"]["failure"];
+    assert_eq!(failure["cause"], "cli_exited_at_start");
+    assert_eq!(failure["exit_code"], 1);
+    assert_eq!(failure["stderr"], "missing_variable");
+    assert!(!status.to_string().contains("someone"));
+    // The director's session in Agent history says why.
+    let session = run.classification.as_ref().unwrap()["session"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        history_failure(&bench, &session).await["cause"],
+        "cli_exited_at_start"
+    );
+    // A summary the director cannot write (the fake CLI answers it with a plan) says why on
+    // the run.
+    let summary =
+        super::super::summary::operation(&bench.host, "workflow_summary", &json!({"run":id}))
+            .await
+            .unwrap_err();
+    assert!(
+        summary.contains("The agent's answer was not the JSON it was asked for."),
+        "{summary}"
+    );
+    let error = bench.run(&id).error.unwrap();
+    assert!(
+        error.starts_with("The progress summary failed: ")
+            && error.contains("The agent's answer was not the JSON it was asked for."),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_worker_reports_why_its_sessions_did_not_end_with_their_answer() {
+    let bench = Bench::new().await;
+    bench.director();
+    bench.mode("director_mode", "exit");
+    let (worker, token) = worker(&bench).await;
+    // The director is the workflow's own machine and agent: the worker.
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflow_settings.director.as_mut().unwrap().machine = worker.clone();
+    map.workflows[0].machine = worker.clone();
+    bench.host.state.settings.save_map(&map).unwrap();
+    let classify = |bench: &Bench| {
+        let (host, azure) = (bench.host.clone(), bench.azure.clone());
+        tokio::spawn(async move {
+            super::super::director::classify_for(&host, &azure, HU, None, None).await
+        })
+    };
+    // The worker runs the director, whose CLI exits at once: its cause reaches the coordinator.
+    let host = bench.host.clone();
+    let (reply, methods) = serve(
+        &bench,
+        (&worker, &token),
+        classify(&bench),
+        async |command| implementation::fleet::answer(&host, command).await,
+    )
+    .await;
+    assert_eq!(methods, ["workflow_direct"], "{reply:?}");
+    let reply = reply.unwrap();
+    assert!(reply["workflow"].is_null());
+    assert_eq!(reply["failure"]["cause"], "cli_exited_at_start");
+    assert_eq!(reply["failure"]["exit_code"], 1);
+    assert_eq!(reply["failure"]["stderr"], "missing_variable");
+    // A worker whose director could not run says why; an older one says nothing, and that
+    // reads as unknown.
+    for (result, said) in [
+        (
+            json!({"ok":false,"failure":{"cause":"cli_missing"}}),
+            "The selected CLI is not installed on the machine.",
+        ),
+        (json!({"ok":false}), "The machine did not say why"),
+        (
+            json!({"ok":false,"failure":{"cause":"a_cause_from_a_newer_version"}}),
+            "The machine did not say why",
+        ),
+    ] {
+        let (reply, _) = serve(&bench, (&worker, &token), classify(&bench), async |_| {
+            result.clone()
+        })
+        .await;
+        let error = reply.unwrap_err();
+        assert!(
+            error.starts_with("[not_ready] The workflow director did not run.")
+                && error.contains(said),
+            "{error}"
+        );
+    }
+
+    // A coding run on the worker that ended without its answer: the cause it reported, or
+    // unknown from a worker that predates causes.
+    for (item, failure, said) in [
+        (
+            301,
+            json!({"cause":"cli_exited_at_start","exit_code":1,"stderr":"missing_variable"}),
+            "The CLI exited as soon as it started with exit code 1.",
+        ),
+        (302, Value::Null, "The machine did not say why"),
+    ] {
+        let coding = uuid::Uuid::new_v4().to_string();
+        let url = format!("https://dev.azure.com/example/Payments/_workitems/edit/{item}");
+        let mut run = Run::new(
+            Item {
+                id: item,
+                url: url.clone(),
+                ..Default::default()
+            },
+            bench.now(),
+        );
+        run.state = Phase::Coding;
+        run.workflow = Some("payments".into());
+        run.definition = Some(map.workflows[0].clone());
+        run.admitted = true;
+        run.acting_since = Some(bench.now());
+        run.children = vec![record::Child {
+            id: item,
+            title: "Worker task".into(),
+            url,
+            coding: Some(record::Implementation {
+                id: coding.clone(),
+                machine: worker.clone(),
+                started: true,
+                state: Some("running".into()),
+                failure: None,
+            }),
+            ..Default::default()
+        }];
+        assert!(bench.host.state.workflows.db.insert(&run).unwrap());
+        let mut reported =
+            json!({"id":coding,"machine":worker,"state":"needs_attention","output":""});
+        if !failure.is_null() {
+            reported["failure"] = failure.clone();
+        }
+        let ticking = {
+            let (host, azure, now) = (bench.host.clone(), bench.azure.clone(), bench.now());
+            tokio::spawn(async move { engine::tick(&host, &azure, now, 0).await })
+        };
+        let (ticked, _) = serve(&bench, (&worker, &token), ticking, async |command| {
+            assert_eq!(command["method"], "implementation_runs");
+            json!({"ok":true,"data":{"runs":[reported.clone()]}})
+        })
+        .await;
+        ticked.unwrap();
+        let run = bench.run(&run.id);
+        assert_eq!(run.state, Phase::NeedsAttention);
+        let attention = run.attention.unwrap();
+        assert!(attention.contains(said), "{attention}");
+        let recorded = run.children[0].coding.as_ref().unwrap().failure.unwrap();
+        assert_eq!(
+            recorded.cause,
+            if failure.is_null() {
+                crate::llm::implementation::Cause::Unknown
+            } else {
+                crate::llm::implementation::Cause::CliExitedAtStart
+            }
+        );
+    }
+}

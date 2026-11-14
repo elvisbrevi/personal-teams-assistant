@@ -53,7 +53,7 @@ async fn exchange(connection: &Connection, mut body: Value) -> Result<Value> {
     }
     crate::adapters::bounded_json(response, 1_000_000).await
 }
-async fn remote(connection: &Connection, body: Value) -> Result<Value> {
+pub(super) async fn remote(connection: &Connection, body: Value) -> Result<Value> {
     let result = exchange(connection, body).await?;
     ensure!(
         result["ok"] == true,
@@ -338,6 +338,9 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         checkout_inspect: false,
         workflow_direct: false,
         upgrade: false,
+        agent_sessions: false,
+        session_names: false,
+        workflow_supervise: false,
     });
     state.save(&data)?;
     drop(data);
@@ -433,6 +436,9 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
             machine.checkout_inspect = args["checkout_inspect_support"] == true;
             machine.workflow_direct = args["workflow_direct_support"] == true;
             machine.upgrade = args["upgrade_support"] == true;
+            machine.agent_sessions = args["agent_sessions_support"] == true;
+            machine.session_names = args["session_names_support"] == true;
+            machine.workflow_supervise = args["workflow_supervise_support"] == true;
         }
         state.save(&data)?;
     }
@@ -477,7 +483,8 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
                 c.claimed = true;
                 json!({"id":c.id,"method":c.method,"args":c.args})
             });
-            let mut reply = json!({"command":command,"session_cursor":session_cursor});
+            // It reads a session's `failure`: a worker sends it only to a coordinator that says so.
+            let mut reply = json!({"command":command,"session_cursor":session_cursor,"session_failure_support":true});
             if store_delivery {
                 reply["store_delivery"] = json!(true);
             }
@@ -550,6 +557,9 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
         }
         "call" => match args["method"].as_str().unwrap_or_default() {
             "implementation_sessions" => Box::pin(session_index(host, &args["args"])).await,
+            "implementation_recent_sessions" => {
+                Box::pin(super::sessions::operate(host, &args["args"])).await
+            }
             "implementation_create" | "implementation_creation" => {
                 Box::pin(super::operation(
                     host,
@@ -646,6 +656,50 @@ pub(super) async fn call(
     method: &str,
     args: Value,
 ) -> Result<Value> {
+    call_bounded(host, machine, method, args, None).await
+}
+/// `call`, waiting at most `bound` for the machine's answer (never longer than `call` would).
+pub(super) async fn call_within(
+    host: &Arc<Host>,
+    machine: &str,
+    method: &str,
+    args: Value,
+    bound: Duration,
+) -> Result<Value> {
+    call_bounded(host, machine, method, args, Some(bound)).await
+}
+/// Removes a queued machine call when its caller stops waiting, however it stops (an answer,
+/// a refusal, the end of the wait, or a caller that gives up and drops the future), so calls
+/// that nobody waits for never fill the queue.
+struct Pending {
+    host: Arc<Host>,
+    id: String,
+}
+impl Drop for Pending {
+    fn drop(&mut self) {
+        let id = std::mem::take(&mut self.id);
+        if let Ok(mut calls) = self.host.state.implementation.calls.try_lock() {
+            calls.retain(|c| c.id != id);
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let host = self.host.clone();
+            runtime.spawn(async move {
+                host.state
+                    .implementation
+                    .calls
+                    .lock()
+                    .await
+                    .retain(|c| c.id != id);
+            });
+        }
+    }
+}
+async fn call_bounded(
+    host: &Arc<Host>,
+    machine: &str,
+    method: &str,
+    args: Value,
+    bound: Option<Duration>,
+) -> Result<Value> {
     authority::require_account(&host.state)?;
     ensure!(
         [
@@ -660,7 +714,8 @@ pub(super) async fn call(
             "implementation_cancel",
             "implementation_mobile_session",
             "checkout_inspect",
-            "workflow_direct"
+            "workflow_direct",
+            "agent_sessions_local"
         ]
         .contains(&method),
         "Unavailable execution operation."
@@ -726,6 +781,20 @@ pub(super) async fn call(
                 .any(|m| m.id == machine && m.workflow_direct),
             "Update the workflow director's machine: its version cannot run the workflow director."
         );
+        // A supervisor's look (`task: "supervise"`, its own session bound) only goes to a
+        // worker that says it runs one; an older worker would refuse the unknown fields.
+        if args["task"] == "supervise" || args["task"] == "audit" || !args["seconds"].is_null() {
+            ensure!(
+                state
+                    .registry
+                    .lock()
+                    .await
+                    .machines
+                    .iter()
+                    .any(|m| m.id == machine && m.workflow_supervise),
+                "Update the workflow supervisor's machine: its version cannot run the workflow supervisor."
+            );
+        }
     }
     if method == "machine_assistant" {
         let data = state.registry.lock().await;
@@ -747,6 +816,8 @@ pub(super) async fn call(
             "Select this machine for Teams before starting it."
         );
     }
+    // A supervisor's look asks for its own session bound; the wait follows it.
+    let asked_seconds = args["seconds"].as_u64();
     let id = uuid::Uuid::new_v4().to_string();
     {
         let mut calls = state.calls.lock().await;
@@ -760,12 +831,22 @@ pub(super) async fn call(
             result: None,
         });
     }
+    let _pending = Pending {
+        host: host.clone(),
+        id: id.clone(),
+    };
     // The director's session answers within its own bound (`director::SESSION_SECONDS`).
-    for _ in 0..match method {
+    let polls = match method {
         "machine_assistant" | "machine_upgrade" => 360,
-        "workflow_direct" => 4 * super::director::WAIT_SECONDS,
+        "workflow_direct" => {
+            4 * asked_seconds.map_or(super::director::WAIT_SECONDS, super::director::wait_seconds)
+        }
         _ => 160,
-    } {
+    };
+    let polls = bound.map_or(polls, |bound| {
+        polls.min(u64::try_from(bound.as_millis() / 250).unwrap_or(u64::MAX))
+    });
+    for _ in 0..polls {
         tokio::time::sleep(Duration::from_millis(250)).await;
         authority::require_account(&host.state)?;
         ensure!(
@@ -792,6 +873,17 @@ pub(super) async fn call(
                         .unwrap_or("The machine could not start the update. Check it with pta update status on that computer.")
                 );
             }
+            if method == "workflow_direct" && result["ok"] != true {
+                // The cause the machine chose (`unknown` from one that predates causes).
+                let failure = crate::llm::implementation::Failure::read(&result["failure"]);
+                return Err(crate::llm::implementation::Failed::wrap(
+                    failure,
+                    format!(
+                        "The workflow director's machine could not run the director. {}",
+                        failure.sentence()
+                    ),
+                ));
+            }
             ensure!(
                 result["ok"] == true,
                 "{}",
@@ -799,8 +891,6 @@ pub(super) async fn call(
                     "The machine could not change the assistant state. Check its Teams selection, connection and settings."
                 } else if matches!(method, "machine_roots" | "machine_browse") {
                     "The machine rejected these directories. Refresh the machine and choose existing allowed directories."
-                } else if method == "workflow_direct" {
-                    "The workflow director's machine could not run the director. Check its installed CLI, model and login."
                 } else {
                     "The execution machine rejected the operation. Check its directories, installed CLI and running jobs."
                 }
@@ -825,9 +915,10 @@ pub(super) async fn call(
         );
     }
     if method == "workflow_direct" {
-        anyhow::bail!(
-            "The workflow director's machine did not answer in time. Its session, if it started, is read-only and wrote nothing."
-        );
+        return Err(crate::llm::implementation::Failed::with(
+            crate::llm::implementation::Cause::MachineOffline,
+            "The workflow director's machine did not answer in time. Its session, if it started, is read-only and wrote nothing.",
+        ));
     }
     anyhow::bail!("The machine did not reply. Inspect its runs before starting anything again.")
 }
@@ -838,6 +929,9 @@ pub(in crate::app) async fn schedule(host: Arc<Host>) {
 async fn poll(host: Arc<Host>) {
     let mut results = Vec::new();
     let mut cursor = 0;
+    // Whether the coordinator reads a session's `failure` (`session_failure_support`); until
+    // its first reply says, no session is sent, so none goes without it.
+    let mut failures: Option<bool> = None;
     // Assistant startup can wait for Graph; keep presence, leases and status flowing meanwhile.
     let mut assistant_commands = tokio::task::JoinSet::new();
     loop {
@@ -852,16 +946,20 @@ async fn poll(host: Arc<Host>) {
             // The account's variable catalog follows this machine without delaying presence.
             variables::auto(&host);
             portable::auto(&host);
-            let (next, sessions) = state
-                .db
-                .changes(cursor)
-                .unwrap_or_else(|_| (cursor, Vec::new()));
+            let (next, sessions) = match failures {
+                None => (cursor, Vec::new()),
+                Some(_) => state
+                    .db
+                    .changes(cursor)
+                    .unwrap_or_else(|_| (cursor, Vec::new())),
+            };
+            let sessions = summaries_for(sessions, failures == Some(true));
             let assistant_phase = *host.state.phase.borrow();
             let roots = state.registry.lock().await.settings.roots.clone();
             let polled = remote(
                 &connection,
                 json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next,"assistant_phase":assistant_phase,"management_support":true,"roots":roots,
-                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host),"checkout_inspect_support":true,"workflow_direct_support":true,"upgrade_support":crate::app::maintenance::remote_capable(&host)}),
+                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host),"checkout_inspect_support":true,"workflow_direct_support":true,"workflow_supervise_support":true,"agent_sessions_support":true,"session_names_support":true,"upgrade_support":crate::app::maintenance::remote_capable(&host)}),
             )
             .await;
             standing::note(&host.state, &polled);
@@ -869,6 +967,7 @@ async fn poll(host: Arc<Host>) {
                 if reply["session_cursor"].as_i64() == Some(next) {
                     cursor = next;
                 }
+                failures = Some(reply["session_failure_support"] == true);
                 results.clear();
                 if reply["store_delivery"] == true {
                     crate::app::cloud::announced(&host);
@@ -882,30 +981,12 @@ async fn poll(host: Arc<Host>) {
                         let host = host.clone();
                         let command = command.clone();
                         assistant_commands.spawn(async move {
-                            let method = command["method"].as_str().unwrap_or_default();
-                            let result = local(&host, method, &command["args"]).await;
-                            let result = match result {
-                                Ok(data) => json!({"ok":true,"data":data}),
-                                // An update's refusal says what to do on that computer.
-                                Err(error) if method == "machine_upgrade" => {
-                                    json!({"ok":false,"error":error.to_string()})
-                                }
-                                Err(_) => json!({"ok":false}),
-                            };
-                            json!({"id":command["id"],"result":result})
+                            json!({"id":command["id"],"result":answer(&host, &command).await})
                         });
                     } else {
-                        let result = local(
-                            &host,
-                            command["method"].as_str().unwrap_or_default(),
-                            &command["args"],
-                        )
-                        .await;
-                        let value = match result {
-                            Ok(data) => json!({"ok":true,"data":data}),
-                            Err(_) => json!({"ok":false}),
-                        };
-                        results.push(json!({"id":command["id"],"result":value}));
+                        results.push(
+                            json!({"id":command["id"],"result":answer(&host, command).await}),
+                        );
                     }
                 }
             }
@@ -913,7 +994,55 @@ async fn poll(host: Arc<Host>) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
+/// This machine's answer to a coordinator's call: its data, or a refusal that carries only a
+/// fixed text of this package (an update's) or a cause from the fixed vocabulary (the
+/// director's), never an error's own text.
+pub(in crate::app) async fn answer(
+    host: &Arc<Host>,
+    command: &serde_json::Map<String, Value>,
+) -> Value {
+    let method = command["method"].as_str().unwrap_or_default();
+    match local(host, method, &command["args"]).await {
+        Ok(data) => json!({"ok":true,"data":data}),
+        // An update's refusal says what to do on that computer.
+        Err(error) if method == "machine_upgrade" => {
+            json!({"ok":false,"error":error.to_string()})
+        }
+        // Why the director did not run.
+        Err(error) if method == "workflow_direct" => json!({"ok":false,"failure":
+            crate::llm::implementation::of_error(&error, crate::llm::implementation::Cause::Unknown)}),
+        Err(_) => json!({"ok":false}),
+    }
+}
+
+/// The session summaries a poll sends: without their `failure` to a coordinator that does not
+/// read it (it refuses unknown fields).
+fn summaries_for(sessions: Vec<SessionSummary>, failures: bool) -> Vec<Value> {
+    sessions
+        .into_iter()
+        .filter_map(|session| serde_json::to_value(session).ok())
+        .map(|mut session| {
+            if !failures && let Some(fields) = session.as_object_mut() {
+                fields.remove("failure");
+            }
+            session
+        })
+        .collect()
+}
+
+/// The agent sessions of the given work items (`implementation_sessions`), each marked with
+/// whether its process is alive and was handed to the user (`mark_session`) and why it did not
+/// end with its answer (`with_failure`).
 pub(super) async fn session_index(host: &Arc<Host>, args: &Value) -> Result<Value> {
+    let mut result = sessions_of(host, args).await?;
+    let own = host.state.implementation.registry.lock().await.id.clone();
+    for session in result["sessions"].as_array_mut().into_iter().flatten() {
+        with_failure(session);
+        mark_session(session, &own).await;
+    }
+    Ok(result)
+}
+async fn sessions_of(host: &Arc<Host>, args: &Value) -> Result<Value> {
     let urls: Vec<String> = serde_json::from_value(args["urls"].clone())?;
     ensure!(urls.len() <= 100, "Too many work items.");
     for url in &urls {
@@ -1043,6 +1172,9 @@ mod tests {
             checkout_inspect: false,
             workflow_direct: false,
             upgrade: false,
+            agent_sessions: false,
+            session_names: false,
+            workflow_supervise: false,
         });
         data.teams_machine = worker.clone();
         assert!(leased(&mut data, &worker));

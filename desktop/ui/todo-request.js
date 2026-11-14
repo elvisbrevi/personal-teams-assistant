@@ -8,18 +8,24 @@ import { busy, fail } from './notices.js';
 import { showTab } from './nav.js';
 import { todoTypes } from './todo.js';
 import { copy, link } from './markdown.js';
-import { openAgentSession, sessionDestination, sessionIsMobile } from './sessions.js';
+import { openAgentSession, sessionDestination, sessionIsMobile, sessionLifeBadge } from './sessions.js';
 import { implementationEfforts, implementationModels, implementationReady } from './implementation.js';
 import { loadAzureCliStatus, loadGithubCliStatus, providerNames } from './home.js';
 import { effortNames } from './settings-models.js';
+import { failureText } from './run-states.js';
 
 // ---------------------------------------------------------------- request creation and agent history
 let requestForm = null;
 let requestGeneration = 0;
-async function openRequest() {
+/**
+ * Opens Create request; a draft (the workflow supervisor's drafted work item) fills its project,
+ * type and context, and is written only when the person creates it there.
+ * @param {{ provider: 'azure', project?: string, organization?: string, kind?: 'hu' | 'bug', context?: string } | null} draft
+ */
+async function openRequest(draft = null) {
   const generation = ++requestGeneration;
   requestForm = null;
-  const azure = $('#todo-provider').value === 'azure';
+  const azure = draft ? draft.provider === 'azure' : $('#todo-provider').value === 'azure';
   const source = $('#todo-source').value;
   showTab('create-request');
   $('#create-request h1').focus();
@@ -41,7 +47,7 @@ async function openRequest() {
     const result = el('div', { id: 'request-result', 'aria-live': 'polite' });
     const kind = el('fieldset', {}, el('legend', { textContent: t('Request type') }));
     const filter = $('#todo-kind').value;
-    const requested = filter === 'bug' || todoTypes.some(type => `type:${type.name}` === filter && type.group === 'bug') ? 'bug' : 'hu';
+    const requested = draft?.kind ?? (filter === 'bug' || todoTypes.some(type => `type:${type.name}` === filter && type.group === 'bug') ? 'bug' : 'hu');
     for (const [value, label] of [['hu', t('HU')], ['bug', t('Bug')]]) {
       const radio = el('input', { type: 'radio', name: 'request-kind', value, checked: value === requested });
       kind.append(el('label', { class: 'check' }, radio, label));
@@ -51,6 +57,12 @@ async function openRequest() {
     provider.onchange = () => implementationModels(form);
     model.onchange = () => implementationEfforts(form);
     effort.onchange = context.oninput = target.onchange = () => implementationReady(form);
+    if (draft) {
+      context.value = draft.context ?? '';
+      const index = catalog.targets.findIndex(target => target.project?.toLowerCase() === draft.project?.toLowerCase()
+        && (!draft.organization || !target.organization || String(target.organization).toLowerCase().replace(/\/$/, '') === draft.organization.toLowerCase().replace(/\/$/, '')));
+      if (index >= 0) { target.value = String(index); target.textContent = requestTargetLabel(catalog.targets[index]); }
+    }
     implementationModels(form);
     start.onclick = () => busy(start, async () => {
       if (form.submitted) return;
@@ -155,13 +167,14 @@ function agentRunCard(run) {
   copySession.onclick = () => busy(copySession, async () => { if (!await copy(run.session_id)) fail(t('Could not copy the session ID.')); });
   const card = el('article', { class: 'implementation-run', 'data-run-id': run.id },
     el('div', { class: 'todo-context' }, badge(run.purpose === 'request' && run.state === 'created' ? t('Request created') : tx(run.state), ['created', 'done', 'plan_ready'].includes(run.state) ? 'ok' : ['failed', 'uncertain', 'needs_attention', 'permission_prompt'].includes(run.state) ? 'warn' : 'info'),
-      el('strong', { textContent: `${providerNames[run.provider] || run.provider} · ${run.model}` }), run.purpose === 'request' ? badge(t('Request creation'), 'muted') : badge(t('Implementation'), 'muted')),
+      el('strong', { textContent: `${providerNames[run.provider] || run.provider} · ${run.model}` }), run.purpose === 'request' ? badge(t('Request creation'), 'muted') : badge(t('Implementation'), 'muted'), sessionLifeBadge(run)),
     run.project ? el('p', { textContent: `${run.project} · ${{ hu: t('HU'), bug: t('Bug'), epic: t('Epic') }[run.kind] || tx(run.kind)}` }) : null,
     run.item?.url ? link(`#${run.item.id} · ${run.item.title}`, run.item.url) : null,
     el('dl', { class: 'todo-fields' }, ...pairs.map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value })))),
     el('div', { class: 'actions' }, open, copySession),
     open.disabled ? el('p', { class: 'hint', textContent: destination.reason }) : null,
     run.output ? el('p', { class: 'hint', textContent: tx(run.output) }) : null,
+    run.failure ? el('p', { class: 'callout warn run-failure', textContent: failureText(run.failure) }) : null,
     run.state === 'uncertain' ? el('p', { class: 'callout warn', textContent: t('The provider may have created the request. Inspect it before creating another; this execution will not be retried.') }) : null,
     run.state === 'needs_attention' && run.purpose === 'request' ? el('p', { class: 'callout warn', textContent: t('The issue was created, but its Epic type or assignment could not be confirmed. Review the original issue.') }) : null);
   return card;

@@ -1,6 +1,7 @@
 //! What the workflow engine reads from Azure DevOps, read-only, with the enabled source's read
 //! credential: the pull requests of one repository whose source branch is the one a coding
 //! session reported (`_apis/git/repositories/{id}/pullrequests?searchCriteria.sourceRefName=…`),
+//! whether a reported branch still exists (`_apis/git/repositories/{id}/refs?filter=heads/…`),
 //! and whether a work item is assigned to the source's user. Nothing here writes, merges,
 //! completes or changes a pull request or a work item.
 use super::{Catalog, Source, project_url, request};
@@ -148,6 +149,42 @@ pub(crate) async fn pull_requests(
     Ok(found)
 }
 
+/// Whether `branch` exists in `repository` (its catalog ID) now: a ref named exactly
+/// `refs/heads/BRANCH` in the repository's refs that start so.
+pub(crate) async fn branch_exists(
+    client: &Client,
+    key: &str,
+    catalog: &str,
+    organization: &str,
+    project: &str,
+    repository: &str,
+    branch: &str,
+) -> Result<bool> {
+    ensure!(
+        uuid::Uuid::parse_str(repository).is_ok() && repository.len() == 36,
+        "invalid repository ID"
+    );
+    ensure!(valid_branch(branch), "invalid branch name");
+    let source = source(catalog, organization)?;
+    let mut url = project_url(
+        &source,
+        project,
+        "dev.azure.com",
+        &["_apis", "git", "repositories", repository, "refs"],
+    )?;
+    url.query_pairs_mut()
+        .append_pair("filter", &format!("heads/{branch}"))
+        .append_pair("$top", &TOP.to_string());
+    let value = request(client, key, Method::GET, url, None).await?;
+    let page = value["value"]
+        .as_array()
+        .context("invalid Azure DevOps refs")?;
+    let wanted = format!("refs/heads/{branch}");
+    Ok(page
+        .iter()
+        .any(|r| r["name"].as_str() == Some(wanted.as_str())))
+}
+
 /// Whether the item is assigned to the source's user: its Assigned To, or a developer role of
 /// its process (an identity field named «developer» or «desarrollador», as To-Do reads them),
 /// names the user of the source of its organization.
@@ -278,6 +315,58 @@ mod tests {
         );
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
+        assert!(requests.iter().all(|r| r.method.as_str() == "GET"));
+        super::super::TEST_SERVER.with(|s| *s.borrow_mut() = None);
+    }
+
+    #[tokio::test]
+    async fn a_branch_exists_only_when_its_exact_ref_is_listed_and_nothing_is_written() {
+        let server = MockServer::start().await;
+        super::super::TEST_SERVER
+            .with(|s| *s.borrow_mut() = Some(Url::parse(&server.uri()).unwrap()));
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/example/Payments/_apis/git/repositories/{REPO}/refs"
+            )))
+            .and(query_param("filter", "heads/feature/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
+                {"name":"refs/heads/feature/42-other","objectId":"a"},
+                {"name":"refs/heads/feature/42","objectId":"b"}
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/example/Payments/_apis/git/repositories/{REPO}/refs"
+            )))
+            .and(query_param("filter", "heads/feature/4"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
+                {"name":"refs/heads/feature/42","objectId":"b"}
+            ]})))
+            .mount(&server)
+            .await;
+        let client = Client::new();
+        let exists = |branch: &'static str| {
+            let client = client.clone();
+            async move {
+                branch_exists(
+                    &client,
+                    "key",
+                    CATALOG,
+                    "https://dev.azure.com/example",
+                    "Payments",
+                    REPO,
+                    branch,
+                )
+                .await
+            }
+        };
+        assert!(exists("feature/42").await.unwrap());
+        // A prefix of an existing branch is not that branch.
+        assert!(!exists("feature/4").await.unwrap());
+        assert!(exists("x;rm").await.is_err());
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
         assert!(requests.iter().all(|r| r.method.as_str() == "GET"));
         super::super::TEST_SERVER.with(|s| *s.borrow_mut() = None);
     }

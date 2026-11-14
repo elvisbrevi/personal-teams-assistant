@@ -75,6 +75,7 @@
     { id: 'code', name: 'Implement', summary: 'Implement on a task, a development bug or a GitHub issue: the agent changes the code in the selected directories.', instructions: 'Implement the work item.' },
     { id: 'request', name: 'Write a request', summary: 'Create request in To-Do: the agent writes the new HU, bug or GitHub epic from your context.', instructions: 'Write one request of the selected type.' },
     { id: 'direct', name: 'Choose a workflow', summary: 'Workflows: the workflow director reads a work item and the enabled workflows of its project and chooses the one that fits, or none.', instructions: 'Choose the workflow whose description fits the item.' },
+    { id: 'supervise', name: 'Supervise workflow runs', summary: 'Workflows: the workflow supervisor reads what a run\'s agents did, checks their reports and drafts a handover note, work items and the next steps for you to confirm.', instructions: 'Look after the workflow runs in the input the way the person who owns them would.' },
   ];
   // The built-in cases the host sends, with short synthetic default texts.
   snapshot.cases = [
@@ -224,16 +225,22 @@
   // The host's journal of an installation in progress or finished; null before any.
   let updateApply = null;
   let updateUnattended = false;
+  // A new release whose archive for this computer is not attached to it yet (archive installations).
+  let updateArchiveLate = false;
   const updateView = () => {
     if (sharedAccount) return { managed: 'server', running: '0.9.13', can_stage: false, message: 'Updates for this server are applied by its operator; there is nothing to install from here.' };
     const failed = updateState === 'failed';
+    const late = updateArchiveLate && ['idle', 'waiting'].includes(updateState);
     return {
-      managed: 'local', state: updateState, running: '0.9.13', installed: '0.9.13', available: '0.9.14', restart_required: false,
+      managed: 'local', state: updateState, running: '0.9.13', installed: '0.9.13', available: late ? null : '0.9.14', restart_required: false,
       checked_at: 1760000000, check_error: null, dismissed: updateDismissed, install: { supported: true, features: ['gui'], no_default_features: false, target: null },
-      can_stage: !['staging', 'applying'].includes(updateState),
+      can_stage: !['staging', 'applying', 'waiting'].includes(updateState),
+      archive_missing: late ? { version: '0.9.14', since: 1760000000 } : null,
+      waiting_for_archive: updateState === 'waiting' ? { version: '0.9.14', since: 1760000000, until: 1760001800, install: false,
+        message: 'Waiting for the archive of 0.9.14: the release is published, but its archive for this computer is not attached yet. The update goes ahead by itself when it appears, for up to 30 minutes.' } : null,
       can_apply: ['staged', 'deferred'].includes(updateState), apply_unsupported: null, apply: structuredClone(updateApply),
       deferred: updateState === 'deferred' ? { version: '0.9.14', since: 1, reasons: ['A Teams message is being answered or sent.', 'A migration is running.'] } : null,
-      stage: updateState === 'idle' ? null : { version: '0.9.14', state: updateState, phase: 'building', started_at: 1, finished_at: null, progress: { crates: 12, current: 'tokio' },
+      stage: ['idle', 'waiting'].includes(updateState) ? null : { version: '0.9.14', state: updateState, phase: 'building', started_at: 1, finished_at: null, progress: { crates: 12, current: 'tokio' },
         error: failed ? 'Cargo could not build this release. Install a C compiler and linker (for example `build-essential` on Debian and Ubuntu, or Xcode\'s command line tools on macOS) and try again.' : null,
         tail: failed ? ['error: linker `cc` not found'] : [] },
       staged: ['staged', 'deferred'].includes(updateState) ? { version: '0.9.14', staged_at: 2, features: ['gui'], no_default_features: false, target: null, binaries: ['personal-teams-assistant', 'pta'] } : null,
@@ -244,7 +251,7 @@
     target: { kind: 'http', method: 'PUT', headers: { 'X-Blog-Editor': '1' }, body: { value: '{{value}}' }, confirm_field: '/last4',
       auth: { header: 'Authorization', prefix: 'Bearer ', variable: { id: 'aaaaaaaa-0000-4000-8000-000000000001', state: 'ok', name: 'DEPLOY_ENDPOINT', version: 1 } } },
     variables: [{ id: 'aaaaaaaa-0000-4000-8000-000000000001', state: 'ok', name: 'DEPLOY_ENDPOINT', version: 1 }], digest: 'e'.repeat(64), approved: false, created_at: 1, approved_at: null }];
-  const launchers = [{ id: 'release-tool', description: 'Publishes the release <b>not markup</b>', program: '/usr/local/bin/release', args: ['--fixed'], directory: '/home/user/work', timeout_seconds: 60, digest: 'd'.repeat(64), approved: false,
+  const launchers = [{ id: 'release-tool', description: 'Publishes the release <b>not markup</b>', program: '/usr/local/bin/release', args: ['--fixed'], directory: '/home/user/work', timeout_seconds: 60, digest: 'd'.repeat(64), approved: false, running: null,
     variables: [{ env: 'RELEASE_URL', id: 'aaaaaaaa-0000-4000-8000-000000000001', state: 'ok', variable: { name: 'DEPLOY_ENDPOINT', version: 1 } }] }];
   const bindingView = () => {
     if (!consumerBinding) return null;
@@ -277,6 +284,20 @@
       mentions: ['Victoria Gómez'], template: 'The release of {item} is ready: {pull_requests}', updated_at: secs(NOW - 7_200_000) },
     { id: 'release-desa', name: 'Release in desa', kind: 'launcher', stage: 'pull_requests_completed', launcher: { id: 'release-tool', digest: 'd'.repeat(64) }, updated_at: secs(NOW - 7_200_000) },
   ] : [];
+  // How much of each limit a workflow uses (`workflows::usage`): a fixed part for the sentences,
+  // checkouts, item and handover note, plus its instructions and instruction blocks as the host
+  // writes them.
+  const workflowUsage = workflow => {
+    const length = text => [...(text ?? '')].length;
+    let part = workflow.instructions.trim() ? 15 + length(workflow.instructions) : 0;
+    for (const id of workflow.blocks) {
+      const block = workflowBlocks.find(b => b.id === id);
+      if (block?.kind === 'instruction') part += 23 + length(block.name) + length(block.text);
+    }
+    const fixed = 7200;
+    return { instructions: { used: length(workflow.instructions), limit: 20000 }, blocks: { used: workflow.blocks.length, limit: 20 },
+      context: { used: fixed + part, limit: 100000, fixed } };
+  };
   const teamsChats = [
     { id: '19:abc@thread.v2', type: 'group', topic: 'Payments team', members: ['Victoria Gómez', 'Luis Soto', 'Ana Pérez'], last_updated: '2026-10-14T15:00:00Z', readable: true },
     { id: '19:def@thread.v2', type: 'oneOnOne', topic: 'Ana Pérez', members: ['Ana Pérez'], last_updated: '2026-10-14T14:00:00Z', readable: true },
@@ -287,7 +308,11 @@
   teamsChats.push({ id: '19:crowd@thread.v2', type: 'group', topic: crowd.join(', '), members: crowd, last_updated: '2026-10-12T10:00:00Z', readable: false });
   let workflowSettings = { ready_states: scenario === 'full' ? [{ organization: org, project: 'Payments', states: ['Ready for development'] }] : [],
     watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: { machine: '11111111-1111-4111-8111-111111111111', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' },
-    project_directors: [] };
+    project_directors: [],
+    // The workflow supervisor (src/workflows/director.rs `Supervisor`): on in the full scenario.
+    supervisor: { enabled: scenario === 'full', ...(scenario === 'full' ? { machine: '11111111-1111-4111-8111-111111111111', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' } : {}),
+      looks_per_day: 24, min_interval_minutes: 30, wait_hours: 3, offline_minutes: 15, session_seconds: 180 } };
+  const SUPERVISOR_DEFAULTS = { enabled: false, looks_per_day: 24, min_interval_minutes: 30, wait_hours: 3, offline_minutes: 15, session_seconds: 180 };
   // Which director each project gets (src/workflows/director.rs `resolve`): its own, the agent its
   // enabled workflows share, or the general one.
   const directors = () => {
@@ -340,7 +365,7 @@
     { id: runId(4), workflow: 'payments-features', definition: { id: 'payments-features', name: 'Payments features' }, blocks: structuredClone(workflowBlocks), item: item(5012, 'Fix rounding in refunds', 'Task', 'task', 'Developing'),
       state: 'needs_attention', stopped_in: 'coding', timeline: [stage('classifying', 172_800_000, 172_790_000, 'named'), stage('coding', 172_790_000, 170_000_000, 'permission_prompt'), stage('needs_attention', 170_000_000, null, null)],
       classification: { workflow: 'payments-features', outcome: 'named' }, planning: null, ledger: null,
-      children: [{ id: 5012, title: 'Fix rounding in refunds', url: `${org}/Payments/_workitems/edit/5012`, kind: 'Task', repository: { id: '0f3c2a1b-0000-4000-8000-000000000001', name: 'payments-api' }, directory: '/work/payments-api', coding: { id: 'e3b6d8f0-1e2b-4c43-f567-809102132435', machine: '11111111-1111-4111-8111-111111111111', started: true, state: 'permission_prompt' }, started_at: secs(NOW - 172_790_000), finished_at: secs(NOW - 170_000_000), branch: null, pull_requests: [], outcome: 'permission_prompt' }],
+      children: [{ id: 5012, title: 'Fix rounding in refunds', url: `${org}/Payments/_workitems/edit/5012`, kind: 'Task', repository: { id: '0f3c2a1b-0000-4000-8000-000000000001', name: 'payments-api' }, directory: '/work/payments-api', coding: { id: 'e3b6d8f0-1e2b-4c43-f567-809102132435', machine: '11111111-1111-4111-8111-111111111111', started: true, state: 'permission_prompt', failure: { cause: 'permission_prompt' } }, started_at: secs(NOW - 172_790_000), finished_at: secs(NOW - 170_000_000), branch: null, pull_requests: [], outcome: 'permission_prompt' }],
       block_outcomes: [], summaries: [], summary_sends: [], attention: 'Coding run e3b6d8f0 stopped on a permission prompt; remove its cause on that computer, then resume to continue with the next child.', error: null, auto_start: false, created_at: secs(NOW - 172_800_000), updated_at: secs(NOW - 170_000_000), finished_at: null },
     { id: runId(5), workflow: 'payments-features', definition: { id: 'payments-features', name: 'Payments features' }, blocks: structuredClone(workflowBlocks), item: item(4990, 'Export refunds to the ledger', 'User Story', 'requirement', 'Finished'),
       state: 'done', stopped_in: null, timeline: [stage('classifying', 604_800_000, 604_790_000, 'named'), stage('planning', 604_790_000, 600_000_000, 'plan_ready'), stage('plan_review', 600_000_000, 590_000_000, 'confirmed'), stage('creating_children', 590_000_000, 589_000_000, 'created 1'), stage('coding', 589_000_000, 580_000_000, '1 coded'), stage('pull_requests', 580_000_000, 500_000_000, 'completed: 1 pull request'), stage('blocks', 500_000_000, 499_000_000, '2 acting block outcomes'), stage('done', 499_000_000, 499_000_000, 'done')],
@@ -350,8 +375,13 @@
       summaries: [], summary_sends: [], attention: null, error: null, auto_start: true, created_at: secs(NOW - 604_800_000), updated_at: secs(NOW - 499_000_000), finished_at: secs(NOW - 499_000_000) },
   ] : [];
   const runSummary = run => ({ id: run.id, workflow: run.workflow, item: { id: run.item.id, title: run.item.title, url: run.item.url, kind: run.item.kind, category: run.item.category, project: run.item.project }, state: run.state, stage: run.stopped_in ?? run.state, attention: run.attention,
-    waits_on_user: ['plan_review', 'unassigned', 'needs_attention', 'interrupted', 'failed'].includes(run.state), children: run.children.length, pull_requests: run.children.flatMap(c => c.pull_requests.map(p => ({ url: p.url, status: p.status }))), created_at: run.created_at, updated_at: run.updated_at, finished_at: run.finished_at });
-  const runView = run => { const view = { ...structuredClone(run), stage: run.stopped_in ?? run.state, waits_on_user: runSummary(run).waits_on_user }; delete view.fresh; return view; };
+    waits_on_user: ['plan_review', 'unassigned', 'needs_attention', 'interrupted', 'failed'].includes(run.state), children: run.children.length, pull_requests: run.children.flatMap(c => c.pull_requests.map(p => ({ url: p.url, status: p.status }))), created_at: run.created_at, updated_at: run.updated_at, finished_at: run.finished_at,
+    waiting_for_slot: Boolean(run.queue_position), queue_position: run.queue_position ?? null, paused: pausedRun(run), continues: run.continues ?? null, restarted_as: run.restarted_as ?? null });
+  const runView = run => { const view = { ...structuredClone(run), stage: run.stopped_in ?? run.state, waits_on_user: runSummary(run).waits_on_user, paused: pausedRun(run),
+    waiting_for_slot: Boolean(run.queue_position), queue_position: run.queue_position ?? null, supervision: structuredClone(run.supervision ?? []), supervising: structuredClone(run.supervising ?? []) }; delete view.fresh; return view; };
+  // The pauses in force (`workflow_runs_pause`): every project's, or one project's by name.
+  let workflowPauses = [];
+  const pausedRun = run => !['done', 'cancelled'].includes(run.state) && workflowPauses.some(p => !p.project || p.project.toLowerCase() === run.item.project.toLowerCase());
   const findRun = id => { const run = workflowRuns.find(r => r.id === id); if (!run) throw new Error(`[invalid_input] Workflow run ${id} is not recorded.`); return run; };
   // The plan-review run's planning run, as implementation_runs lists it on its machine, with the plan the person reviews;
   // the coding runs of the other runs, so their agent sessions can be opened.
@@ -360,18 +390,85 @@
     workflowAgentRuns.push({ id: planningRunId, machine: '11111111-1111-4111-8111-111111111111', session_id: 'sess-synthetic-planning-5003', provider: 'claude', model: 'claude-sonnet-5-5', started_at: '2026-10-14T15:20:00Z', finished_at: '2026-10-14T15:50:00Z', item: { id: 5003, title: 'Improve settlement reporting', url: `${org}/Payments/_workitems/edit/5003` },
       planning: true, state: 'plan_ready', created_at: '2026-10-14T15:20:00Z', output: '', permission_mode: 'read-only', prompts: [],
       plan: { children: [{ title: 'Add the settlement report query', description: 'A query that sums settlements per day in payments-api.', type: 'Task', fields: [] }, { title: 'Show the settlement report', description: 'A page in payments-web that lists the daily sums.', type: 'Task', fields: [] }] } });
-    for (const run of workflowRuns) for (const child of run.children) if (child.coding) workflowAgentRuns.push({ id: child.coding.id, machine: child.coding.machine, session_id: `sess-synthetic-${child.id}`, provider: 'codex', model: 'gpt-6.1-sol', started_at: '2026-10-13T12:00:00Z', finished_at: child.finished_at ? '2026-10-13T14:00:00Z' : null, item: { id: child.id, title: child.title, url: child.url }, planning: false, state: child.coding.state, created_at: '2026-10-13T12:00:00Z', output: '', permission_mode: 'danger-full-access', prompts: [], plan: null });
+    for (const run of workflowRuns) for (const child of run.children) if (child.coding) workflowAgentRuns.push({ id: child.coding.id, machine: child.coding.machine, session_id: `sess-synthetic-${child.id}`, provider: 'codex', model: 'gpt-6.1-sol', started_at: '2026-10-13T12:00:00Z', finished_at: child.finished_at ? '2026-10-13T14:00:00Z' : null, item: { id: child.id, title: child.title, url: child.url }, planning: false, state: child.coding.state, created_at: '2026-10-13T12:00:00Z', output: '', permission_mode: 'danger-full-access', prompts: [], plan: null,
+      session_alive: child.coding.state === 'done', handed_to_user: child.coding.state === 'done' });
   }
   let statusReads = 0;
   // A send whose result Teams did not confirm (`uncertain`), as the host records it, for the guard on the next send.
   window.__ptaMarkUncertain = (run, chat) => { const found = workflowRuns.find(r => r.id === run); const latest = found.summaries[found.summaries.length - 1];
     found.summary_sends.push({ id: crypto.randomUUID(), summary: latest.id, chat: { id: chat, topic: teamsChats.find(c => c.id === chat)?.topic, type: 'group' }, mentions: [], chars: latest.text.length, edited: false, outcome: 'uncertain', at: secs(Date.now()) }); };
+  // A run in the line for one of the `concurrency` slots (its place, 1 next), or out of it with null.
+  window.__ptaQueueRun = (run, position) => { workflowRuns.find(r => r.id === run).queue_position = position; };
+  // A task's child that reported branches in two repositories and one the workflow does not have, as a resume past its
+  // coding run records them.
+  window.__ptaDeliverTask = run => { const child = workflowRuns.find(r => r.id === run).children[0];
+    Object.assign(child, { branch: 'feature/5012-rounding', branches: [{ repository: { id: '0f3c2a1b-0000-4000-8000-000000000002', name: 'payments-web' }, branch: 'feature/5012-rounding-web' }], ignored_branches: ['billing'],
+      pull_requests: [{ id: 51, repository: '0f3c2a1b-0000-4000-8000-000000000001', title: 'Fix rounding in refunds', status: 'active', url: `${org}/Payments/_git/payments-api/pullrequest/51`, created_at: '2026-10-13T20:00:00Z', closed_at: null },
+        { id: 52, repository: '0f3c2a1b-0000-4000-8000-000000000002', title: 'Show the rounded refunds', status: 'active', url: `${org}/Payments/_git/payments-web/pullrequest/52`, created_at: '2026-10-13T20:05:00Z', closed_at: null }] }); };
+  // A look of the supervisor at a run, as `workflow_supervise` stores it: an assessment, the checks of the final
+  // report (one not verified), a drafted handover, work item and summary, and proposals.
+  window.__ptaSuperviseRun = run => { const found = workflowRuns.find(r => r.id === run);
+    found.supervision = [...(found.supervision ?? []), { id: crypto.randomUUID(), event: 'run_stopped', keys: [], created_at: secs(NOW - 60_000), supervised_by: { machine: '11111111-1111-4111-8111-111111111111', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' },
+      session_id: 'sess-synthetic-look', outcome: 'done', marker: 'x',
+      assessment: { done: 'The agent fixed the rounding and pushed feature/5012-rounding.', left: 'Open the pull request and run the refund tests.', recommendation: 'Restart with the note: the session stopped on a permission prompt.' },
+      checks: [{ claim: 'Pull request !51 was merged', kind: 'pull_request', ref: '51', result: 'not_verified', fact: 'Pull request !51 is active.', from: 'report' },
+        { claim: 'Branch payments-api: feature/5012-rounding', kind: 'branch', ref: 'feature/5012-rounding', result: 'verified', fact: 'Branch feature/5012-rounding exists in payments-api.', from: 'report' }],
+      unverified: ['Whether the refund tests ran.'], unread: [], truncated: [],
+      handover: 'Done: the rounding fix is committed on feature/5012-rounding; do not repeat it.\nLeft: open its pull request and run the refund tests.',
+      work_items: [{ type: 'bug', title: 'Round refunds in the ledger export too', description: 'The ledger export rounds with its own helper.', repository: { id: '0f3c2a1b-0000-4000-8000-000000000001', name: 'payments-api' }, reason: 'Found while reading the comments.' }],
+      summary: 'Los reembolsos ya redondean bien; falta abrir el pull request.\n\n**Enlaces**\n- [#5012 Fix rounding in refunds](https://dev.azure.com/synthetic/Payments/_workitems/edit/5012)',
+      actions: [{ id: 'a1', action: 'restart', reason: 'The session stopped on a permission prompt.', state: 'proposed' },
+        { id: 'a2', action: 'create_work_item', work_item: 0, reason: 'The export has the same rounding.', state: 'proposed' },
+        { id: 'a3', action: 'post_summary', reason: 'The team waits for this fix.', state: 'proposed' }] }]; };
+  // An audit of a finished batch, as `workflow_supervise {audit: true}` stores it.
+  window.__ptaAudit = () => { window.__ptaAudits = [{ id: crypto.randomUUID(), event: 'batch_ended', created_at: secs(NOW - 30_000), since: secs(NOW - 700_000_000), until: secs(NOW - 600_000_000),
+    supervised_by: { machine: '11111111-1111-4111-8111-111111111111', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' }, outcome: 'done',
+    items: [{ run: runId(5), item: 4990, title: 'Export refunds to the ledger', url: `${org}/Payments/_workitems/edit/4990`, project: 'Payments', organization: org, workflow: 'payments-features', state: 'done', children: 1,
+      pull_requests: [{ id: 37, status: 'completed', url: `${org}/Payments/_git/payments-api/pullrequest/37` }], not_verified: 1, result: 'Merged; its branch was not deleted.' }],
+    merged_branches: [{ run: runId(5), repository: 'payments-api', branch: 'feature/5990-ledger-export', pull_request: 37 }],
+    overview: 'The batch delivered its item; one finding was left in a comment.',
+    findings: [{ run: runId(5), text: 'The ledger export rounds with its own helper too.', from: 'comment', needs_item: true }],
+    proposals: ['Delete the merged branch feature/5990-ledger-export.'],
+    work_items: [{ run: runId(5), draft: { type: 'bug', title: 'Round the ledger export', description: 'Use the same rounding as the refunds.', repository: { id: '0f3c2a1b-0000-4000-8000-000000000001', name: 'payments-api' }, reason: 'From a comment.' } }] }]; };
+  // A run's item with another title (the list's long-title check).
+  window.__ptaRetitleRun = (run, title) => { workflowRuns.find(r => r.id === run).item.title = title; };
   window.__ptaWorkflowCalls = [];
   const workflowHandlers = {
     workflow_runs: args => {
       window.__ptaWorkflowCalls.push({ method: 'workflow_runs', ...structuredClone(args) });
       const runs = workflowRuns.filter(r => (!args.state || r.state === args.state) && (!args.workflow || r.workflow === args.workflow));
-      return { runs: runs.slice(0, args.limit ?? 20).map(runSummary), partial: runs.length > (args.limit ?? 20) };
+      return { runs: runs.slice(0, args.limit ?? 20).map(runSummary), partial: runs.length > (args.limit ?? 20), paused: structuredClone(workflowPauses) };
+    },
+    workflow_runs_pause: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_runs_pause', ...structuredClone(args) });
+      if (!args.confirmed) throw new Error('[invalid_input] Confirm the pause with the user, then call again with confirmed: true.');
+      if (!['stop', 'finish'].includes(args.sessions)) throw new Error('[invalid_input] Choose what happens to the sessions running now.');
+      const pause = { ...(args.project ? { project: args.project } : {}), sessions: args.sessions, paused_at: secs(Date.now()) };
+      workflowPauses = [...workflowPauses.filter(p => (p.project ?? '').toLowerCase() !== (args.project ?? '').toLowerCase()), pause];
+      return { pause, paused: structuredClone(workflowPauses), interrupted: [], sessions_stopped: [], warning: null };
+    },
+    workflow_runs_unpause: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_runs_unpause', ...structuredClone(args) });
+      if (!args.confirmed) throw new Error('[invalid_input] Confirm the unpause with the user, then call again with confirmed: true.');
+      const before = workflowPauses.length;
+      workflowPauses = args.project ? workflowPauses.filter(p => (p.project ?? '').toLowerCase() !== args.project.toLowerCase()) : [];
+      if (workflowPauses.length === before) throw new Error('[conflict] No workflow run is paused.');
+      return { unpaused: true, paused: structuredClone(workflowPauses) };
+    },
+    workflow_run_restart: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_run_restart', ...structuredClone(args) });
+      if (!args.confirmed) throw new Error('[invalid_input] Confirm the restart with the user, then call again with confirmed: true.');
+      const old = findRun(args.run);
+      if ((args.note ?? '').length > 4000) throw new Error('[invalid_input] The handover note holds at most 4000 characters.');
+      const id = crypto.randomUUID();
+      const now = secs(Date.now());
+      old.state = 'cancelled'; old.attention = null; old.finished_at = now; old.updated_at = now; old.restarted_as = id;
+      const task = old.item.category === 'task';
+      const next = { ...structuredClone(old), id, state: task ? 'coding' : 'planning', stopped_in: null, timeline: [stage('classifying', 0, 0, 'restarted'), { stage: task ? 'coding' : 'planning', started_at: now, finished_at: null, outcome: null }],
+        classification: { workflow: old.workflow, outcome: 'restarted' }, planning: null, ledger: null, block_outcomes: [], summaries: [], summary_sends: [], attention: null, error: null, restarted_as: null, continues: old.id, handover: args.note?.trim() || null,
+        children: task ? [{ ...structuredClone(old.children[0]), coding: null, started_at: null, finished_at: null, branch: null, pull_requests: [], outcome: null }] : [], created_at: now, updated_at: now, finished_at: null };
+      workflowRuns.unshift(next);
+      return { run: runView(next), restarted: true, previous: old.id, implementation_cancelled: null, sessions_stopped: [], warning: null, paused: pausedRun(next) };
     },
     workflow_run_status: args => {
       const run = findRun(args.run);
@@ -421,8 +518,64 @@
       run.summary_sends.push(send);
       return { workflow_run: run.id, sent: true, send: structuredClone(send) };
     },
-    workflows_list: () => ({ workflows: structuredClone(workflows), editable: !window.__ptaWorkflowsElsewhere }),
-    workflow_show: args => ({ workflow: structuredClone(workflows.find(w => w.id === args.id)), blocks: [], editable: true }),
+    // The workflow supervisor (src/app/workflows/supervisor.rs): a look queued, its looks, its proposals carried out once.
+    workflow_supervise: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_supervise', ...structuredClone(args) });
+      if (args.audit) {
+        if (!workflowSettings.supervisor.enabled) throw new Error('[not_ready] The workflow supervisor is off.');
+        window.__ptaAuditQueued = [{ key: 'audit:requested', event: 'requested', state: 'queued', requested: true, created_at: secs(Date.now()) }];
+        return { audit: 'audit:requested', since: secs(Date.now()) - 604800, state: 'queued' };
+      }
+      const run = findRun(args.run);
+      if (!workflowSettings.supervisor.enabled) throw new Error('[not_ready] The workflow supervisor is off.');
+      run.supervising = [{ key: `${run.id}:requested`, event: 'requested', state: 'queued', requested: true, created_at: secs(Date.now()) }];
+      return { run: run.id, look: run.supervising[0].key, state: 'queued' };
+    },
+    workflow_supervision: args => {
+      if (args.audit) return { audit: structuredClone(window.__ptaAudits?.[0] ?? null), queued: structuredClone(window.__ptaAuditQueued ?? []) };
+      if (args.audits) return { audits: (window.__ptaAudits ?? []).map(a => ({ id: a.id, created_at: a.created_at, outcome: a.outcome, runs: a.items.length })), queued: [] };
+      const run = findRun(args.run); return { run: run.id, looks: structuredClone(run.supervision ?? []), queued: structuredClone(run.supervising ?? []) };
+    },
+    workflow_supervision_act: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_supervision_act', ...structuredClone(args) });
+      const run = findRun(args.run);
+      const look = (run.supervision ?? []).find(l => l.id === args.look);
+      const action = look?.actions.find(a => a.id === args.action);
+      if (!action) throw new Error('[invalid_input] Look proposed no such action.');
+      if (action.state !== 'proposed') throw new Error(`[conflict] Action ${action.id} is already ${action.state}.`);
+      if (action.action === 'create_work_item') {
+        action.state = 'opened';
+        const draft = look.work_items[action.work_item];
+        return { run: run.id, look: look.id, action: action.id, state: 'opened', create_request: { provider: 'azure', organization: org, project: run.item.project, type: draft.type, title: draft.title, description: draft.description, repository: draft.repository?.name ?? null } };
+      }
+      if (!args.confirmed) throw new Error('[invalid_input] Confirm with the user, then act with confirmed: true.');
+      let result = {};
+      // No note given is the draft; an empty note restarts without one.
+      if (action.action === 'restart') result = workflowHandlers.workflow_run_restart({ run: run.id, ...('note' in args ? (args.note.trim() ? { note: args.note } : {}) : { note: look.handover }), confirmed: true });
+      if (action.action === 'post_summary') {
+        if (!args.chat) throw new Error('[invalid_input] Choose the chat to post the summary to (teams_chats).');
+        run.summaries.push({ id: `supervisor-${look.id}`, text: look.summary, created_at: secs(Date.now()), provider: 'claude', model: 'claude-sonnet-5-5', by: 'supervisor' });
+        result = workflowHandlers.workflow_summary_send({ run: run.id, summary: `supervisor-${look.id}`, chat: args.chat, mentions: args.mentions ?? [], confirmed: true });
+      }
+      Object.assign(action, { state: 'executed', by: 'person', at: secs(Date.now()) });
+      return { run: run.id, look: look.id, action: action.id, state: 'executed', result };
+    },
+    workflow_supervision_dismiss: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_supervision_dismiss', ...structuredClone(args) });
+      const action = (findRun(args.run).supervision ?? []).find(l => l.id === args.look)?.actions.find(a => a.id === args.action);
+      if (!action || action.state !== 'proposed') throw new Error('[conflict] The action is not proposed.');
+      action.state = 'dismissed';
+      return { run: args.run, look: args.look, action: args.action, state: 'dismissed' };
+    },
+    workflow_run_requeue: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_run_requeue', ...structuredClone(args) });
+      const run = findRun(args.run);
+      if (!run.queue_position) throw new Error(`[conflict] Workflow run ${run.id} does not wait for a slot.`);
+      run.ahead_since = args.ahead ? secs(Date.now()) : null;
+      return { run: run.id, ahead: Boolean(args.ahead), ahead_since: run.ahead_since };
+    },
+    workflows_list: () => ({ workflows: structuredClone(workflows), usage: Object.fromEntries(workflows.map(w => [w.id, workflowUsage(w)])), editable: !window.__ptaWorkflowsElsewhere }),
+    workflow_show: args => ({ workflow: structuredClone(workflows.find(w => w.id === args.id)), blocks: [], usage: workflowUsage(workflows.find(w => w.id === args.id)), editable: true }),
     workflow_blocks_list: () => ({ blocks: structuredClone(workflowBlocks), used_by: usedBy(), editable: !window.__ptaWorkflowsElsewhere }),
     workflow_repositories: args => {
       if (!workflowRepositories[args.project]) throw new Error(`invalid project: ${args.project} is not in the configured organizations of the enabled Azure source.`);
@@ -436,7 +589,7 @@
         return { workflow: structuredClone(workflow), saved: true, warnings: [] };
       }
       const workflow = structuredClone(args.workflow);
-      if (workflow.allow?.length && !args.confirmed) throw new Error(`[invalid_input] Confirm with the user, then save with confirmed: true. Save workflow ${workflow.id}?`);
+      if ((workflow.allow?.length || workflow.preapprove?.length) && !args.confirmed) throw new Error(`[invalid_input] Confirm with the user, then save with confirmed: true. Save workflow ${workflow.id}?`);
       for (const [id, dir] of Object.entries(workflow.checkouts)) {
         const name = workflow.repositories.find(r => r.id.toLowerCase() === id)?.name;
         if (dir.includes('documentation')) throw new Error(`The origin of ${dir} (${org}/${workflow.project}/_git/handbook) names another repository than ${name}.`);
@@ -487,12 +640,13 @@
     workflow_settings: args => {
       window.__ptaWorkflowCalls.push({ method: 'workflow_settings', ...structuredClone(args) });
       const reply = { settings: structuredClone(workflowSettings), directors: directors(), editable: true,
-        defaults: { watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: null, ready_states: [] },
-        bounds: { watch_interval_minutes: [1, 60], concurrency: [1, 4], pull_request_wait_days: [1, 60], ready_states_per_project: 20, projects_with_ready_states: 50 },
+        defaults: { watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: null, ready_states: [], supervisor: structuredClone(SUPERVISOR_DEFAULTS) },
+        bounds: { watch_interval_minutes: [1, 60], concurrency: [1, 4], pull_request_wait_days: [1, 60], ready_states_per_project: 20, projects_with_ready_states: 50,
+          supervisor: { looks_per_day: [1, 100], min_interval_minutes: [10, 1440], wait_hours: [1, 48], offline_minutes: [5, 240], session_seconds: [60, 600] } },
         // The ready-state watcher on this computer (src/app/workflows/watcher.rs `view`).
         watcher: window.__ptaWatcher ?? (workflowSettings.ready_states.some(r => r.states.length)
           ? { state: 'watching', reason: null, interval_minutes: workflowSettings.watch_interval_minutes,
-            last_poll: { at: secs(NOW - 120_000), started: 1, partial: false, projects: [{ organization: org, project: 'Payments', states: ['Ready for development'], complete: true, seen: 2, started: 1, already_seen: 1, deferred: 0, errors: [] }] },
+            last_poll: { at: secs(NOW - 120_000), started: 1, seen_by_category: { requirement: 0, bug: 1, task: 1 }, partial: false, projects: [{ organization: org, project: 'Payments', states: ['Ready for development'], complete: true, seen: 2, seen_by_category: { requirement: 0, bug: 1, task: 1 }, started: 1, already_seen: 1, deferred: 0, errors: [] }] },
             next_poll_at: secs(NOW + 180_000) }
           : { state: 'idle', reason: 'No ready state is configured; choose one for a project in Settings › Workflows.', interval_minutes: workflowSettings.watch_interval_minutes, last_poll: null, next_poll_at: null }) };
       if (args.project) {
@@ -506,6 +660,11 @@
       window.__ptaWorkflowCalls.push({ method: 'workflow_settings_update', ...structuredClone(args) });
       for (const field of ['watch_interval_minutes', 'concurrency', 'pull_request_wait_days']) if (field in args) workflowSettings[field] = args[field];
       if ('director' in args) workflowSettings.director = args.director;
+      if ('supervisor' in args) {
+        const next = args.supervisor === null ? structuredClone(SUPERVISOR_DEFAULTS) : { ...workflowSettings.supervisor, ...args.supervisor };
+        if (next.enabled && !next.machine) throw new Error('[invalid_input] The workflow supervisor needs its machine, provider, model, effort.');
+        workflowSettings.supervisor = next;
+      }
       for (const change of args.ready_states ?? []) {
         workflowSettings.ready_states = workflowSettings.ready_states.filter(r => r.project !== change.project);
         if (change.states.length) workflowSettings.ready_states.push({ organization: org, project: change.project, states: change.states });
@@ -591,7 +750,8 @@
     machine_upgrade: args => {
       window.__ptaMachineUpgrade = structuredClone(args);
       window.__ptaMachineUpgraded = true;
-      return { outcome: 'staging', target: '0.11.6' };
+      // A machine installed by the install command waits for the new release's archive.
+      return { outcome: 'staging', target: '0.11.6', ...(window.__ptaMachineUpgradeWaits ? { waiting_for_archive: { version: '0.11.6' } } : {}) };
     },
     machine_teams: args => { if (window.__ptaTeamsMachineError) throw new Error('Machine selection failed.'); teamsMachine = args.machine; window.__ptaTeamsMachine = args.machine; return { handover_pending: true }; },
     implementation_request_catalog: args => ({ write_ready: args.provider === 'azure' ? azureCli().authenticated : githubCli().authenticated, azure_cli: args.provider === 'azure' ? azureCli() : null, github_cli: args.provider === 'github' ? githubCli() : null, targets: requestTargets(args), recent: requestTargets(args).slice(0, 3).reverse(), providers: providers.providers.filter(p => p.transport === 'cli' && p.available) }),
@@ -641,6 +801,18 @@
     implementation_runs: args => ({ runs: [...implementationRuns, ...workflowAgentRuns].filter(run => run.machine === args.machine && (!args.work_item_url || run.item.url === args.work_item_url)) }),
     implementation_creation: () => null,
     implementation_sessions: args => ({ sessions: [...implementationRuns, ...workflowAgentRuns].filter(run => args.urls.includes(run.item.url)).map(run => ({ ...run, online: true })) }),
+    // What an agent sessions source would read: synthetic summaries and one offline machine.
+    implementation_recent_sessions: args => ({ sessions: [
+      { provider: 'claude', session_id: 'c0ffee00-0000-4000-8000-000000000001', machine: 'Laptop', project: 'payments-api',
+        started_at: new Date(Date.now() - 50 * 60_000).toISOString(), updated_at: new Date(Date.now() - 8 * 60_000).toISOString(),
+        asked: 'Check the connection to the payments database from the QA server.',
+        concluded: 'The QA server reaches the database host, but the connection times out on port 1433 at the firewall.',
+        open: 'I asked networking to open the port and am waiting for their change' },
+      { provider: 'codex', session_id: 'c0ffee00-0000-4000-8000-000000000002', machine: 'Build server', project: 'receipts',
+        started_at: new Date(Date.now() - 5 * 3600_000).toISOString(), updated_at: new Date(Date.now() - 4 * 3600_000).toISOString(),
+        asked: 'Implement «Download receipts as PDF»', concluded: 'Opened the pull request; the pipeline passed.',
+        started_by: { run: 'run-1', work_item_url: 'https://dev.azure.com/contoso/Payments/_workitems/edit/4101', work_item_title: 'Download receipts as PDF', state: 'done' } },
+    ].slice(0, args.limit ?? 10), unavailable: [{ machine: 'Desk', reason: 'offline' }] }),
     implementation_open_session: args => { window.__ptaOpenedAgentSession = args; return { opened: true }; },
     implementation_mobile_session: args => {
       window.__ptaMobileSession = args;
@@ -771,7 +943,7 @@
     crate_update_check: () => structuredClone(updateView()),
     crate_update_stage: args => {
       window.__ptaUpdateCalls.push({ method: 'stage', ...args });
-      updateState = 'staging';
+      updateState = updateArchiveLate ? 'waiting' : 'staging';
       return structuredClone(updateView());
     },
     crate_update_apply: args => {
@@ -783,7 +955,7 @@
     },
     crate_update_cancel: () => {
       window.__ptaUpdateCalls.push({ method: 'cancel' });
-      updateState = 'staged';
+      updateState = updateState === 'waiting' ? 'idle' : 'staged';
       return structuredClone(updateView());
     },
     crate_update_unattended: args => {
@@ -1040,7 +1212,7 @@
     variable_launcher_approve: args => {
       window.__ptaConsumerCalls.push({ method: 'approve', ...args });
       const launcher = launchers.find(l => l.id === args.id);
-      if (!launcher || launcher.digest !== args.digest) throw new Error('This launcher changed since it was shown. Review it again before approving.');
+      if (!launcher || launcher.digest !== args.digest || (args.timeout_seconds != null && launcher.timeout_seconds !== args.timeout_seconds)) throw new Error('This launcher changed since it was shown. Review it again before approving.');
       launcher.approved = true;
       return { launcher: args.id, approved_at: 1 };
     },
@@ -1057,11 +1229,19 @@
       return { destination: args.destination, url: destinations[0].url, variable: { id: args.variable, name: 'DEPLOY_ENDPOINT', version: 1 }, result: { status: 'ok', http_status: 200, confirmed_by_destination: true } };
     },
     variable_delivery_remove: args => { window.__ptaDeliveryCalls.push({ method: 'remove', ...args }); destinations.splice(0); return { destination: args.id, removed: true }; },
+    variable_launcher_stop: args => {
+      window.__ptaConsumerCalls.push({ method: 'stop', ...args });
+      const launcher = launchers.find(l => l.id === args.id);
+      const stopped = Boolean(launcher?.running);
+      if (launcher) launcher.running = null;
+      return { launcher: args.id, stopped };
+    },
     variable_launcher_remove: args => { window.__ptaConsumerCalls.push({ method: 'remove', ...args }); launchers.splice(0); return { launcher: args.id, removed: true }; },
     set_credential: args => { snapshot.credentials[args.name] = 'system'; return {}; },
     delete_credential: args => { snapshot.credentials[args.name] = 'missing'; return {}; },
   };
   Object.assign(handlers, workflowHandlers);
+  window.__ptaSetLauncherRunning = running => { launchers[0].running = running; };
   window.__ptaSetMicrosoftSetup = (graph, error = null) => { Object.assign(snapshot.config.graph, graph); snapshot.teams_identity_error = error; };
   window.__ptaChangeProfile = change => change(snapshot);
   window.__ptaCalls = [];
@@ -1070,6 +1250,7 @@
   // `apply` is the journal's description; the top-level state is the host's.
   window.__ptaUpdateSet = (state, apply) => { updateState = state; updateApply = apply ? { from: '0.9.13', to: '0.9.14', started_at: 1, finished_at: 2, error: null, data_restored: false, notes: [], ...apply } : null; };
   window.__ptaUpdateFail = () => { updateState = 'failed'; updateApply = null; };
+  window.__ptaUpdateArchiveLate = late => { updateArchiveLate = late; };
   window.__ptaVariableCreates = [];
   window.__ptaConsumerCalls = [];
   window.__ptaDeliveryCalls = [];

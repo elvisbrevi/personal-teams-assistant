@@ -122,6 +122,9 @@ async fn in_memory(host: &Host) -> Vec<String> {
     if host.state.workflows.advancing() {
         reasons.push("A workflow run is advancing a stage.".to_owned());
     }
+    if host.state.workflows.supervision.looking() {
+        reasons.push("The workflow supervisor is looking at a run.".to_owned());
+    }
     reasons
 }
 
@@ -164,11 +167,7 @@ pub(super) async fn request(
     }
     let dir = directory(host);
     let saved = load(&dir);
-    let offer = available(
-        saved.latest.as_deref(),
-        env.running,
-        Some(installation.version),
-    );
+    let offer = available(&saved, env.running, Some(installation.version));
     if offer != Some(version) {
         return Reply::error(
             "state_conflict",
@@ -334,12 +333,13 @@ pub(super) fn cancel(host: &Host, env: &Environment) -> Reply {
         );
     }
     // Cancelling what unattended updating asked for keeps it from asking again for that release.
-    let unattended = load(&dir)
-        .deferred
-        .filter(|d| d.unattended)
-        .map(|d| d.version);
+    let saved = load(&dir);
+    let unattended = saved.deferred.filter(|d| d.unattended).map(|d| d.version);
+    // A wait for a release archive is withdrawn too; its task sees it and stops.
+    let waiting = saved.pending.map(|p| p.version);
     match save(&dir, |saved| {
         saved.deferred = None;
+        saved.pending = None;
         if let Some(version) = &unattended {
             saved.skip = Some(super::Skip {
                 version: version.clone(),
@@ -353,6 +353,15 @@ pub(super) fn cancel(host: &Host, env: &Environment) -> Reply {
                 audit(
                     &dir,
                     "unattended_cancelled",
+                    Version::parse(&version),
+                    None,
+                    None,
+                );
+            }
+            if let Some(version) = waiting {
+                audit(
+                    &dir,
+                    "update_wait_cancelled",
                     Version::parse(&version),
                     None,
                     None,
