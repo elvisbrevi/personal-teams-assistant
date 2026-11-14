@@ -1064,11 +1064,13 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
             let mut runs = Vec::new();
             let mut size = 0;
             let mut partial = false;
+            let own = state.registry.lock().await.id.clone();
             for run in state
                 .db
                 .list(args["work_item_url"].as_str(), args["id"].as_str(), false)?
             {
-                let value = json!({"id":run.launch.id,"item":run.launch.detail.item,"planning":run.launch.planning,"state":run.state,"created_at":run.created_at,"started_at":run.started_at,"finished_at":run.finished_at,"session_id":run.session_id,"remote":run.remote,"provider":run.launch.request.provider,"model":run.launch.request.model,"effort":run.launch.request.effort,"machine":run.launch.request.machine,"output":run.output,"plan":run.plan,"permission_mode":run.permission_mode,"prompts":run.prompts});
+                let mut value = json!({"id":run.launch.id,"item":run.launch.detail.item,"planning":run.launch.planning,"state":run.state,"created_at":run.created_at,"started_at":run.started_at,"finished_at":run.finished_at,"session_id":run.session_id,"remote":run.remote,"provider":run.launch.request.provider,"model":run.launch.request.model,"effort":run.launch.request.effort,"machine":run.launch.request.machine,"output":run.output,"plan":run.plan,"permission_mode":run.permission_mode,"prompts":run.prompts});
+                mark_session(&mut value, &own).await;
                 size += serde_json::to_vec(&value)?.len();
                 if size > 800_000 && !runs.is_empty() {
                     partial = true;
@@ -1082,6 +1084,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
             let id = args["id"].as_str().context("Choose a run.")?;
             uuid(id)?;
             let run = state.db.get(id)?;
+            let session = run.as_ref().and_then(|run| run.session_id.clone());
             let task = state.tasks.lock().await.remove(id);
             if let Some(task) = task {
                 task.abort();
@@ -1097,6 +1100,11 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
                 crate::llm::implementation::mobile::cancel_codex(&session).await?;
             }
             LocalImplementation::new(&state.db).finish_run(id, "cancelled", "", None)?;
+            // A finished run's session kept after it (or opened again by the user) stops too:
+            // cancelling ends every process of the run.
+            if let Some(session) = session {
+                crate::llm::implementation::mobile::close(&session).await;
+            }
             Ok(json!({"cancelled":true}))
         }
         "implementation_launch" => {
@@ -1359,13 +1367,62 @@ async fn run(host: &Arc<Host>, launch: Launch) {
         Ok((ok, output, plan, prompts)) => (final_state(ok, plan.is_some(), &prompts), output, plan, prompts),
         Err(_) => ("failed", "The selected CLI did not complete. Check its login, permissions and model availability on the execution machine.".into(), None, Vec::new()),
     };
+    let db = &host.state.implementation.db;
     if authority::invocation(&host.state).is_ok_and(|i| i.scope.owner) {
-        let db = &host.state.implementation.db;
         if !prompts.is_empty() {
             let _ = db.prompts(&launch.id, &prompts);
         }
         let _ = LocalImplementation::new(db).finish_run(&launch.id, status, &output, plan);
     }
+    // Only a run that ended with its answer hands its session to the user (`KEPT_AFTER`); any
+    // other ending stops the session the provider kept, so it acts no more unobserved.
+    if !KEPT_AFTER.contains(&status)
+        && let Ok(Some(run)) = db.get(&launch.id)
+        && let Some(session) = run.session_id
+    {
+        crate::llm::implementation::mobile::close(&session).await;
+    }
+}
+/// The endings after which a run's Claude session stays reachable through Remote Control, for
+/// up to two hours, and belongs to the user: a coding run `done`, a planning run `plan_ready`.
+const KEPT_AFTER: [&str; 2] = ["done", "plan_ready"];
+
+/// Mark a recorded agent run or session (this machine's record, or the summary the coordinator
+/// keeps) with whether its agent process exists now (`session_alive`) and whether it outlived
+/// its run, so it belongs to the user (`handed_to_user`). This machine's own Claude sessions are
+/// looked up among the live ones; another machine's are read from its last report: in flight
+/// with a session, or a Claude session still connected before its deadline.
+pub(super) async fn mark_session(value: &mut Value, own: &str) {
+    let state = value["state"].as_str().unwrap_or_default();
+    let active = crate::store::implementation::RUNS_IN_FLIGHT.contains(&state)
+        || crate::store::implementation::REQUESTS_IN_FLIGHT.contains(&state);
+    let alive = match value["session_id"].as_str() {
+        None => false,
+        Some(_) if active => true,
+        Some(_) if value["provider"] != "claude" => false,
+        Some(session) if value["machine"] == own => {
+            crate::llm::implementation::mobile::alive(session).await
+        }
+        Some(_) => {
+            value["remote"]["status"] == "connected"
+                && value["remote"]["expires_at"]
+                    .as_i64()
+                    .is_some_and(|t| t > now())
+        }
+    };
+    value["session_alive"] = json!(alive);
+    value["handed_to_user"] = json!(alive && !active);
+}
+/// Implementation run `id`'s session as this host knows it (`mark_session`): its machine,
+/// `session_alive` and `handed_to_user`; none without a record of the run.
+pub(in crate::app) async fn session_life(host: &Arc<Host>, id: &str) -> Option<Value> {
+    let state = &host.state.implementation;
+    let mut summary = state.db.summary(id).ok()??;
+    let own = state.registry.lock().await.id.clone();
+    mark_session(&mut summary, &own).await;
+    Some(
+        json!({"machine":summary["machine"],"session_alive":summary["session_alive"],"handed_to_user":summary["handed_to_user"]}),
+    )
 }
 /// How a finished run ends. A run is fully autonomous, so a permission prompt the CLI still
 /// raised is its own state with the prompt recorded, never `needs_attention`.

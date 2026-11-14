@@ -8,7 +8,7 @@ import { busy, fail } from './notices.js';
 import { showTab } from './nav.js';
 import { todoTypes } from './todo.js';
 import { copy, link } from './markdown.js';
-import { openAgentSession, sessionDestination, sessionIsMobile } from './sessions.js';
+import { openAgentSession, sessionDestination, sessionIsMobile, sessionLifeBadge } from './sessions.js';
 import { implementationEfforts, implementationModels, implementationReady } from './implementation.js';
 import { loadAzureCliStatus, loadGithubCliStatus, providerNames } from './home.js';
 import { effortNames } from './settings-models.js';
@@ -155,7 +155,7 @@ function agentRunCard(run) {
   copySession.onclick = () => busy(copySession, async () => { if (!await copy(run.session_id)) fail(t('Could not copy the session ID.')); });
   const card = el('article', { class: 'implementation-run', 'data-run-id': run.id },
     el('div', { class: 'todo-context' }, badge(run.purpose === 'request' && run.state === 'created' ? t('Request created') : tx(run.state), ['created', 'done', 'plan_ready'].includes(run.state) ? 'ok' : ['failed', 'uncertain', 'needs_attention', 'permission_prompt'].includes(run.state) ? 'warn' : 'info'),
-      el('strong', { textContent: `${providerNames[run.provider] || run.provider} · ${run.model}` }), run.purpose === 'request' ? badge(t('Request creation'), 'muted') : badge(t('Implementation'), 'muted')),
+      el('strong', { textContent: `${providerNames[run.provider] || run.provider} · ${run.model}` }), run.purpose === 'request' ? badge(t('Request creation'), 'muted') : badge(t('Implementation'), 'muted'), sessionLifeBadge(run)),
     run.project ? el('p', { textContent: `${run.project} · ${{ hu: t('HU'), bug: t('Bug'), epic: t('Epic') }[run.kind] || tx(run.kind)}` }) : null,
     run.item?.url ? link(`#${run.item.id} · ${run.item.title}`, run.item.url) : null,
     el('dl', { class: 'todo-fields' }, ...pairs.map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value })))),

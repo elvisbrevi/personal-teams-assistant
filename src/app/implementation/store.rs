@@ -3,8 +3,11 @@
 //! the change feed and the coordinator's session index stay here.
 use super::*;
 use crate::store::implementation::{ImplementationStore, LocalImplementation};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::sync::MutexGuard;
+
+/// The remote access of a session that is no longer connected.
+const OFFLINE: &str = r#"{"status":"offline"}"#;
 
 pub(crate) struct Database(std::sync::Mutex<Connection>);
 impl Database {
@@ -32,8 +35,15 @@ impl Database {
             INSERT INTO agent_run_events(run_id) SELECT id FROM agent_runs WHERE state IN ('running','planning');
             UPDATE agent_runs SET state='interrupted' WHERE state IN ('running','planning');
             COMMIT;")?;
-        db.execute_batch("CREATE TABLE IF NOT EXISTS request_runs (id TEXT PRIMARY KEY, state TEXT NOT NULL, requested_at TEXT NOT NULL, payload TEXT NOT NULL);
-            UPDATE request_runs SET state=CASE WHEN state='sending' THEN 'uncertain' ELSE 'interrupted' END WHERE state IN ('generating','sending');")?;
+        // A Claude session kept after its run lives only as long as the host that kept it: once
+        // it starts again none is connected, and its record says so (and reaches the coordinator).
+        db.execute_batch(&format!("BEGIN IMMEDIATE;
+            INSERT INTO agent_run_events(run_id) SELECT id FROM agent_runs WHERE provider='claude' AND json_extract(payload,'$.remote.status')='connected';
+            UPDATE agent_runs SET payload=json_set(payload,'$.remote',json('{OFFLINE}')) WHERE provider='claude' AND json_extract(payload,'$.remote.status')='connected';
+            COMMIT;"))?;
+        db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS request_runs (id TEXT PRIMARY KEY, state TEXT NOT NULL, requested_at TEXT NOT NULL, payload TEXT NOT NULL);
+            UPDATE request_runs SET state=CASE WHEN state='sending' THEN 'uncertain' ELSE 'interrupted' END WHERE state IN ('generating','sending');
+            UPDATE request_runs SET payload=json_set(payload,'$.remote',json('{OFFLINE}')) WHERE json_extract(payload,'$.provider')='claude' AND json_extract(payload,'$.remote.status')='connected';"))?;
         Ok(Self(std::sync::Mutex::new(db)))
     }
     /// The connection, for the installation's implementation record in the same database
@@ -98,6 +108,22 @@ impl Database {
             Ok(value)
         })
         .collect()
+    }
+    /// The summary of agent run `id`: this machine's record, or the one the coordinator keeps
+    /// for another machine's run.
+    pub(super) fn summary(&self, id: &str) -> Result<Option<Value>> {
+        if let Some(run) = self.list(None, Some(id), false)?.pop() {
+            return Ok(Some(serde_json::to_value(SessionSummary::from(run))?));
+        }
+        let db = self.0.lock().unwrap();
+        let metadata: Option<String> = db
+            .query_row(
+                "SELECT metadata FROM agent_session_index WHERE run_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(metadata.map(|m| serde_json::from_str(&m)).transpose()?)
     }
     pub(super) fn history(&self) -> Result<Vec<Value>> {
         let mut runs: BTreeMap<String, Value> = self
@@ -470,6 +496,39 @@ mod tests {
         let history = db.history().unwrap();
         assert_eq!(history.len(), 2);
         assert!(history.iter().all(|r| r.get("submission").is_none()));
+    }
+    #[test]
+    fn a_session_kept_after_its_run_reads_offline_once_the_host_starts_again() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runs.db");
+        let mut run = sample();
+        run.launch.request.provider = "claude".into();
+        let mut codex = sample();
+        codex.launch.id = "33333333-3333-4333-8333-333333333333".into();
+        let connected = crate::llm::implementation::mobile::Access {
+            status: "connected".into(),
+            url: Some("https://claude.ai/code/session_Remote123".into()),
+            expires_at: Some(now() + 3600),
+            ..Default::default()
+        };
+        {
+            let db = Database::open(&path).unwrap();
+            for run in [&run, &codex] {
+                db.insert(run).unwrap();
+                LocalImplementation::new(&db)
+                    .finish_run(&run.launch.id, "done", "Done.", None)
+                    .unwrap();
+                db.remote(&run.launch.id, connected.clone()).unwrap();
+            }
+        }
+        let db = Database::open(&path).unwrap();
+        let restored = db.get(&run.launch.id).unwrap().unwrap();
+        assert_eq!(restored.remote.as_ref().unwrap().status, "offline");
+        assert!(restored.remote.unwrap().url.is_none());
+        assert_eq!(restored.state, "done");
+        // Codex keeps its connection in its own daemon, which outlives the host.
+        let codex = db.get(&codex.launch.id).unwrap().unwrap();
+        assert_eq!(codex.remote.unwrap().status, "connected");
     }
     #[test]
     fn an_interrupted_session_retains_its_native_id_without_an_invented_finish_time() {
