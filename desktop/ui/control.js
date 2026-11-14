@@ -43,7 +43,7 @@ import { browserMicrosoftLogin } from './dialogs.js';
  *   'variable_create' | 'variable_delete' | 'variable_deliver' | 'variable_delivery_approve' |
  *   'variable_delivery_list' | 'variable_delivery_remove' | 'variable_entry_cancel' |
  *   'variable_entry_complete' | 'variable_launcher_approve' | 'variable_launcher_remove' |
- *   'variable_launcher_run' | 'variable_list' | 'variable_migration_inspect' |
+ *   'variable_launcher_run' | 'variable_launcher_stop' | 'variable_list' | 'variable_migration_inspect' |
  *   'variable_migration_run' | 'variable_rename' | 'variable_reveal' | 'variable_update' |
  *   'workflow_block_remove' | 'workflow_block_save' | 'workflow_blocks_list' | 'workflow_remove' |
  *   'workflow_repositories' | 'workflow_run_assign' | 'workflow_run_cancel' | 'workflow_run_requeue' | 'workflow_run_restart' | 'workflow_run_resume' |

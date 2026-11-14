@@ -272,7 +272,7 @@ pub(in crate::app) struct BlockOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<crate::workflows::Stage>,
     /// A notification: `sent`, `refused` or `uncertain`. A launcher: `succeeded`, `failed`,
-    /// `timed_out`, `not_started` or `uncertain`. `attempting` until the result is recorded.
+    /// `timed_out`, `stopped`, `not_started` or `uncertain`. `attempting` until the result is recorded.
     pub outcome: String,
     /// When the result was recorded (the attempt's time while `attempting`).
     pub at: i64,

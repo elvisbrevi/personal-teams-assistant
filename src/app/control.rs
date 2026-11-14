@@ -441,7 +441,7 @@ async fn client_with_transport(
         require_shared_account_host_at(dir)?;
     }
     // Model-backed operations wait for the model without a deadline; a launcher runs for as long
-    // as its own approved timeout (at most ten minutes), which the host enforces.
+    // as its own approved timeout (at most an hour), which the host enforces.
     let mut client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none());

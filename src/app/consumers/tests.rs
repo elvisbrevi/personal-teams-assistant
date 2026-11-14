@@ -748,6 +748,11 @@ mod launchers {
             message(&shown)
         );
         assert!(message(&shown).contains(&digest), "{}", message(&shown));
+        assert!(
+            message(&shown).contains("stopped after 60 seconds"),
+            "{}",
+            message(&shown)
+        );
         assert!(!approved().await);
         // A digest other than the definition's is the conflict, and nothing is approved.
         let stale = cli(Some(&other), true).await;
@@ -778,6 +783,174 @@ mod launchers {
             .to_vec();
             assert!(crate::app::cli::validate_args(&args).is_err(), "{bad}");
         }
+    }
+
+    #[tokio::test]
+    async fn launchers_run_side_by_side_are_listed_while_they_run_and_their_owner_stops_them() {
+        let m = machine().await;
+        allow(&m, &m.work).await;
+        let entry = store(&m.host, "DEPLOY_SECRET", KEY).await;
+        let up = m.work.join("up");
+        let service = program(
+            &m.work,
+            "service.sh",
+            &format!("touch {}\nsleep 60", up.display()),
+        );
+        let query = program(&m.work, "query.sh", "exit 0");
+        let named = |id: &str, tool: &Path, limit: u64| {
+            let mut definition = define(&m, tool, &entry);
+            definition["id"] = json!(id);
+            definition["timeout_seconds"] = json!(limit);
+            definition
+        };
+        // The limit is bounded in code, with the bound in the text.
+        let long = call(
+            &m.host,
+            Local,
+            "variable_launcher_define",
+            named("too-long", &service, 3601),
+        )
+        .await;
+        assert_eq!(long.code, "invalid_input");
+        assert!(text(&long).contains("3600"), "{}", text(&long));
+        for (id, tool, limit) in [("service", &service, 1800), ("query", &query, 60)] {
+            let defined = call(
+                &m.host,
+                Local,
+                "variable_launcher_define",
+                named(id, tool, limit),
+            )
+            .await;
+            assert!(defined.ok, "{:?}", defined.message);
+            assert_eq!(defined.data["launcher"]["timeout_seconds"], limit);
+        }
+        // The approval names the limit the person was shown.
+        let listed = call(&m.host, Window, "variable_consumer_list", json!({})).await;
+        let shown = listed.data["launchers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["id"] == "service")
+            .unwrap()
+            .clone();
+        assert_eq!(shown["timeout_seconds"], 1800);
+        assert_eq!(shown["running"], Value::Null);
+        let stale = call(
+            &m.host,
+            Window,
+            "variable_launcher_approve",
+            json!({"id":"service","digest":shown["digest"],"timeout_seconds":600}),
+        )
+        .await;
+        assert_eq!(stale.code, "state_conflict");
+        let approved = call(
+            &m.host,
+            Window,
+            "variable_launcher_approve",
+            json!({"id":"service","digest":shown["digest"],"timeout_seconds":1800}),
+        )
+        .await;
+        assert!(approved.ok, "{:?}", approved.message);
+        approve(&m, "query").await;
+
+        // The service keeps running while the query runs beside it.
+        let host = m.host.clone();
+        let started = tokio::spawn(async move {
+            call(
+                &host,
+                Local,
+                "variable_launcher_run",
+                json!({"id":"service"}),
+            )
+            .await
+        });
+        let mut running = Value::Null;
+        for _ in 0..100 {
+            let listed = call(&m.host, Local, "variable_consumer_list", json!({})).await;
+            running = listed.data["launchers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|l| l["id"] == "service")
+                .unwrap()["running"]
+                .clone();
+            if up.exists() && !running["stops_at"].is_null() {
+                assert!(!text(&listed).contains(KEY));
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(up.exists());
+        let (start, stop) = (
+            running["started_at"].as_i64().unwrap(),
+            running["stops_at"].as_i64().unwrap(),
+        );
+        assert_eq!(stop - start, 1800);
+        assert!(running["seconds_left"].as_i64().unwrap() > 1700);
+        let beside = call(
+            &m.host,
+            Local,
+            "variable_launcher_run",
+            json!({"id":"query"}),
+        )
+        .await;
+        assert!(beside.ok, "{:?}", beside.message);
+        assert_eq!(beside.data["result"]["status"], "succeeded");
+        // A second run of the running launcher is the conflict.
+        let twice = call(
+            &m.host,
+            Local,
+            "variable_launcher_run",
+            json!({"id":"service"}),
+        )
+        .await;
+        assert_eq!(twice.code, "state_conflict");
+        assert!(text(&twice).contains("already running"), "{}", text(&twice));
+
+        // Only the owner, on this machine, stops it.
+        for transport in [Browser, Machine] {
+            let refused = call(
+                &m.host,
+                transport,
+                "variable_launcher_stop",
+                json!({"id":"service"}),
+            )
+            .await;
+            assert!(!refused.ok, "{transport:?}");
+        }
+        assert!(!started.is_finished());
+        let stopped = call(
+            &m.host,
+            Local,
+            "variable_launcher_stop",
+            json!({"id":"service"}),
+        )
+        .await;
+        assert!(stopped.ok, "{:?}", stopped.message);
+        assert_eq!(stopped.data["stopped"], true);
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(10), started)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ended.ok, "{:?}", ended.message);
+        assert_eq!(ended.data["result"]["status"], "stopped");
+        assert!(!text(&ended).contains(KEY));
+        let listed = call(&m.host, Local, "variable_consumer_list", json!({})).await;
+        assert!(
+            listed.data["launchers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|l| l["running"].is_null())
+        );
+        let again = call(
+            &m.host,
+            Window,
+            "variable_launcher_stop",
+            json!({"id":"service"}),
+        )
+        .await;
+        assert_eq!(again.data["stopped"], false);
     }
 
     #[tokio::test]
@@ -863,6 +1036,7 @@ fn consumer_tools_take_references_and_never_a_value() {
         ("consumer_check", Effect::External),
         ("launcher_define", Effect::External),
         ("launcher_remove", Effect::Local),
+        ("launcher_stop", Effect::Local),
         ("launcher_run", Effect::External),
     ];
     for (name, effect) in names {
