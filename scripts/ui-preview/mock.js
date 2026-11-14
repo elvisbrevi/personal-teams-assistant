@@ -420,6 +420,16 @@
       actions: [{ id: 'a1', action: 'restart', reason: 'The session stopped on a permission prompt.', state: 'proposed' },
         { id: 'a2', action: 'create_work_item', work_item: 0, reason: 'The export has the same rounding.', state: 'proposed' },
         { id: 'a3', action: 'post_summary', reason: 'The team waits for this fix.', state: 'proposed' }] }]; };
+  // An audit of a finished batch, as `workflow_supervise {audit: true}` stores it.
+  window.__ptaAudit = () => { window.__ptaAudits = [{ id: crypto.randomUUID(), event: 'batch_ended', created_at: secs(NOW - 30_000), since: secs(NOW - 700_000_000), until: secs(NOW - 600_000_000),
+    supervised_by: { machine: '11111111-1111-4111-8111-111111111111', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' }, outcome: 'done',
+    items: [{ run: runId(5), item: 4990, title: 'Export refunds to the ledger', url: `${org}/Payments/_workitems/edit/4990`, project: 'Payments', organization: org, workflow: 'payments-features', state: 'done', children: 1,
+      pull_requests: [{ id: 37, status: 'completed', url: `${org}/Payments/_git/payments-api/pullrequest/37` }], not_verified: 1, result: 'Merged; its branch was not deleted.' }],
+    merged_branches: [{ run: runId(5), repository: 'payments-api', branch: 'feature/5990-ledger-export', pull_request: 37 }],
+    overview: 'The batch delivered its item; one finding was left in a comment.',
+    findings: [{ run: runId(5), text: 'The ledger export rounds with its own helper too.', from: 'comment', needs_item: true }],
+    proposals: ['Delete the merged branch feature/5990-ledger-export.'],
+    work_items: [{ run: runId(5), draft: { type: 'bug', title: 'Round the ledger export', description: 'Use the same rounding as the refunds.', repository: { id: '0f3c2a1b-0000-4000-8000-000000000001', name: 'payments-api' }, reason: 'From a comment.' } }] }]; };
   // A run's item with another title (the list's long-title check).
   window.__ptaRetitleRun = (run, title) => { workflowRuns.find(r => r.id === run).item.title = title; };
   window.__ptaWorkflowCalls = [];
@@ -511,12 +521,21 @@
     // The workflow supervisor (src/app/workflows/supervisor.rs): a look queued, its looks, its proposals carried out once.
     workflow_supervise: args => {
       window.__ptaWorkflowCalls.push({ method: 'workflow_supervise', ...structuredClone(args) });
+      if (args.audit) {
+        if (!workflowSettings.supervisor.enabled) throw new Error('[not_ready] The workflow supervisor is off.');
+        window.__ptaAuditQueued = [{ key: 'audit:requested', event: 'requested', state: 'queued', requested: true, created_at: secs(Date.now()) }];
+        return { audit: 'audit:requested', since: secs(Date.now()) - 604800, state: 'queued' };
+      }
       const run = findRun(args.run);
       if (!workflowSettings.supervisor.enabled) throw new Error('[not_ready] The workflow supervisor is off.');
       run.supervising = [{ key: `${run.id}:requested`, event: 'requested', state: 'queued', requested: true, created_at: secs(Date.now()) }];
       return { run: run.id, look: run.supervising[0].key, state: 'queued' };
     },
-    workflow_supervision: args => { const run = findRun(args.run); return { run: run.id, looks: structuredClone(run.supervision ?? []), queued: structuredClone(run.supervising ?? []) }; },
+    workflow_supervision: args => {
+      if (args.audit) return { audit: structuredClone(window.__ptaAudits?.[0] ?? null), queued: structuredClone(window.__ptaAuditQueued ?? []) };
+      if (args.audits) return { audits: (window.__ptaAudits ?? []).map(a => ({ id: a.id, created_at: a.created_at, outcome: a.outcome, runs: a.items.length })), queued: [] };
+      const run = findRun(args.run); return { run: run.id, looks: structuredClone(run.supervision ?? []), queued: structuredClone(run.supervising ?? []) };
+    },
     workflow_supervision_act: args => {
       window.__ptaWorkflowCalls.push({ method: 'workflow_supervision_act', ...structuredClone(args) });
       const run = findRun(args.run);

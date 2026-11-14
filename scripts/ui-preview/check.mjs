@@ -2275,6 +2275,20 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.waitForTimeout(300);
   const allowed = (await calls()).filter(c => c.method === 'workflow_save' && c.workflow?.id === 'payments-features').pop();
   check(`workflows ${label}: an allowed action is saved with confirmation`, allowed?.confirmed === true && allowed.workflow.allow.join() === 'merge', JSON.stringify(allowed));
+  // Pre-approving the supervisor is reviewed the same way: the restart, and a post to a chosen chat.
+  const preBefore = (await calls()).filter(c => c.method === 'workflow_save' && c.workflow?.id === 'payments-features').length;
+  await payments.locator('input[data-preapprove="restart_after_cut"]').check();
+  await payments.locator('button', { hasText: 'Guardar workflow' }).click();
+  await page.waitForTimeout(300);
+  check(`workflows ${label}: pre-approving a restart shows what the supervisor may do before anything is sent`,
+    await payments.locator('.workflow-allow-review .callout.warn', { hasText: 'El supervisor puede reiniciar' }).isVisible()
+    && (await calls()).filter(c => c.method === 'workflow_save' && c.workflow?.id === 'payments-features').length === preBefore);
+  const preScan = await scan(page);
+  check(`workflows ${label}: the pre-approval review passes WCAG 2.2 AA`, preScan.length === 0, JSON.stringify(preScan));
+  await payments.locator('button', { hasText: 'Confirmar y guardar' }).click();
+  await page.waitForTimeout(300);
+  const preapproved = (await calls()).filter(c => c.method === 'workflow_save' && c.workflow?.id === 'payments-features').pop();
+  check(`workflows ${label}: a pre-approval is saved with confirmation`, preapproved?.confirmed === true && JSON.stringify(preapproved.workflow.preapprove) === '[{"action":"restart_after_cut"}]', JSON.stringify(preapproved?.workflow?.preapprove));
   await payments.locator('input.switch').click();
   await page.waitForTimeout(300);
   check(`workflows ${label}: the switch disables a workflow and nothing else`, (await calls()).some(c => c.method === 'workflow_save' && c.id === 'payments-features' && c.enabled === false && !c.workflow));
@@ -2858,6 +2872,20 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   const acted = (await calls()).find(c => c.method === 'workflow_supervision_act');
   check(`runs ${label}: the proposal is carried out once, with the unedited draft and the confirmation`, acted?.confirmed && acted.action === 'a1' && !('note' in acted)
     && (await calls()).filter(c => c.method === 'workflow_supervision_act').length === 1, JSON.stringify(acted));
+  // The supervisor's latest audit, under the runs list: per run, the merged branches still there, the findings.
+  await page.evaluate(() => window.__ptaAudit());
+  await page.click('#run-detail-back').catch(() => {});
+  await page.click('#runs-refresh');
+  await page.waitForSelector('#run-audit');
+  const auditText = await page.locator('#run-audit').innerText();
+  check(`runs ${label}: the audit lists its runs, the merged branches still there and the findings left in comments`,
+    /feature\/5990-ledger-export/.test(auditText) && /necesita un elemento de trabajo/.test(auditText) && /Auditoría/.test(auditText), auditText);
+  const auditScan = await scan(page);
+  check(`runs ${label}: the audit passes WCAG 2.2 AA`, auditScan.length === 0, JSON.stringify(auditScan));
+  await page.click('#runs-audit-ask');
+  await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_supervise' && c.audit === true));
+  check(`runs ${label}: an audit can be asked for`, (await calls()).some(c => c.method === 'workflow_supervise' && c.audit === true));
+  await page.screenshot({ path: `${out}/${label}-workflow-audit.png`, fullPage: true });
   check(`runs ${label}: no client errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }
