@@ -843,7 +843,7 @@ while read -r control; do :; done
         };
         let pid = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if observed.lock().unwrap().first().is_some()
+                if !observed.lock().unwrap().is_empty()
                     && let Some(pid) = fake::pids(root.path()).pop()
                 {
                     break pid;
