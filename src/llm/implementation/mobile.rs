@@ -236,13 +236,15 @@ impl Session {
             }
         }).await?
     }
-    async fn enable(&mut self) -> Result<Access> {
+    /// Connect Remote Control, the session listed under `name`: a field of the request, never
+    /// an argument of the CLI.
+    async fn enable(&mut self, name: &SessionName) -> Result<Access> {
         self.control("pta-initialize", json!({"subtype":"initialize"}))
             .await?;
         let result = self
             .control(
                 "pta-remote",
-                json!({"subtype":"remote_control","enabled":true,"name":"Teams Assistant"}),
+                json!({"subtype":"remote_control","enabled":true,"name":name.as_str()}),
             )
             .await?;
         let url = claude_url(result["session_url"].as_str().unwrap_or_default())?;
@@ -466,6 +468,7 @@ pub(super) async fn execute(
     prompt: &str,
     id: &str,
     (planning, keep): (bool, bool),
+    name: &SessionName,
     observer: SessionObserver<'_>,
     remote: Observer,
 ) -> Result<Outcome> {
@@ -476,6 +479,7 @@ pub(super) async fn execute(
         prompt,
         id,
         (planning, keep),
+        name,
         observer,
         remote,
         (SESSION_LIMIT, SETTLE),
@@ -493,6 +497,7 @@ async fn follow_session(
     prompt: &str,
     id: &str,
     (planning, keep): (bool, bool),
+    name: &SessionName,
     observer: SessionObserver<'_>,
     remote: Observer,
     (limit, settle): (Duration, Duration),
@@ -500,7 +505,7 @@ async fn follow_session(
     let mut session = spawn(binary, args, directory).await?;
     observer(None)?;
     let access = session
-        .enable()
+        .enable(name)
         .await
         .unwrap_or_else(|_| Access::unavailable());
     remote(access.clone())?;
@@ -572,12 +577,13 @@ async fn follow_session(
     Ok(Outcome::redacted(ok, &text, &events.prompts)?.because(failure))
 }
 
+/// Reconnect a recorded session, under its `name` again (Claude).
 pub(crate) async fn reconnect(
     choice: (&str, &str, &str),
     id: &str,
     remote_id: Option<&str>,
     directories: &[PathBuf],
-    planning: bool,
+    (planning, name): (bool, &SessionName),
     observer: Observer,
 ) -> Result<Access> {
     let (provider, model, effort) = choice;
@@ -613,7 +619,7 @@ pub(crate) async fn reconnect(
         args.extend(["--tools".into(), "".into()]);
     }
     let mut session = spawn(&binary, &args, &directories[0]).await?;
-    let access = session.enable().await?;
+    let access = session.enable(name).await?;
     retain(id, session, access.clone(), observer).await?;
     Ok(access)
 }
@@ -718,6 +724,7 @@ read -r initialize
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-initialize","response":{}}}'
 read -r remote
 case "$remote" in *'"enabled":true'*) ;; *) exit 7;; esac
+printf '%s\n' "$remote" > "$(dirname "$0")/remote"
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-remote","response":{"session_url":"https://claude.ai/code/session_Remote123"}}}'
 read -r prompt
 case "$prompt" in *'Synthetic mobile check'*) ;; *) exit 8;; esac
@@ -738,6 +745,7 @@ while read -r control; do :; done
                 &[root.path().into()],
                 "Synthetic mobile check",
                 None,
+                &SessionName::item(4211, "Fix \"rounding\"\nnow"),
                 &|id| {
                     if let Some(id) = id {
                         *native.lock().unwrap() = id.into();
@@ -755,6 +763,14 @@ while read -r control; do :; done
         .unwrap();
         assert!(result.ok);
         assert_eq!(result.text, "Completed synthetic check.");
+        // The session is listed under the item's name, a field of the request.
+        let remote: Value =
+            serde_json::from_str(&std::fs::read_to_string(root.path().join("remote")).unwrap())
+                .unwrap();
+        assert_eq!(
+            remote["request"]["name"],
+            "Teams Assistant - 4211 Fix \"rounding\" now"
+        );
         let id = native.lock().unwrap().clone();
         assert!(alive(&id).await);
         {
@@ -809,6 +825,7 @@ while read -r control; do :; done
                     "Synthetic coding task",
                     &id,
                     (false, keep),
+                    &SessionName::default(),
                     &|_| Ok(()),
                     Arc::new(move |access| {
                         updates.lock().unwrap().push(access.status);
@@ -862,6 +879,7 @@ while read -r control; do :; done
                     "Synthetic coding task",
                     &uuid::Uuid::new_v4().to_string(),
                     (false, true),
+                    &SessionName::default(),
                     &|_| Ok(()),
                     Arc::new(move |access| {
                         updates.lock().unwrap().push(access.status);
@@ -929,6 +947,7 @@ printf '{"type":"result","session_id":"%s","is_error":false,"result":"Opened not
                 &[root.path().into()],
                 "Synthetic coding task",
                 None,
+                &SessionName::default(),
                 &|_| Ok(()),
                 Arc::new(|_| Ok(())),
             ),
@@ -999,6 +1018,7 @@ printf '{{"type":"system","subtype":"init","session_id":"%s"}}\n' "$session"
             "Synthetic coding task",
             &uuid::Uuid::new_v4().to_string(),
             (false, true),
+            &SessionName::default(),
             &|_| Ok(()),
             Arc::new(|_| Ok(())),
             limits,
@@ -1283,6 +1303,7 @@ while read -r line; do :; done"##
                 "Synthetic coding task",
                 &uuid::Uuid::new_v4().to_string(),
                 (false, true),
+                &SessionName::default(),
                 &|id| {
                     observed.lock().unwrap().extend(id.map(str::to_owned));
                     Ok(())

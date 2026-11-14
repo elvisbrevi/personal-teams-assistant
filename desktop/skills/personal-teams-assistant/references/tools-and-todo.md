@@ -323,6 +323,14 @@ never kept. A stopped session is reachable again only when the user opens it wit
 `session_alive` (its process exists now) and `handed_to_user` (it outlived its run): read them
 instead of guessing from the run's state or the machine's processes.
 
+In the provider's session list (Claude Remote Control, Codex threads) each session is named
+after what it works on: `Teams Assistant - <work item ID> <title>` for a coding or planning run
+(the title on one line, shortened to 100 characters), `Teams Assistant - director <ID>`,
+`Teams Assistant - summary <ID>` and `Teams Assistant - supervision <ID>` for the workflow
+director's and supervisor's sessions, and `Teams Assistant - new
+user story` (`new bug`, `new epic`) for a request run. OpenCode sessions are not named. A worker
+too old to receive the item names those sessions without the ID.
+
 A coding run is finished when its agent's work is, not at its first turn end: a Claude session
 that ends a turn while a background task it started is still pending (a pipeline it watches, a
 subagent) stays `running` until a later turn finishes and the CLI reports it idle with nothing

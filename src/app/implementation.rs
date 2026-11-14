@@ -88,6 +88,10 @@ struct Machine {
     /// Whether its last poll said it summarizes its agent sessions (`agent_sessions_local`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     agent_sessions: bool,
+    /// Whether its last poll said a director's call may carry the item for the session's name
+    /// (`session_names_support`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    session_names: bool,
     /// Whether its last poll said it runs the workflow supervisor's looks (`workflow_direct`
     /// with `task: "supervise"` and its own session bound).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1297,8 +1301,9 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
     let id = args["id"].as_str().context("Choose a recorded run.")?;
     uuid(id)?;
     let db = &host.state.implementation.db;
-    let (provider, model, effort, session, working, planning, active, reported) =
+    let (provider, model, effort, session, working, planning, active, reported, name) =
         if let Some(run) = db.get(id)? {
+            let name = run_name(&run.launch);
             let request = run.launch.request;
             ensure!(
                 request.machine == host.state.implementation.registry.lock().await.id,
@@ -1313,6 +1318,7 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
                 run.launch.planning,
                 ["running", "planning"].contains(&run.state.as_str()),
                 run.remote,
+                name,
             )
         } else {
             let record = db
@@ -1328,6 +1334,7 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
                 true,
                 record["state"] == "generating",
                 serde_json::from_value::<mobile::Access>(record["remote"].clone()).ok(),
+                recorded_name(&record),
             )
         };
     let session = session.context("The agent has not reported a session ID yet.")?;
@@ -1378,7 +1385,7 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
                 &session,
                 reported.as_ref().and_then(|r| r.session_id.as_deref()),
                 &working,
-                planning,
+                (planning, &name),
                 observer.clone(),
             )
             .await?;
@@ -1395,6 +1402,24 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
             Ok(json!({"remote":access,"pairing":pairing}))
         }
         _ => anyhow::bail!("Choose connect, pair or close for this mobile session."),
+    }
+}
+
+/// A coding or planning run's session name, from the work item the launch carries.
+fn run_name(launch: &Launch) -> crate::llm::implementation::SessionName {
+    let item = &launch.detail.item;
+    crate::llm::implementation::SessionName::item(item.id, &item.title)
+}
+/// The session name of a recorded request, classification or summary session.
+fn recorded_name(record: &Value) -> crate::llm::implementation::SessionName {
+    use crate::llm::implementation::{DirectTask, SessionName};
+    let item = record["item"]["id"].as_u64();
+    match record["purpose"].as_str() {
+        Some("request") => SessionName::request(record["kind"].as_str().unwrap_or_default()),
+        Some("classification") => DirectTask::Classify.session_name(item),
+        Some("summary") => DirectTask::Summarize.session_name(item),
+        Some("supervision") => DirectTask::Supervise.session_name(item),
+        _ => SessionName::default(),
     }
 }
 
@@ -1426,6 +1451,7 @@ async fn run(host: &Arc<Host>, launch: Launch) {
         host.state.implementation.db.session(&launch.id, session)
     };
     let remote = remote_observer(host, &launch.id);
+    let name = run_name(&launch);
     let result = if launch.planning {
         async {
             let plan = crate::llm::implementation::plan(
@@ -1433,6 +1459,7 @@ async fn run(host: &Arc<Host>, launch: Launch) {
                 &request.directories,
                 &instructions,
                 &input,
+                &name,
                 &observer,
                 remote.clone(),
             )
@@ -1458,6 +1485,7 @@ async fn run(host: &Arc<Host>, launch: Launch) {
             &request.directories,
             &prompt,
             &launch.allow,
+            &name,
             &observer,
             remote,
         )
@@ -1820,6 +1848,22 @@ fn validate_child(child: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_reconnected_session_keeps_the_name_of_its_purpose_and_item() {
+        let name = |record: Value| recorded_name(&record).as_str().to_owned();
+        for (purpose, expected) in [
+            ("classification", "Teams Assistant - director 41"),
+            ("summary", "Teams Assistant - summary 41"),
+            ("supervision", "Teams Assistant - supervision 41"),
+        ] {
+            assert_eq!(name(json!({"purpose":purpose,"item":{"id":41}})), expected);
+        }
+        assert_eq!(
+            name(json!({"purpose":"request","kind":"bug","item":null})),
+            "Teams Assistant - new bug"
+        );
+        assert_eq!(name(json!({"purpose":"other"})), "Teams Assistant");
+    }
     #[test]
     fn a_permission_prompt_never_ends_a_run_in_needs_attention() {
         let prompt = vec!["Bash: git push".to_owned()];
@@ -2304,6 +2348,8 @@ mod tests {
         assert_eq!(command["method"], "workflow_direct");
         assert_eq!(command["args"]["provider"], "claude");
         assert_eq!(command["args"]["instructions"], "Choose.");
+        // A worker that does not say it names sessions gets no item: it would refuse the field.
+        assert!(command["args"].get("item").is_none());
         // A classification carries neither the supervisor's task nor its bound, so an older
         // worker still reads it.
         assert!(command["args"].get("task").is_none() && command["args"].get("seconds").is_none());
@@ -2367,6 +2413,8 @@ mod tests {
         .unwrap();
         assert_eq!(command["args"]["task"], "supervise");
         assert_eq!(command["args"]["seconds"], 180);
+        // Without `session_names_support` it still gets the look, without the item.
+        assert!(command["args"].get("item").is_none());
         let mut answered = supervising.clone();
         answered["results"] =
             json!([{"id":command["id"],"result":{"ok":false,"failure":{"cause":"timeout"}}}]);
@@ -2378,7 +2426,31 @@ mod tests {
                 .iter()
                 .any(|r| r["purpose"] == "supervision" && r["state"] == "failed")
         );
+        // A worker that also names sessions gets the item's ID with the look.
+        supervising["session_names_support"] = json!(true);
+        fleet::protocol(&host, &supervising).await.unwrap();
+        let looking = tokio::spawn(look(host.clone(), director.clone(), item.clone()));
+        let command = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let reply = fleet::protocol(&host, &supervising).await.unwrap();
+                if !reply["command"].is_null() {
+                    break reply["command"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(command["args"]["task"], "supervise");
+        assert_eq!(command["args"]["item"], 41);
+        let mut answered = supervising.clone();
+        answered["results"] =
+            json!([{"id":command["id"],"result":{"ok":false,"failure":{"cause":"timeout"}}}]);
+        fleet::protocol(&host, &answered).await.unwrap();
+        assert!(looking.await.unwrap().is_err());
         // A session ID that is not one is dropped, and the answer is kept.
+        let mut poll = poll.clone();
+        poll["session_names_support"] = json!(true);
         let asking = tokio::spawn(ask(host.clone(), director.clone(), item.clone()));
         let command = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -2391,6 +2463,8 @@ mod tests {
         })
         .await
         .unwrap();
+        // A worker that names sessions gets the item's ID for the director's session name.
+        assert_eq!(command["args"]["item"], 41);
         let result = json!({"ok":true,"data":{"answer":{"workflow":"payments","reason":"Pagos."},"problem":"Free text the worker made up",
             "session_id":"../../etc/passwd","started_at":"yesterday","finished_at":null}});
         let mut answered = poll.clone();
