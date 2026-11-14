@@ -367,6 +367,10 @@ async function showPlanReview(run, area, refresh) {
   area.replaceChildren(panel);
 }
 
+/** A task's branches in the workflow's other repositories, as its session reported them. */
+function otherBranches(child) {
+  return (child.branches ?? []).map(b => t('Branch {name} in {repository}', { name: b.branch, repository: b.repository.name }));
+}
 /** A starting point for the handover note from what the record holds: the stages reached, each child's branch and pull requests. */
 function handoverDraft(run) {
   const reached = [...new Set((run.timeline ?? []).map(s => s.stage).filter(s => !FINAL.includes(s) && !WAITING.includes(s)))].map(runStateLabel);
@@ -374,6 +378,7 @@ function handoverDraft(run) {
   if (reached.length) lines.push(`- ${t('Stages reached: {stages}', { stages: reached.join(', ') })}`);
   for (const child of run.children ?? []) {
     const facts = [child.branch ? t('Branch {name}', { name: child.branch }) : null,
+      ...otherBranches(child),
       ...(child.pull_requests ?? []).map(pr => t('Pull request !{id} ({status})', { id: String(pr.id), status: tx(pr.status) }))].filter(Boolean);
     if (facts.length) lines.push(`- #${child.id} ${child.title}: ${facts.join(' · ')}`);
   }
@@ -448,7 +453,8 @@ function children(run, sessionButton, sessions) {
     return el('div', { class: 'resource run-child', 'data-child': String(child.id) },
       el('div', { class: 'resource-head' }, badge(tx(state), state === 'done' ? 'ok' : ['failed', 'permission_prompt', 'interrupted', 'needs_attention', 'missing'].includes(state) ? 'warn' : 'info'),
         link(`#${child.id} ${child.title}`, child.url), el('span', { class: 'grow' }), life, sessionButton(child.coding)),
-      el('p', { class: 'resource-facts' }, el('small', { textContent: [child.repository?.name, child.branch ? t('Branch {name}', { name: child.branch }) : null, child.outcome ? tx(child.outcome) : null].filter(Boolean).join(' · ') })),
+      el('p', { class: 'resource-facts' }, el('small', { textContent: [child.repository?.name, child.branch ? t('Branch {name}', { name: child.branch }) : null, ...otherBranches(child), child.outcome ? tx(child.outcome) : null].filter(Boolean).join(' · ') })),
+      child.ignored_branches?.length ? el('p', { class: 'hint run-child-ignored', textContent: t('Ignored branch lines for repositories this workflow does not have: {names}', { names: child.ignored_branches.join(', ') }) }) : null,
       child.coding?.failure ? el('p', { class: 'hint run-child-failure', textContent: failureText(child.coding.failure) }) : null,
       prs.length ? el('ul', { class: 'run-pulls' }, ...prs.map(pr => el('li', {}, link(pr.title ? `!${pr.id} ${pr.title}` : pr.url, pr.url), ' ', badge(tx(pr.status), pr.status === 'completed' ? 'ok' : pr.status === 'abandoned' ? 'warn' : 'info')))) : null);
   });

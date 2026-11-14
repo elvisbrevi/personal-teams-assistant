@@ -203,6 +203,15 @@ pub(in crate::app) struct Child {
     /// The branch its session reported (`Branch: NAME` at the end of its report).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// A task's branches in the workflow's other repositories, as its session reported them
+    /// (`Branch REPOSITORY: NAME`), each for a repository whose checkout the run was given.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<RepositoryBranch>,
+    /// The repositories its report named a branch for that are not the workflow's (or have no
+    /// checkout on its machine): those lines were ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored_branches: Vec<String>,
+    /// The pull requests of every branch it reported, each with its repository.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pull_requests: Vec<PullRequest>,
     /// `done`, or `accepted` when the user resumed the run past a coding run that did not end
@@ -214,6 +223,42 @@ impl Child {
     pub(in crate::app) fn accepted(&self) -> bool {
         self.outcome.as_deref() == Some("accepted")
     }
+    /// Every branch it reported, with its repository: its own repository's first.
+    pub(in crate::app) fn delivered(&self) -> Vec<(crate::workflows::Repository, String)> {
+        let primary = self.repository.clone().zip(self.branch.clone()).into_iter();
+        primary
+            .chain(
+                self.branches
+                    .iter()
+                    .map(|b| (b.repository.clone(), b.branch.clone())),
+            )
+            .collect()
+    }
+    /// Whether it reported any branch.
+    pub(in crate::app) fn reported(&self) -> bool {
+        self.branch.is_some() || !self.branches.is_empty()
+    }
+    /// The repositories of its reported branches that have no pull request yet.
+    pub(in crate::app) fn without_pull_request(&self) -> Vec<String> {
+        self.delivered()
+            .into_iter()
+            .filter(|(r, _)| {
+                !self
+                    .pull_requests
+                    .iter()
+                    .any(|p| p.repository.eq_ignore_ascii_case(&r.id))
+            })
+            .map(|(r, _)| r.name)
+            .collect()
+    }
+}
+
+/// A branch a task's coding session pushed in another of the workflow's repositories.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(in crate::app) struct RepositoryBranch {
+    pub repository: crate::workflows::Repository,
+    pub branch: String,
 }
 
 /// What an acting block did at one occurrence of its stage, or why it did not run. The engine

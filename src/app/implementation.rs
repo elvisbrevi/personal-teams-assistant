@@ -977,6 +977,12 @@ pub(super) async fn test_creation(host: &Host, plan: &str, record: Value) {
     data.creations.insert(plan.into(), record);
     state.save(&data).unwrap();
 }
+/// The directories this machine gave a run, its working directory first (tests).
+#[cfg(all(test, unix))]
+pub(super) fn test_directories(host: &Host, id: &str) -> Vec<PathBuf> {
+    let run = host.state.implementation.db.get(id).unwrap().unwrap();
+    run.launch.request.directories
+}
 /// End an in-flight run in `state` as its machine would record it (tests).
 #[cfg(all(test, unix))]
 pub(super) fn test_finish(host: &Host, id: &str, state: &str, output: &str) {
