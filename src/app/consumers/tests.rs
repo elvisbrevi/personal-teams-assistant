@@ -692,6 +692,95 @@ mod launchers {
     }
 
     #[tokio::test]
+    async fn the_cli_approves_a_launcher_by_the_digest_the_user_reviewed() {
+        let m = machine().await;
+        allow(&m, &m.work).await;
+        let entry = store(&m.host, "DEPLOY_SECRET", KEY).await;
+        let tool = program(&m.work, "tool.sh", "exit 0");
+        let defined = call(
+            &m.host,
+            Window,
+            "variable_launcher_define",
+            define(&m, &tool, &entry),
+        )
+        .await;
+        assert!(defined.ok, "{:?}", defined.message);
+        let listed = call(&m.host, Local, "variable_consumer_list", json!({})).await;
+        let digest = listed.data["launchers"][0]["digest"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let other = if digest.starts_with('0') { "1" } else { "0" }.repeat(64);
+        let approved = || async {
+            let listed = call(&m.host, Local, "variable_consumer_list", json!({})).await;
+            listed.data["launchers"][0]["approved"] == true
+        };
+        // The CLI's own words, as `pta variables launcher approve` passes them on.
+        let cli = |digest: Option<&str>, confirmed: bool| {
+            let mut args: Vec<String> = ["--json", "variables", "launcher", "approve", "deploy"]
+                .map(str::to_owned)
+                .to_vec();
+            if let Some(digest) = digest {
+                args.extend(["--digest".to_owned(), digest.to_owned()]);
+            }
+            if confirmed {
+                args.push("--confirmed".to_owned());
+            }
+            crate::app::cli::validate_args(&args).unwrap_or_else(|e| panic!("{args:?}: {e:?}"));
+            let host = m.host.clone();
+            async move {
+                crate::app::cli::approve_launcher(&args, |method, body| {
+                    let host = host.clone();
+                    async move { Ok(call(&host, Local, method, body).await) }
+                })
+                .await
+                .unwrap()
+            }
+        };
+        let message = |reply: &Reply| reply.message.clone().unwrap_or_default();
+
+        // Without --confirmed it only shows what would be approved, with the pinned digest.
+        let shown = cli(Some(&digest), false).await;
+        assert_eq!(shown.code, "invalid_input");
+        assert!(
+            message(&shown).contains("--confirmed"),
+            "{}",
+            message(&shown)
+        );
+        assert!(message(&shown).contains(&digest), "{}", message(&shown));
+        assert!(!approved().await);
+        // A digest other than the definition's is the conflict, and nothing is approved.
+        let stale = cli(Some(&other), true).await;
+        assert_eq!(stale.code, "state_conflict", "{}", message(&stale));
+        assert!(
+            message(&stale).contains("This launcher changed since it was shown"),
+            "{}",
+            message(&stale)
+        );
+        assert!(!approved().await);
+        // The digest the list showed approves it, whatever its letter case.
+        let pinned = cli(Some(&digest.to_ascii_uppercase()), true).await;
+        assert!(pinned.ok, "{}", message(&pinned));
+        assert!(approved().await);
+        // Without --digest the listed definition is approved, as before.
+        assert!(cli(None, true).await.ok);
+        // A value that is not a SHA-256 is refused before anything is asked of the host.
+        for bad in ["abc", "--confirmed"] {
+            let args: Vec<String> = [
+                "variables",
+                "launcher",
+                "approve",
+                "deploy",
+                "--digest",
+                bad,
+            ]
+            .map(str::to_owned)
+            .to_vec();
+            assert!(crate::app::cli::validate_args(&args).is_err(), "{bad}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_program_swapped_after_approval_never_receives_a_value() {
         let m = machine().await;
         allow(&m, &m.work).await;

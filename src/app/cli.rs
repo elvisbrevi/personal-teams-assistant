@@ -624,6 +624,7 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--variable"
                 | "--timeout"
                 | "--pin"
+                | "--digest"
                 | "--destination"
                 | "--name"
                 | "--existing"
@@ -1943,56 +1944,7 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
             call("variable_launcher_define", body, None, true).await
         }
         ("launcher", Some("approve")) => {
-            let name = word(3)?;
-            let listed = call("variable_consumer_list", json!({}), None, true).await?;
-            if !listed.ok {
-                return Ok(listed);
-            }
-            let Some(launcher) = listed.data["launchers"]
-                .as_array()
-                .and_then(|all| all.iter().find(|l| l["id"] == name))
-            else {
-                return Ok(Reply::error(
-                    "invalid_input",
-                    2,
-                    "There is no launcher with that name on this machine.",
-                ));
-            };
-            let digest = launcher["digest"].as_str().unwrap_or_default();
-            // A digest given is the one the user reviewed: a definition changed since is refused.
-            let digest = option(args, "--digest").unwrap_or(digest);
-            let variables: Vec<String> = launcher["variables"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|v| {
-                    let named = v["variable"]["name"].as_str().or(v["id"].as_str());
-                    format!(
-                        "{}={}",
-                        v["env"].as_str().unwrap_or_default(),
-                        named.unwrap_or_default()
-                    )
-                })
-                .collect();
-            if let Some(reply) = unconfirmed(
-                args,
-                format!(
-                    "Approve launcher {name}: program {} (SHA-256 {digest}) with arguments {} in {}, receiving the variables {} as environment variables whenever it runs?",
-                    launcher["program"],
-                    launcher["args"],
-                    launcher["directory"],
-                    serde_json::to_string(&variables)?
-                ),
-            ) {
-                return Ok(reply);
-            }
-            call(
-                "variable_launcher_approve",
-                json!({"id":name,"digest":digest}),
-                None,
-                true,
-            )
-            .await
+            approve_launcher(args, |method, body| call(method, body, None, true)).await
         }
         ("launcher", Some("run")) => {
             let name = word(3)?;
@@ -2027,6 +1979,67 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
         ("key", Some("rotate")) => call("variable_key_rotate", json!({}), None, true).await,
         _ => anyhow::bail!("unknown command or invalid argument count"),
     }
+}
+/// `variables launcher approve NAME [--digest SHA256]`: shows the definition the host lists and,
+/// once confirmed, approves it by digest; a pinned digest is the one the user reviewed.
+pub(super) async fn approve_launcher<F, Fut>(args: &[String], send: F) -> Result<Reply>
+where
+    F: Fn(&'static str, Value) -> Fut,
+    Fut: std::future::Future<Output = Result<Reply>>,
+{
+    let name = words(args)
+        .get(3)
+        .copied()
+        .context("missing argument; consult --help")?;
+    let listed = send("variable_consumer_list", json!({})).await?;
+    if !listed.ok {
+        return Ok(listed);
+    }
+    let Some(launcher) = listed.data["launchers"]
+        .as_array()
+        .and_then(|all| all.iter().find(|l| l["id"] == name))
+    else {
+        return Ok(Reply::error(
+            "invalid_input",
+            2,
+            "There is no launcher with that name on this machine.",
+        ));
+    };
+    // A digest given is the one the user reviewed: a definition changed since is refused.
+    let digest = option(args, "--digest").map_or_else(
+        || launcher["digest"].as_str().unwrap_or_default().to_owned(),
+        str::to_ascii_lowercase,
+    );
+    let variables: Vec<String> = launcher["variables"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|v| {
+            let named = v["variable"]["name"].as_str().or(v["id"].as_str());
+            format!(
+                "{}={}",
+                v["env"].as_str().unwrap_or_default(),
+                named.unwrap_or_default()
+            )
+        })
+        .collect();
+    if let Some(reply) = unconfirmed(
+        args,
+        format!(
+            "Approve launcher {name}: program {} (SHA-256 {digest}) with arguments {} in {}, receiving the variables {} as environment variables whenever it runs?",
+            launcher["program"],
+            launcher["args"],
+            launcher["directory"],
+            serde_json::to_string(&variables)?
+        ),
+    ) {
+        return Ok(reply);
+    }
+    send(
+        "variable_launcher_approve",
+        json!({"id":name,"digest":digest}),
+    )
+    .await
 }
 fn positional(args: &[String], index: usize) -> Result<&str> {
     args.get(index)
@@ -2177,6 +2190,14 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
                 ensure!(
                     args.get(i).is_some_and(|v| v.parse::<u64>().is_ok()),
                     "invalid timeout"
+                );
+            }
+            "--digest" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())),
+                    "invalid SHA-256 digest"
                 );
             }
             "--expected-version" => {
