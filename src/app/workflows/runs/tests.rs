@@ -4,8 +4,8 @@
 use super::super::synthetic::{self, Catalog};
 use super::*;
 use crate::ado::workflow::PullRequest;
-use crate::store::settings::SettingsStore;
 use crate::llm::implementation::mobile;
+use crate::store::settings::SettingsStore;
 use crate::workflows::{Agent, Repository, Workflow};
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -1069,7 +1069,11 @@ async fn history_session(bench: &Bench, id: &str) -> Value {
     let history = implementation::operate(&bench.host, "implementation_history", &json!({}))
         .await
         .unwrap();
-    let run = history["runs"].as_array().unwrap().iter().find(|r| r["id"] == id);
+    let run = history["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id);
     let run = run.unwrap();
     json!({"session_alive":run["session_alive"],"handed_to_user":run["handed_to_user"]})
 }

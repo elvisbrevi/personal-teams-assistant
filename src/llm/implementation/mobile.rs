@@ -744,8 +744,11 @@ while read -r control; do :; done
     #[tokio::test]
     async fn only_a_session_that_answered_and_may_be_kept_outlives_its_run() {
         // (the turn failed, the session may be kept, it is kept)
-        for (failed, keep, kept) in [(false, true, true), (true, true, false), (false, false, false)]
-        {
+        for (failed, keep, kept) in [
+            (false, true, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
             let root = tempfile::tempdir().unwrap();
             let binary = root.path().join("claude-fixture");
             fake::connected_cli(
@@ -758,8 +761,14 @@ while read -r control; do :; done
             let id = uuid::Uuid::new_v4().to_string();
             let observed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
             let updates = observed.clone();
-            let args =
-                arguments("claude", "synthetic-model", "low", &[root.path().into()], false).unwrap();
+            let args = arguments(
+                "claude",
+                "synthetic-model",
+                "low",
+                &[root.path().into()],
+                false,
+            )
+            .unwrap();
             let outcome = tokio::time::timeout(
                 Duration::from_secs(10),
                 follow_session(
@@ -804,8 +813,14 @@ while read -r control; do :; done
         fake::connected_cli(&binary, root.path(), "while :; do sleep 1; done");
         let observed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let updates = observed.clone();
-        let args =
-            arguments("claude", "synthetic-model", "low", &[root.path().into()], false).unwrap();
+        let args = arguments(
+            "claude",
+            "synthetic-model",
+            "low",
+            &[root.path().into()],
+            false,
+        )
+        .unwrap();
         let following = {
             let (binary, root) = (binary.clone(), root.path().to_path_buf());
             tokio::spawn(async move {

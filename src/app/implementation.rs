@@ -1420,7 +1420,9 @@ pub(in crate::app) async fn session_life(host: &Arc<Host>, id: &str) -> Option<V
     let mut summary = state.db.summary(id).ok()??;
     let own = state.registry.lock().await.id.clone();
     mark_session(&mut summary, &own).await;
-    Some(json!({"machine":summary["machine"],"session_alive":summary["session_alive"],"handed_to_user":summary["handed_to_user"]}))
+    Some(
+        json!({"machine":summary["machine"],"session_alive":summary["session_alive"],"handed_to_user":summary["handed_to_user"]}),
+    )
 }
 /// How a finished run ends. A run is fully autonomous, so a permission prompt the CLI still
 /// raised is its own state with the prompt recorded, never `needs_attention`.
