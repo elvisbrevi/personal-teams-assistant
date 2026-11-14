@@ -48,6 +48,13 @@ if grep -q 'Choose only the ID of a workflow' "$prompt"; then
   cat "$LOG/director.jsonl"
   exit 0
 fi
+if grep -q 'Task: audit' "$prompt"; then
+  echo x >> "$LOG/audits"
+  cp "$prompt" "$LOG/audit.$(wc -l < "$LOG/audits" | tr -d ' ')"
+  printf '%s\n' '{"type":"step_start","sessionID":"ses_audit"}'
+  cat "$LOG/audit.jsonl"
+  exit 0
+fi
 if grep -q 'outranks any report' "$prompt"; then
   echo x >> "$LOG/looks"
   cp "$prompt" "$LOG/look.$(wc -l < "$LOG/looks" | tr -d ' ')"

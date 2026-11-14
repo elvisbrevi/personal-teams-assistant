@@ -132,6 +132,8 @@ mod tests {
             (DirectTask::Classify, "Teams Assistant - director 42"),
             (DirectTask::Summarize, "Teams Assistant - summary 42"),
             (DirectTask::Supervise, "Teams Assistant - supervision 42"),
+            // An audit names no one item.
+            (DirectTask::Audit, "Teams Assistant - audit"),
         ] {
             assert_eq!(task.session_name(Some(42)).as_str(), name);
         }

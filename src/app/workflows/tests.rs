@@ -406,6 +406,79 @@ async fn a_save_is_refused_before_anything_is_read_when_the_map_alone_refuses_it
 }
 
 #[tokio::test]
+async fn a_workflow_that_preapproves_the_supervisor_is_saved_only_once_confirmed() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let mut w = workflow("payments", &own);
+    w.preapprove = vec![crate::workflows::Preapproval {
+        action: crate::workflows::Preapproved::PostSummary,
+        chat: Some(crate::workflows::Chat {
+            id: "19:team@thread.v2".into(),
+            name: "Equipo".into(),
+        }),
+        mentions: vec!["Ana Pérez".into()],
+    }];
+    // A post's chat must be checked against the user's chats: here they cannot be read, so the
+    // save is refused before anything else.
+    let refused = call(&host, Local, "workflow_save", json!({"workflow":w})).await;
+    assert_eq!(refused.code, "not_ready", "{:?}", refused.message);
+    assert!(refused.message.unwrap().contains("could not be read"));
+    // MCP's question names the chat and mentions.
+    let question =
+        crate::app::tools::confirmation("workflow_save", &json!({"workflow":w})).unwrap();
+    assert!(
+        question.contains("without asking") && question.contains("Equipo"),
+        "{question}"
+    );
+    // A restart alone: unconfirmed, refused with what the supervisor may do and how far the
+    // barrier goes.
+    let mut restart = workflow("payments", &own);
+    restart.preapprove = vec![crate::workflows::Preapproval {
+        action: crate::workflows::Preapproved::RestartAfterCut,
+        chat: None,
+        mentions: Vec::new(),
+    }];
+    let refused = call(&host, Local, "workflow_save", json!({"workflow":restart})).await;
+    assert_eq!(refused.code, "invalid_input");
+    let text = refused.message.unwrap();
+    assert!(
+        text.contains("confirmed: true") && text.contains("not a guarantee"),
+        "{text}"
+    );
+    // Confirmed: it goes on to the checks (here, the Azure source this host lacks).
+    let refused = call(
+        &host,
+        Local,
+        "workflow_save",
+        json!({"workflow":restart,"confirmed":true}),
+    )
+    .await;
+    assert_eq!(refused.code, "not_ready", "{:?}", refused.message);
+    // A machine of the account that predates the supervisor would refuse it: the save says so.
+    implementation::test_worker(&host, "Old laptop", false).await;
+    implementation::test_worker(&host, "New desktop", true).await;
+    let warning = older_supervisors(&host, &w).await.unwrap();
+    assert!(
+        warning.contains("Old laptop") && !warning.contains("New desktop"),
+        "{warning}"
+    );
+    assert!(
+        older_supervisors(&host, &workflow("plain", &own))
+            .await
+            .is_none()
+    );
+    // list and show carry it, empty included.
+    store(&host, vec![w, workflow("plain", &own)]);
+    let list = call(&host, Local, "workflows_list", json!({})).await.data;
+    assert_eq!(
+        list["workflows"][0]["preapprove"][0]["action"],
+        "post_summary"
+    );
+    assert_eq!(list["workflows"][1]["preapprove"], json!([]));
+}
+
+#[tokio::test]
 async fn a_workflow_that_lifts_a_fixed_rule_is_saved_only_once_the_user_confirmed_it() {
     let root = tempfile::tempdir().unwrap();
     let host = host(root.path());

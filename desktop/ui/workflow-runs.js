@@ -25,7 +25,7 @@ import { planChildrenReview } from './implementation.js';
 import { STAGE_NAMES } from './workflow-blocks.js';
 import { renderPauses } from './workflow-pause.js';
 import { ensureWorkflowSettings, workflowSettings } from './settings-workflows.js';
-import { act, proposal, supervision } from './workflow-supervisor.js';
+import { act, proposal, renderAudit, supervision } from './workflow-supervisor.js';
 
 /** The states in which a run waits on the person (src/app/workflows/record.rs `waits_on_user`). */
 const WAITING = ['plan_review', 'unassigned', 'needs_attention', 'interrupted', 'failed'];
@@ -117,6 +117,8 @@ async function loadWorkflowRuns() {
     $('#runs-summary').textContent = runs.length ? (waiting ? tn(waiting, '1 run waits for you', '{n} runs wait for you') : tn(runs.length, '1 run', '{n} runs')) : '';
     $('#run-rows').replaceChildren(...(runs.length ? runs.map(runRow) : [el('p', { class: 'hint', textContent: state || workflow ? t('No run matches these filters.') : t('No workflow run yet. Start one from a To-Do item\'s Implement, or let the watcher start them for items in a ready state.') })]));
     if (list.partial) $('#run-rows').append(el('p', { class: 'hint', textContent: t('Showing the most recent runs.') }));
+    ensureWorkflowSettings();
+    renderAudit($('#runs-audit'), Boolean(workflowSettings?.settings?.supervisor?.enabled), { when });
   } catch (error) {
     if (generation !== runsData.listGeneration) return;
     problem.hidden = false; problem.textContent = message(error);

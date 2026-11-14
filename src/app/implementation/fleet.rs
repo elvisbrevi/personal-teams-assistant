@@ -783,7 +783,7 @@ async fn call_bounded(
         );
         // A supervisor's look (`task: "supervise"`, its own session bound) only goes to a
         // worker that says it runs one; an older worker would refuse the unknown fields.
-        if args["task"] == "supervise" || !args["seconds"].is_null() {
+        if args["task"] == "supervise" || args["task"] == "audit" || !args["seconds"].is_null() {
             ensure!(
                 state
                     .registry

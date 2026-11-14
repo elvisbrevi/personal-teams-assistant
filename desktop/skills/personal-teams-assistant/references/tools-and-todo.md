@@ -780,8 +780,33 @@ by default and an update never turns it on.
   becomes `uncertain`); an action of a run that moved on since the look is `expired`. The
   confirmation of a post names its chat and every mention. `pta workflows dismiss RUN LOOK ACTION` (MCP
   `workflow_supervision_dismiss`) sets one aside.
+- **Pre-approval per workflow:** a workflow's `preapprove` (in its JSON for `pta workflows save`,
+  MCP `workflow_save`; the editor's «What the supervisor may do without asking»; saved only with
+  `confirmed`, which names each entry, like `allow`) lists at most `{"action":
+  "restart_after_cut"}` and `{"action": "post_summary", "chat": {"id", "name"}, "mentions":
+  [...]}`. After a look at a stopped run the supervisor carries them out itself, once, recorded
+  with `by: "preapproval"`, only when code finds every condition: a restart only when the coding
+  session was cut (stream ended, over the line limit, time limit, host restart, machine offline),
+  no session is alive, no pause, the workflow is enabled, the run is as the look saw it, and the
+  run is not itself a pre-approved restart (so restarts never chain); a post only to the chat and
+  members saved there (the chat must be in the user's chat list under that name, read when the
+  workflow is saved; the save is refused when the list cannot be read), at most 3 a day per
+  workflow, and only when the drafted summary passes the same checks as an answer, otherwise it
+  stays proposed for the person. The post goes first, then the restart, whatever order the model
+  wrote them in. Nothing else is ever pre-approved. Tell the user plainly: a pre-approved restart
+  gives a fully permitted coding agent a note written by a model that read the item's comments;
+  prompts, a 4000-character bound, the cleaner and one automatic restart lower that risk, they
+  are not a guarantee.
+- **Audits:** when every run created since the last audit has ended (one reached coding), or with
+  `pta workflows supervise --audit [--since TIME]` (MCP `workflow_supervise {audit: true}`), the
+  supervisor writes an audit: per run its result, the pull requests and unverified claims, the
+  branches of completed pull requests that still exist, the findings left only in comments (and
+  whether they need a work item), proposals and drafted work items. Read them with `pta workflows
+  audits [ID|latest]` (MCP `workflow_supervision {audit}` or `{audits: true}`); the Runs view
+  shows the latest. An audit posts and writes nothing.
 
-It never changes code, merges, deploys, writes to Azure DevOps or posts to Teams by itself.
+It never changes code, merges, deploys or writes to Azure DevOps by itself, and posts to Teams only
+what the person confirmed or a workflow pre-approved, to the chat that workflow names.
 
 ### Automatic starts and the Implement choice
 

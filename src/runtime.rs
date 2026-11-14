@@ -26,6 +26,20 @@ pub struct Service {
     pub pipeline: Arc<Pipeline>,
 }
 
+/// The exact secrets an answer must never contain, as `serve` gives the pipeline's redactor:
+/// the webhook secret, the state key, the model providers' keys and every configured secret.
+pub fn answer_secrets(config: &Config) -> Result<Vec<String>> {
+    let mut secrets = vec![
+        security::secret("GRAPH_WEBHOOK_SECRET")?,
+        security::secret("STATE_ENCRYPTION_KEY")?,
+    ];
+    secrets.extend(crate::llm::from_config(&config.llm)?.1);
+    for name in config.secrets.values() {
+        secrets.push(security::secret(name)?);
+    }
+    Ok(secrets)
+}
+
 /// Run the Teams service owned by the desktop host until `stop_rx` turns true or closes.
 /// `ready` fires once the listener is bound and background tasks are running.
 pub async fn serve(

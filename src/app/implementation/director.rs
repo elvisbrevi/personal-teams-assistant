@@ -225,6 +225,7 @@ pub(in crate::app) async fn ask(host: &Arc<Host>, ask: Ask<'_>) -> Result<Answer
         crate::llm::implementation::DirectTask::Classify => "classification",
         crate::llm::implementation::DirectTask::Summarize => "summary",
         crate::llm::implementation::DirectTask::Supervise => "supervision",
+        crate::llm::implementation::DirectTask::Audit => "audit",
     };
     let named = local
         || state
