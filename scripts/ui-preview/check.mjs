@@ -587,7 +587,8 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#save'); await page.waitForTimeout(300);
   check('a new guide is saved with its field', await page.evaluate(() => window.__ptaLastSave.map.work_item_guides.some(g => g.id === 'support' && g.type === 'Support' && g.provider === 'azure' && g.fields[0]?.reference === 'Custom.Kind')));
   const plan = page.locator('#agent-prompts > .resource').first();
-  check('agent instructions show the built-in prompts, the director\'s included', await page.$$eval('#agent-prompts > .resource', rows => rows.length) === 4 && await page.locator('#agent-prompts [data-prompt="direct"]').count() === 1);
+  check('agent instructions show the built-in prompts, the director\'s and the supervisor\'s included', await page.$$eval('#agent-prompts > .resource', rows => rows.length) === 5
+    && await page.locator('#agent-prompts [data-prompt="direct"]').count() === 1 && await page.locator('#agent-prompts [data-prompt="supervise"]').count() === 1);
   await plan.locator('summary').click();
   await plan.locator('textarea').fill('Plan at most three children.');
   await page.click('#save'); await page.waitForTimeout(300);
