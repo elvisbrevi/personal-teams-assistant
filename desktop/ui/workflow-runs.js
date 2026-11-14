@@ -5,7 +5,11 @@
 // child review, confirmed with `implementation_create`), assigning a workflow to an unassigned
 // run, resume, cancel, restart with a handover note (`workflow_run_restart`), a progress summary
 // by the director (`workflow_summary`), sending one summary to Teams chats
-// (`workflow_summary_send`, one confirmed send per chat); the pauses above the list are
+// (`workflow_summary_send`, one confirmed send per chat), and the workflow supervisor's looks
+// (`workflow_supervise`): its assessment, the checks of the final report, its drafts and the
+// actions it proposes, each carried out once with `workflow_supervision_act` and the person's
+// confirmation (a proposed restart, resume or cancel replaces that run action while it waits), a
+// run moved ahead or back in the queue (`workflow_run_requeue`); the pauses above the list are
 // `workflow-pause.js`.
 import { t, tn, tx, uiLocale } from './i18n.js';
 import { invoke } from './control.js';
@@ -20,6 +24,8 @@ import { openAgentSession, sessionLifeBadge } from './sessions.js';
 import { planChildrenReview } from './implementation.js';
 import { STAGE_NAMES } from './workflow-blocks.js';
 import { renderPauses } from './workflow-pause.js';
+import { ensureWorkflowSettings, workflowSettings } from './settings-workflows.js';
+import { act, proposal, supervision } from './workflow-supervisor.js';
 
 /** The states in which a run waits on the person (src/app/workflows/record.rs `waits_on_user`). */
 const WAITING = ['plan_review', 'unassigned', 'needs_attention', 'interrupted', 'failed'];
@@ -154,6 +160,11 @@ function slotBadge(run) {
   return run.waiting_for_slot ? badge(t('Waiting for a slot, position {n}', { n: run.queue_position }), 'muted') : null;
 }
 
+/** A run the supervisor or the person moved ahead in the queue. */
+function aheadBadge(run) {
+  return run.waiting_for_slot && run.ahead_since ? badge(t('Moved ahead'), 'info') : null;
+}
+
 /** A run a pause holds: nothing new starts for it until the pause ends. */
 function pausedBadge(run) {
   return run.paused ? badge(t('Paused'), 'muted') : null;
@@ -261,7 +272,7 @@ function renderRunDetail(run, sessions) {
     return open;
   };
   const head = el('div', { class: 'run-head' },
-    badge(runStateLabel(run.state), tone(run.state)), slotBadge(run), pausedBadge(run), badge(workflowName(run.workflow), 'muted'), el('span', { class: 'grow' }), link(t('Open the work item'), run.item.url));
+    badge(runStateLabel(run.state), tone(run.state)), slotBadge(run), aheadBadge(run), pausedBadge(run), badge(workflowName(run.workflow), 'muted'), el('span', { class: 'grow' }), link(t('Open the work item'), run.item.url));
   const facts = el('dl', { class: 'todo-fields' },
     ...[[t('Type'), tx(run.item.kind)], [t('Project'), run.item.project], [t('Started at'), when(run.created_at)], [t('Last change'), when(run.updated_at)],
       ...(run.finished_at ? [[t('Finished at'), when(run.finished_at)]] : []),
@@ -282,15 +293,17 @@ function renderRunDetail(run, sessions) {
   const stopped = WAITING.includes(run.state) ? (run.classification?.failure ?? run.planning?.failure ?? (run.children ?? []).map(c => c.coding?.failure).find(Boolean)) : null;
   if (stopped) notes.push(el('div', { class: 'callout warn', id: 'run-failure' }, el('p', {}, el('strong', { textContent: t('Why it stopped') }), ' ', failureText(stopped))));
   if (run.handover) notes.push(el('details', { class: 'fold', id: 'run-handover' }, el('summary', { textContent: t('Handover note from the previous run') }), el('p', { class: 'run-handover-text', textContent: run.handover })));
-  detail.replaceChildren(head, facts, ...notes, runActions(run, sessionButton), timeline(run), children(run, sessionButton, sessions), blocks(run), summaries(run));
+  const area = el('div', { id: 'run-action-area' });
+  const refresh = async () => { runsData.holding = false; runsData.record = null; await loadRunDetail(); };
+  const shared = { twice, when, hold: held => { runsData.holding = held; }, restart: proposed => showRestart(run, area, refresh, proposed) };
+  detail.replaceChildren(head, facts, ...notes, runActions(run, sessionButton, area, refresh), supervision(run, area, refresh, shared),
+    timeline(run), children(run, sessionButton, sessions), blocks(run), summaries(run));
   if (focusId) /** @type {HTMLElement | null} */ (document.getElementById(focusId))?.focus({ preventScroll: true });
 }
 
 /** The actions the run's state allows, each the host's operation and nothing else. */
-function runActions(run, sessionButton) {
+function runActions(run, sessionButton, area, refresh) {
   const actions = el('div', { class: 'actions run-actions' });
-  const area = el('div', { id: 'run-action-area' });
-  const refresh = async () => { runsData.holding = false; runsData.record = null; await loadRunDetail(); };
   if (run.state === 'plan_review' && run.planning) {
     const review = el('button', { type: 'button', textContent: t('Review plan'), id: 'run-review-plan' });
     review.onclick = () => busy(review, () => showPlanReview(run, area, refresh));
@@ -301,19 +314,20 @@ function runActions(run, sessionButton) {
     choose.onclick = () => showAssign(run, area, refresh);
     actions.append(choose);
   }
-  if (RESUMABLE.includes(run.state)) {
+  // A restart, resume or cancel the supervisor proposed is carried out from its proposal instead.
+  if (RESUMABLE.includes(run.state) && !proposal(run, 'resume')) {
     actions.append(twice(t('Resume'), t('Confirm resume'), async () => {
       const reply = await invoke('workflow_run_resume', { run: run.id, confirmed: true });
       done(reply.accepted ? t('Run resumed; what stopped it was accepted.') : t('Run resumed.'));
       await refresh();
     }));
   }
-  if (!FINAL.includes(run.state) && run.workflow) {
+  if (!FINAL.includes(run.state) && run.workflow && !proposal(run, 'restart')) {
     const restart = el('button', { type: 'button', class: 'secondary', textContent: t('Restart with a note'), id: 'run-restart-open' });
     restart.onclick = () => showRestart(run, area, refresh);
     actions.append(restart);
   }
-  if (!FINAL.includes(run.state)) {
+  if (!FINAL.includes(run.state) && !proposal(run, 'cancel')) {
     const cancel = twice(t('Cancel run'), t('Confirm cancel'), async () => {
       const reply = await invoke('workflow_run_cancel', { run: run.id, confirmed: true });
       const stopped = reply.sessions_stopped?.length ?? 0;
@@ -337,6 +351,25 @@ function runActions(run, sessionButton) {
     const send = el('button', { type: 'button', class: 'secondary', textContent: t('Send by Teams'), id: 'run-send' });
     send.onclick = () => busy(send, () => showSend(run, area, refresh));
     actions.append(send);
+  }
+  ensureWorkflowSettings();
+  if (workflowSettings?.settings?.supervisor?.enabled && !(run.supervising ?? []).length) {
+    const look = el('button', { type: 'button', class: 'secondary', textContent: t('Ask the supervisor'), id: 'run-supervise' });
+    look.onclick = () => busy(look, async () => {
+      await invoke('workflow_supervise', { run: run.id });
+      done(t('The supervisor is looking at this run; its notes appear here.'));
+      await refresh();
+    });
+    actions.append(look);
+  }
+  if (run.waiting_for_slot) {
+    const requeue = el('button', { type: 'button', class: 'secondary', id: 'run-requeue', textContent: run.ahead_since ? t('Back to its place') : t('Move ahead') });
+    requeue.onclick = () => busy(requeue, async () => {
+      await invoke('workflow_run_requeue', { run: run.id, ahead: !run.ahead_since });
+      done(run.ahead_since ? t('The run is back in its place in the queue.') : t('The run goes ahead in the queue.'));
+      await refresh();
+    });
+    actions.append(requeue);
   }
   return el('div', {}, actions, area);
 }
@@ -385,15 +418,23 @@ function handoverDraft(run) {
   lines.push('', t('Left to do:'), '- ');
   return lines.join('\n');
 }
-/** Restart: this run ends and a new one of its workflow starts for its item, with the person's handover note for its coding runs. */
-function showRestart(run, area, refresh) {
+/**
+ * Restart: this run ends and a new one of its workflow starts for its item, with the person's handover note for its coding runs.
+ * With the supervisor's proposal, its drafted note is the starting point and the restart is carried out as that proposal.
+ */
+function showRestart(run, area, refresh, proposed = null) {
   runsData.holding = true;
-  const note = el('textarea', { class: 'run-restart-note', id: 'run-restart-note', maxLength: MAX_HANDOVER, value: handoverDraft(run) });
+  const draft = proposed ? proposed.look.handover : handoverDraft(run);
+  const note = el('textarea', { class: 'run-restart-note', id: 'run-restart-note', maxLength: MAX_HANDOVER, value: draft });
   const count = el('small', { class: 'hint', id: 'run-restart-count' });
   const counted = () => { count.textContent = t('{n} of {max} characters', { n: String(note.value.length), max: String(MAX_HANDOVER) }); };
   note.oninput = counted; counted();
   const restart = twice(t('Restart'), t('Confirm restart'), async () => {
-    const reply = await invoke('workflow_run_restart', { run: run.id, ...(note.value.trim() ? { note: note.value } : {}), confirmed: true });
+    // With a proposal: unchanged is the supervisor's draft, emptied is no note, edited is the person's.
+    const edited = note.value.trim() !== draft.trim();
+    const reply = proposed
+      ? (await act(run, proposed, edited ? { note: note.value.trim() ? note.value : '' } : {})).result
+      : await invoke('workflow_run_restart', { run: run.id, ...(note.value.trim() ? { note: note.value } : {}), confirmed: true });
     if (reply.warning) notify(tx(reply.warning), 'warn');
     else done(reply.paused ? t('Run restarted; the new run waits for the pause to end.') : t('Run restarted; the new run starts from its first stage.'));
     runsData.holding = false;
@@ -405,6 +446,7 @@ function showRestart(run, area, refresh) {
   area.replaceChildren(el('div', { class: 'panel', id: 'run-restart' },
     el('h3', { textContent: t('Restart with a handover note') }),
     el('p', { class: 'hint', textContent: t('This run is cancelled, its live sessions stop and the file changes stay; a new run of the same workflow starts for this work item from its first stage. Each of its coding runs gets your note, which is posted nowhere: not to Teams, not to the work item.') }),
+    proposed ? el('p', { class: 'hint', textContent: t('The supervisor drafted this note. Left as it is, the coding runs read it as the supervisor\'s; edited, it is yours; emptied, the run restarts without a note.') }) : null,
     el('label', {}, t('Handover note'), note), count,
     el('div', { class: 'actions' }, restart, close)));
   note.focus();
@@ -465,7 +507,7 @@ function children(run, sessionButton, sessions) {
 function blocks(run) {
   const names = Object.fromEntries((run.blocks ?? []).map(b => [b.id, b.name]));
   const rows = (run.block_outcomes ?? []).map(o => el('div', { class: 'resource run-block' },
-    el('div', { class: 'resource-head' }, badge(tx(o.outcome), ['sent', 'succeeded'].includes(o.outcome) ? 'ok' : ['attempting', 'skipped'].includes(o.outcome) ? 'muted' : ['refused', 'failed', 'timed_out', 'uncertain'].includes(o.outcome) ? 'warn' : 'info'),
+    el('div', { class: 'resource-head' }, badge(tx(o.outcome), ['sent', 'succeeded'].includes(o.outcome) ? 'ok' : ['attempting', 'skipped'].includes(o.outcome) ? 'muted' : ['refused', 'failed', 'timed_out', 'stopped', 'uncertain'].includes(o.outcome) ? 'warn' : 'info'),
       el('strong', { textContent: names[o.block] ?? o.block }), o.stage ? badge(STAGE_NAMES[o.stage] ?? o.stage, 'muted') : null),
     el('p', { class: 'resource-facts' }, el('small', { textContent: [when(o.at), o.reason ? tx(o.reason) : null, o.exit_code != null ? t('Exit code {code}', { code: String(o.exit_code) }) : null, o.duration_ms != null ? t('{n} ms', { n: String(o.duration_ms) }) : null].filter(Boolean).join(' · ') }))));
   if (!rows.length) return el('div', {});

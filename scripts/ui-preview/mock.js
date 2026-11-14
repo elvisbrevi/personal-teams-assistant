@@ -75,6 +75,7 @@
     { id: 'code', name: 'Implement', summary: 'Implement on a task, a development bug or a GitHub issue: the agent changes the code in the selected directories.', instructions: 'Implement the work item.' },
     { id: 'request', name: 'Write a request', summary: 'Create request in To-Do: the agent writes the new HU, bug or GitHub epic from your context.', instructions: 'Write one request of the selected type.' },
     { id: 'direct', name: 'Choose a workflow', summary: 'Workflows: the workflow director reads a work item and the enabled workflows of its project and chooses the one that fits, or none.', instructions: 'Choose the workflow whose description fits the item.' },
+    { id: 'supervise', name: 'Supervise workflow runs', summary: 'Workflows: the workflow supervisor reads what a run\'s agents did, checks their reports and drafts a handover note, work items and the next steps for you to confirm.', instructions: 'Look after the workflow runs in the input the way the person who owns them would.' },
   ];
   // The built-in cases the host sends, with short synthetic default texts.
   snapshot.cases = [
@@ -307,7 +308,11 @@
   teamsChats.push({ id: '19:crowd@thread.v2', type: 'group', topic: crowd.join(', '), members: crowd, last_updated: '2026-10-12T10:00:00Z', readable: false });
   let workflowSettings = { ready_states: scenario === 'full' ? [{ organization: org, project: 'Payments', states: ['Ready for development'] }] : [],
     watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: { machine: '11111111-1111-4111-8111-111111111111', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' },
-    project_directors: [] };
+    project_directors: [],
+    // The workflow supervisor (src/workflows/director.rs `Supervisor`): on in the full scenario.
+    supervisor: { enabled: scenario === 'full', ...(scenario === 'full' ? { machine: '11111111-1111-4111-8111-111111111111', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' } : {}),
+      looks_per_day: 24, min_interval_minutes: 30, wait_hours: 3, offline_minutes: 15, session_seconds: 180 } };
+  const SUPERVISOR_DEFAULTS = { enabled: false, looks_per_day: 24, min_interval_minutes: 30, wait_hours: 3, offline_minutes: 15, session_seconds: 180 };
   // Which director each project gets (src/workflows/director.rs `resolve`): its own, the agent its
   // enabled workflows share, or the general one.
   const directors = () => {
@@ -372,7 +377,8 @@
   const runSummary = run => ({ id: run.id, workflow: run.workflow, item: { id: run.item.id, title: run.item.title, url: run.item.url, kind: run.item.kind, category: run.item.category, project: run.item.project }, state: run.state, stage: run.stopped_in ?? run.state, attention: run.attention,
     waits_on_user: ['plan_review', 'unassigned', 'needs_attention', 'interrupted', 'failed'].includes(run.state), children: run.children.length, pull_requests: run.children.flatMap(c => c.pull_requests.map(p => ({ url: p.url, status: p.status }))), created_at: run.created_at, updated_at: run.updated_at, finished_at: run.finished_at,
     waiting_for_slot: Boolean(run.queue_position), queue_position: run.queue_position ?? null, paused: pausedRun(run), continues: run.continues ?? null, restarted_as: run.restarted_as ?? null });
-  const runView = run => { const view = { ...structuredClone(run), stage: run.stopped_in ?? run.state, waits_on_user: runSummary(run).waits_on_user, paused: pausedRun(run) }; delete view.fresh; return view; };
+  const runView = run => { const view = { ...structuredClone(run), stage: run.stopped_in ?? run.state, waits_on_user: runSummary(run).waits_on_user, paused: pausedRun(run),
+    waiting_for_slot: Boolean(run.queue_position), queue_position: run.queue_position ?? null, supervision: structuredClone(run.supervision ?? []), supervising: structuredClone(run.supervising ?? []) }; delete view.fresh; return view; };
   // The pauses in force (`workflow_runs_pause`): every project's, or one project's by name.
   let workflowPauses = [];
   const pausedRun = run => !['done', 'cancelled'].includes(run.state) && workflowPauses.some(p => !p.project || p.project.toLowerCase() === run.item.project.toLowerCase());
@@ -399,6 +405,21 @@
     Object.assign(child, { branch: 'feature/5012-rounding', branches: [{ repository: { id: '0f3c2a1b-0000-4000-8000-000000000002', name: 'payments-web' }, branch: 'feature/5012-rounding-web' }], ignored_branches: ['billing'],
       pull_requests: [{ id: 51, repository: '0f3c2a1b-0000-4000-8000-000000000001', title: 'Fix rounding in refunds', status: 'active', url: `${org}/Payments/_git/payments-api/pullrequest/51`, created_at: '2026-10-13T20:00:00Z', closed_at: null },
         { id: 52, repository: '0f3c2a1b-0000-4000-8000-000000000002', title: 'Show the rounded refunds', status: 'active', url: `${org}/Payments/_git/payments-web/pullrequest/52`, created_at: '2026-10-13T20:05:00Z', closed_at: null }] }); };
+  // A look of the supervisor at a run, as `workflow_supervise` stores it: an assessment, the checks of the final
+  // report (one not verified), a drafted handover, work item and summary, and proposals.
+  window.__ptaSuperviseRun = run => { const found = workflowRuns.find(r => r.id === run);
+    found.supervision = [...(found.supervision ?? []), { id: crypto.randomUUID(), event: 'run_stopped', keys: [], created_at: secs(NOW - 60_000), supervised_by: { machine: '11111111-1111-4111-8111-111111111111', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' },
+      session_id: 'sess-synthetic-look', outcome: 'done', marker: 'x',
+      assessment: { done: 'The agent fixed the rounding and pushed feature/5012-rounding.', left: 'Open the pull request and run the refund tests.', recommendation: 'Restart with the note: the session stopped on a permission prompt.' },
+      checks: [{ claim: 'Pull request !51 was merged', kind: 'pull_request', ref: '51', result: 'not_verified', fact: 'Pull request !51 is active.', from: 'report' },
+        { claim: 'Branch payments-api: feature/5012-rounding', kind: 'branch', ref: 'feature/5012-rounding', result: 'verified', fact: 'Branch feature/5012-rounding exists in payments-api.', from: 'report' }],
+      unverified: ['Whether the refund tests ran.'], unread: [], truncated: [],
+      handover: 'Done: the rounding fix is committed on feature/5012-rounding; do not repeat it.\nLeft: open its pull request and run the refund tests.',
+      work_items: [{ type: 'bug', title: 'Round refunds in the ledger export too', description: 'The ledger export rounds with its own helper.', repository: { id: '0f3c2a1b-0000-4000-8000-000000000001', name: 'payments-api' }, reason: 'Found while reading the comments.' }],
+      summary: 'Los reembolsos ya redondean bien; falta abrir el pull request.\n\n**Enlaces**\n- [#5012 Fix rounding in refunds](https://dev.azure.com/synthetic/Payments/_workitems/edit/5012)',
+      actions: [{ id: 'a1', action: 'restart', reason: 'The session stopped on a permission prompt.', state: 'proposed' },
+        { id: 'a2', action: 'create_work_item', work_item: 0, reason: 'The export has the same rounding.', state: 'proposed' },
+        { id: 'a3', action: 'post_summary', reason: 'The team waits for this fix.', state: 'proposed' }] }]; };
   // A run's item with another title (the list's long-title check).
   window.__ptaRetitleRun = (run, title) => { workflowRuns.find(r => r.id === run).item.title = title; };
   window.__ptaWorkflowCalls = [];
@@ -487,6 +508,53 @@
       run.summary_sends.push(send);
       return { workflow_run: run.id, sent: true, send: structuredClone(send) };
     },
+    // The workflow supervisor (src/app/workflows/supervisor.rs): a look queued, its looks, its proposals carried out once.
+    workflow_supervise: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_supervise', ...structuredClone(args) });
+      const run = findRun(args.run);
+      if (!workflowSettings.supervisor.enabled) throw new Error('[not_ready] The workflow supervisor is off.');
+      run.supervising = [{ key: `${run.id}:requested`, event: 'requested', state: 'queued', requested: true, created_at: secs(Date.now()) }];
+      return { run: run.id, look: run.supervising[0].key, state: 'queued' };
+    },
+    workflow_supervision: args => { const run = findRun(args.run); return { run: run.id, looks: structuredClone(run.supervision ?? []), queued: structuredClone(run.supervising ?? []) }; },
+    workflow_supervision_act: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_supervision_act', ...structuredClone(args) });
+      const run = findRun(args.run);
+      const look = (run.supervision ?? []).find(l => l.id === args.look);
+      const action = look?.actions.find(a => a.id === args.action);
+      if (!action) throw new Error('[invalid_input] Look proposed no such action.');
+      if (action.state !== 'proposed') throw new Error(`[conflict] Action ${action.id} is already ${action.state}.`);
+      if (action.action === 'create_work_item') {
+        action.state = 'opened';
+        const draft = look.work_items[action.work_item];
+        return { run: run.id, look: look.id, action: action.id, state: 'opened', create_request: { provider: 'azure', organization: org, project: run.item.project, type: draft.type, title: draft.title, description: draft.description, repository: draft.repository?.name ?? null } };
+      }
+      if (!args.confirmed) throw new Error('[invalid_input] Confirm with the user, then act with confirmed: true.');
+      let result = {};
+      // No note given is the draft; an empty note restarts without one.
+      if (action.action === 'restart') result = workflowHandlers.workflow_run_restart({ run: run.id, ...('note' in args ? (args.note.trim() ? { note: args.note } : {}) : { note: look.handover }), confirmed: true });
+      if (action.action === 'post_summary') {
+        if (!args.chat) throw new Error('[invalid_input] Choose the chat to post the summary to (teams_chats).');
+        run.summaries.push({ id: `supervisor-${look.id}`, text: look.summary, created_at: secs(Date.now()), provider: 'claude', model: 'claude-sonnet-5-5', by: 'supervisor' });
+        result = workflowHandlers.workflow_summary_send({ run: run.id, summary: `supervisor-${look.id}`, chat: args.chat, mentions: args.mentions ?? [], confirmed: true });
+      }
+      Object.assign(action, { state: 'executed', by: 'person', at: secs(Date.now()) });
+      return { run: run.id, look: look.id, action: action.id, state: 'executed', result };
+    },
+    workflow_supervision_dismiss: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_supervision_dismiss', ...structuredClone(args) });
+      const action = (findRun(args.run).supervision ?? []).find(l => l.id === args.look)?.actions.find(a => a.id === args.action);
+      if (!action || action.state !== 'proposed') throw new Error('[conflict] The action is not proposed.');
+      action.state = 'dismissed';
+      return { run: args.run, look: args.look, action: args.action, state: 'dismissed' };
+    },
+    workflow_run_requeue: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_run_requeue', ...structuredClone(args) });
+      const run = findRun(args.run);
+      if (!run.queue_position) throw new Error(`[conflict] Workflow run ${run.id} does not wait for a slot.`);
+      run.ahead_since = args.ahead ? secs(Date.now()) : null;
+      return { run: run.id, ahead: Boolean(args.ahead), ahead_since: run.ahead_since };
+    },
     workflows_list: () => ({ workflows: structuredClone(workflows), usage: Object.fromEntries(workflows.map(w => [w.id, workflowUsage(w)])), editable: !window.__ptaWorkflowsElsewhere }),
     workflow_show: args => ({ workflow: structuredClone(workflows.find(w => w.id === args.id)), blocks: [], usage: workflowUsage(workflows.find(w => w.id === args.id)), editable: true }),
     workflow_blocks_list: () => ({ blocks: structuredClone(workflowBlocks), used_by: usedBy(), editable: !window.__ptaWorkflowsElsewhere }),
@@ -553,8 +621,9 @@
     workflow_settings: args => {
       window.__ptaWorkflowCalls.push({ method: 'workflow_settings', ...structuredClone(args) });
       const reply = { settings: structuredClone(workflowSettings), directors: directors(), editable: true,
-        defaults: { watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: null, ready_states: [] },
-        bounds: { watch_interval_minutes: [1, 60], concurrency: [1, 4], pull_request_wait_days: [1, 60], ready_states_per_project: 20, projects_with_ready_states: 50 },
+        defaults: { watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: null, ready_states: [], supervisor: structuredClone(SUPERVISOR_DEFAULTS) },
+        bounds: { watch_interval_minutes: [1, 60], concurrency: [1, 4], pull_request_wait_days: [1, 60], ready_states_per_project: 20, projects_with_ready_states: 50,
+          supervisor: { looks_per_day: [1, 100], min_interval_minutes: [10, 1440], wait_hours: [1, 48], offline_minutes: [5, 240], session_seconds: [60, 600] } },
         // The ready-state watcher on this computer (src/app/workflows/watcher.rs `view`).
         watcher: window.__ptaWatcher ?? (workflowSettings.ready_states.some(r => r.states.length)
           ? { state: 'watching', reason: null, interval_minutes: workflowSettings.watch_interval_minutes,
@@ -572,6 +641,11 @@
       window.__ptaWorkflowCalls.push({ method: 'workflow_settings_update', ...structuredClone(args) });
       for (const field of ['watch_interval_minutes', 'concurrency', 'pull_request_wait_days']) if (field in args) workflowSettings[field] = args[field];
       if ('director' in args) workflowSettings.director = args.director;
+      if ('supervisor' in args) {
+        const next = args.supervisor === null ? structuredClone(SUPERVISOR_DEFAULTS) : { ...workflowSettings.supervisor, ...args.supervisor };
+        if (next.enabled && !next.machine) throw new Error('[invalid_input] The workflow supervisor needs its machine, provider, model, effort.');
+        workflowSettings.supervisor = next;
+      }
       for (const change of args.ready_states ?? []) {
         workflowSettings.ready_states = workflowSettings.ready_states.filter(r => r.project !== change.project);
         if (change.states.length) workflowSettings.ready_states.push({ organization: org, project: change.project, states: change.states });

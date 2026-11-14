@@ -11,7 +11,9 @@
 //! (`workflows::director::judge`): nothing starts and nothing is written but the session's
 //! record, which Agent history lists.
 use super::*;
-use crate::workflows::director::{self as core, Director, ProjectDirector, ReadyStates, Settings};
+use crate::workflows::director::{
+    self as core, Director, ProjectDirector, ReadyStates, Settings, Supervisor,
+};
 
 pub(in crate::app) const METHODS: [&str; 3] = [
     "workflow_settings",
@@ -64,6 +66,63 @@ struct ProjectDirectorChange {
     #[serde(default)]
     director: Option<DirectorChange>,
 }
+/// The supervisor's fields to change, merged with the stored ones.
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupervisorChange {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    machine: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    looks_per_day: Option<u32>,
+    #[serde(default)]
+    min_interval_minutes: Option<u32>,
+    #[serde(default)]
+    wait_hours: Option<u32>,
+    #[serde(default)]
+    offline_minutes: Option<u32>,
+    #[serde(default)]
+    session_seconds: Option<u32>,
+}
+impl SupervisorChange {
+    /// The supervisor after the change: the fields given over the stored ones.
+    fn merge(&self, stored: &Supervisor) -> Supervisor {
+        let text = |value: &Option<String>, stored: &String| {
+            value
+                .as_ref()
+                .map_or(stored.clone(), |v| v.trim().to_owned())
+        };
+        Supervisor {
+            enabled: self.enabled.unwrap_or(stored.enabled),
+            machine: text(&self.machine, &stored.machine),
+            provider: text(&self.provider, &stored.provider),
+            model: text(&self.model, &stored.model),
+            effort: text(&self.effort, &stored.effort),
+            looks_per_day: self.looks_per_day.unwrap_or(stored.looks_per_day),
+            min_interval_minutes: self
+                .min_interval_minutes
+                .unwrap_or(stored.min_interval_minutes),
+            wait_hours: self.wait_hours.unwrap_or(stored.wait_hours),
+            offline_minutes: self.offline_minutes.unwrap_or(stored.offline_minutes),
+            session_seconds: self.session_seconds.unwrap_or(stored.session_seconds),
+        }
+    }
+    /// Whether it changes the agent, or turns the supervisor on: its agent is checked then.
+    fn checks_agent(&self) -> bool {
+        self.enabled == Some(true)
+            || self.machine.is_some()
+            || self.provider.is_some()
+            || self.model.is_some()
+            || self.effort.is_some()
+    }
+}
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateArgs {
@@ -80,6 +139,9 @@ struct UpdateArgs {
     ready_states: Vec<ReadyChange>,
     #[serde(default)]
     project_directors: Vec<ProjectDirectorChange>,
+    /// The supervisor's fields to change; `null` turns it off and clears it.
+    #[serde(default)]
+    supervisor: Option<SupervisorChange>,
     /// The Azure source the ready states are read from, when several are enabled.
     #[serde(default)]
     source: Option<String>,
@@ -105,6 +167,7 @@ fn view(settings: &Settings) -> Value {
         "director": settings.director,
         "ready_states": settings.ready_states,
         "project_directors": settings.project_directors,
+        "supervisor": settings.supervisor,
     })
 }
 /// Which director each project gets and where it comes from (`project`, `workflow` or
@@ -159,6 +222,13 @@ fn bounds() -> Value {
         "pull_request_wait_days": range(core::PULL_REQUEST_WAIT_DAYS),
         "ready_states_per_project": core::MAX_READY_STATES,
         "projects_with_ready_states": core::MAX_READY_PROJECTS,
+        "supervisor": {
+            "looks_per_day": range(core::LOOKS_PER_DAY),
+            "min_interval_minutes": range(core::MIN_INTERVAL_MINUTES),
+            "wait_hours": range(core::WAIT_HOURS),
+            "offline_minutes": range(core::OFFLINE_MINUTES),
+            "session_seconds": range(core::SESSION_SECONDS),
+        },
     })
 }
 
@@ -214,6 +284,8 @@ struct Resolved {
     /// Each project's own director after the change (organization name and project,
     /// lowercased), or none to clear it.
     projects: Vec<((String, String), Option<ProjectDirector>)>,
+    /// The supervisor after the change.
+    supervisor: Option<Supervisor>,
 }
 
 fn same_ready(stored: &ReadyStates, organization: &str, project: &str) -> bool {
@@ -234,6 +306,9 @@ fn apply(settings: &mut Settings, args: &UpdateArgs, resolved: &Resolved) {
     }
     if let Some(director) = &resolved.director {
         settings.director = director.clone();
+    }
+    if let Some(supervisor) = &resolved.supervisor {
+        settings.supervisor = supervisor.clone();
     }
     for (organization, project) in &resolved.cleared {
         settings
@@ -475,6 +550,7 @@ pub(super) async fn update(
     let state = &host.state;
     require_coordinator(state)?;
     let clear_director = args.get("director").is_some_and(Value::is_null);
+    let clear_supervisor = args.get("supervisor").is_some_and(Value::is_null);
     let args: UpdateArgs = parse(args)?;
     if args.watch_interval_minutes.is_none()
         && args.concurrency.is_none()
@@ -483,13 +559,16 @@ pub(super) async fn update(
         && !clear_director
         && args.ready_states.is_empty()
         && args.project_directors.is_empty()
+        && args.supervisor.is_none()
+        && !clear_supervisor
     {
         return Err(invalid(
-            "Give at least one setting to change: watch_interval_minutes, concurrency, pull_request_wait_days, director, ready_states or project_directors.",
+            "Give at least one setting to change: watch_interval_minutes, concurrency, pull_request_wait_days, director, ready_states, project_directors or supervisor.",
         ));
     }
     let map = state.settings.map().map_err(fail)?;
     let stored = map.workflow_settings.clone();
+    let stored_supervisor = stored.supervisor.clone();
     let (clearing, wanted): (Vec<ReadyChange>, Vec<ReadyChange>) = args
         .ready_states
         .iter()
@@ -504,6 +583,13 @@ pub(super) async fn update(
                 .map(|change| merge_director(stored.director.as_ref(), change))
                 .transpose()?
                 .map(Some)
+        },
+        supervisor: if clear_supervisor {
+            Some(Supervisor::default())
+        } else {
+            args.supervisor
+                .as_ref()
+                .map(|change| change.merge(&stored.supervisor))
         },
         ..Default::default()
     };
@@ -623,6 +709,32 @@ pub(super) async fn update(
                 .map_err(|e| format!("{e} (the director of {})", own.project))?,
         );
     }
+    if let Some(supervisor) = &resolved.supervisor
+        && args
+            .supervisor
+            .as_ref()
+            .is_some_and(SupervisorChange::checks_agent)
+        && let Some(agent) = supervisor.agent()
+    {
+        warnings.extend(verify_agent(host, &agent, Role::Supervisor).await?);
+    }
+    // An older installation of the account refuses a map whose supervisor is not the default.
+    if let Some(supervisor) = &resolved.supervisor
+        && !supervisor.is_default()
+        && *supervisor != stored_supervisor
+    {
+        let older = implementation::machines_before_supervisor(host)
+            .await
+            .map_err(fail)?;
+        if !older.is_empty() {
+            warnings.push(format!(
+                "{} {} a version that predates the workflow supervisor: until updated, {} the account's configuration with these settings.",
+                older.join(", "),
+                if older.len() == 1 { "runs" } else { "run" },
+                if older.len() == 1 { "it refuses" } else { "they refuse" }
+            ));
+        }
+    }
     let saved = change(host, |map| {
         apply(&mut map.workflow_settings, &args, &resolved);
         core::validate(&map.workflow_settings).map_err(invalid)?;
@@ -635,9 +747,38 @@ pub(super) async fn update(
     )
 }
 
+/// Whose agent a settings update checks.
+#[derive(Clone, Copy)]
+enum Role {
+    Director,
+    Supervisor,
+}
+
 /// The director's machine must be the account's, and its agent installed there; what the
 /// machine cannot answer now is a warning.
 async fn verify_director(host: &Arc<Host>, director: &Director) -> Result<Vec<String>, String> {
+    verify_agent(host, director, Role::Director).await
+}
+
+/// An agent's machine must be the account's, and the agent installed there; what the machine
+/// cannot answer now is a warning.
+async fn verify_agent(
+    host: &Arc<Host>,
+    director: &Director,
+    role: Role,
+) -> Result<Vec<String>, String> {
+    let (name, supported, outdated) = match role {
+        Role::Director => (
+            "director",
+            None,
+            "The director's machine runs a version that cannot run the workflow director yet; update it before classifying.",
+        ),
+        Role::Supervisor => (
+            "supervisor",
+            Some(()),
+            "The supervisor's machine runs a version that cannot run the workflow supervisor yet; update it before the supervisor looks at a run.",
+        ),
+    };
     let machine = implementation::machine_facts(host, &director.machine)
         .await
         .map_err(fail)?
@@ -654,11 +795,15 @@ async fn verify_director(host: &Arc<Host>, director: &Director) -> Result<Vec<St
     }
     let mut warnings = Vec::new();
     if !(machine.own || machine.online) {
-        warnings.push("The director's machine is offline, so its agent could not be verified; it is checked again when the director runs.".to_owned());
+        warnings.push(format!("The {name}'s machine is offline, so its agent could not be verified; it is checked again when the {name} runs."));
         return Ok(warnings);
     }
-    if !machine.direct {
-        warnings.push("The director's machine runs a version that cannot run the workflow director yet; update it before classifying.".to_owned());
+    let able = match supported {
+        None => machine.direct,
+        Some(()) => machine.supervise,
+    };
+    if !able {
+        warnings.push(outdated.to_owned());
     }
     match implementation::machine_call(
         host,
@@ -671,10 +816,10 @@ async fn verify_director(host: &Arc<Host>, director: &Director) -> Result<Vec<St
         Ok(catalog) => crate::workflows::agent_installed(
             &catalog,
             &director.agent(),
-            "the workflow director's machine",
+            &format!("the workflow {name}'s machine"),
         )
         .map_err(invalid)?,
-        Err(_) => warnings.push("The director's machine did not list its installed CLIs, so its agent could not be verified; it is checked again when the director runs.".to_owned()),
+        Err(_) => warnings.push(format!("The {name}'s machine did not list its installed CLIs, so its agent could not be verified; it is checked again when the {name} runs.")),
     }
     Ok(warnings)
 }
@@ -853,6 +998,7 @@ pub(super) async fn classify_item(
             instructions: &instructions,
             input,
             item,
+            seconds: None,
         },
     ))
     .await

@@ -72,6 +72,9 @@ struct RestartArgs {
     note: Option<String>,
     #[serde(default)]
     confirmed: bool,
+    /// The note is the workflow supervisor's draft, unedited (never from the arguments).
+    #[serde(skip)]
+    drafted: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -241,6 +244,7 @@ pub(super) async fn operation(
             let run = found(&host.state, &a.run)?;
             let mut view = placed(run.view(), &run, &places(&host.state)?);
             sessions(host, &mut view).await;
+            view["supervising"] = json!(super::supervisor::queued(&host.state, &run.id));
             Ok(json!({ "run": view }))
         }
         "workflow_run_resume" => resume(host, parse(args)?).await,
@@ -617,6 +621,7 @@ async fn restart(host: &Arc<Host>, args: RestartArgs, azure: &Azure) -> Result<V
     let now = now();
     let mut next = Run::new(item, now);
     next.continues = Some(run.id.clone());
+    next.handover_drafted = args.drafted && note.is_some();
     next.handover = note;
     next.classification = Some(json!({"workflow":workflow.id,"outcome":"restarted"}));
     engine::assign(&mut next, workflow, &map.workflow_blocks, now, "restarted");
@@ -640,6 +645,23 @@ async fn restart(host: &Arc<Host>, args: RestartArgs, azure: &Azure) -> Result<V
         "warning": ended.warning,
         "paused": paused,
     }))
+}
+
+/// Restart a run with the workflow supervisor's drafted handover, as the person confirmed it
+/// unedited: its coding runs get the note as the supervisor's text.
+pub(super) async fn restart_drafted(
+    host: &Arc<Host>,
+    run: &str,
+    note: &str,
+    azure: &Azure,
+) -> Result<Value, String> {
+    let args = RestartArgs {
+        run: run.to_owned(),
+        note: Some(note.to_owned()),
+        confirmed: true,
+        drafted: true,
+    };
+    restart(host, args, azure).await
 }
 
 /// A pause's project as given: trimmed, none for every project.
@@ -725,6 +747,8 @@ async fn pause(host: &Arc<Host>, args: PauseArgs) -> Result<Value, String> {
                         "The workflow runs were paused with their sessions stopped, so implementation run {cancelled} was stopped; restart this run with a handover note (workflow_run_restart), or resume it to continue past that run."
                     ),
                 );
+                // The person stopped it: the supervisor does not look at this stop.
+                run.cause = Some("paused".into());
                 db.save(&run).map_err(fail)?;
                 interrupted.push(run.id.clone());
             }

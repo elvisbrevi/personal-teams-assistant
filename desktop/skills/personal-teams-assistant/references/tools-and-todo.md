@@ -325,10 +325,11 @@ instead of guessing from the run's state or the machine's processes.
 
 In the provider's session list (Claude Remote Control, Codex threads) each session is named
 after what it works on: `Teams Assistant - <work item ID> <title>` for a coding or planning run
-(the title on one line, shortened to 100 characters), `Teams Assistant - director <ID>` and
-`Teams Assistant - summary <ID>` for the workflow director's sessions, and `Teams Assistant - new
+(the title on one line, shortened to 100 characters), `Teams Assistant - director <ID>`,
+`Teams Assistant - summary <ID>` and `Teams Assistant - supervision <ID>` for the workflow
+director's and supervisor's sessions, and `Teams Assistant - new
 user story` (`new bug`, `new epic`) for a request run. OpenCode sessions are not named. A worker
-too old to receive the item names its director sessions without the ID.
+too old to receive the item names those sessions without the ID.
 
 A coding run is finished when its agent's work is, not at its first turn end: a Claude session
 that ends a turn while a background task it started is still pending (a pipeline it watches, a
@@ -503,6 +504,11 @@ How a workflow takes an item from its ready state to its release, and where the 
    (`workflows pause`, every project or one, stopping the live sessions or letting them finish)
    and unpause when it is back; restart each interrupted run with its note, in the order that
    makes sense.
+11. **Let the supervisor follow the runs** (Settings › Workflows, `--set supervisor.*`): when a
+   run stops, waits too long, loses its machine or disagrees with its session, it reads what the
+   agents did, checks their final reports and drafts the handover note, work items and a
+   summary; read its look (`workflows supervision RUN`) and carry out what the person agrees to
+   (`workflows act`), once each.
 
 ### Workflow settings and the director
 
@@ -725,6 +731,57 @@ run (any state but `done` and `cancelled`).
 The engine never merges, completes or changes a pull request or a work item; the coding agent
 opens the pull request as its instructions ask. A run uses the workflow as it was when the run got
 it.
+
+### The workflow supervisor
+
+Requires host and CLI `workflow_supervisor_support: true`, on the owner's coordinator. It is off
+by default and an update never turns it on.
+
+- **Settings:** `pta workflows settings` shows `supervisor` (`enabled`, `machine`, `provider`,
+  `model`, `effort`, and the bounds `looks_per_day` 1–100 (default 24, the person's requests not
+  counted), `min_interval_minutes` 10–1440 (30), `wait_hours` 1–48 (3), `offline_minutes` 5–240
+  (15), `session_seconds` 60–600 (180)); change them with `pta workflows settings --set
+  supervisor.FIELD VALUE` (MCP `workflow_settings_update {supervisor: {...}}`, merged with the
+  stored values; `--set supervisor none` turns it off and clears it). Turning it on needs its
+  machine and agent, checked against the machine's installed CLIs like the director's; its own
+  prompt is `supervise` (`pta prompts show supervise`).
+- **When it looks:** once per run per event (a run stopped in `needs_attention`, `failed` or
+  `interrupted`, but not a stop the person caused with a pause; a run waited for a slot or a
+  launch longer than `wait_hours`; its machine unseen for `offline_minutes`; a session alive on
+  a run that ended, or a coding run without a live session), at most one look at a time, looks of
+  one run at least `min_interval_minutes` apart, at most `looks_per_day` automatic looks in 24
+  hours; nothing while a pause covers the run's project. A look that fails is never retried.
+  `pta workflows supervise RUN` (MCP `workflow_supervise`, local, no confirmation; it runs a
+  model on the supervisor's machine and uses its quota) asks for one now; it returns at once with
+  the look queued or running, and is refused within five minutes of that run's previous look.
+- **What a look holds:** `pta workflows supervision RUN` (MCP `workflow_supervision`; also
+  `supervision` in `workflow_run_status`, and the latest in each `workflow_runs` entry) gives
+  each look's `assessment` (`done`, `left`, `recommendation`), `checks` (each claim of the final
+  report, `verified` or `not_verified` with code's `fact`, such as «Pull request !7 is active.»:
+  report a `not_verified` claim as not verified, never as done), `unverified`, `unread` and
+  `truncated` (what code could not read or cut), the drafted `handover`, `work_items` and
+  `summary`, and `actions` with their `state`. Code read the facts (item and child states, pull
+  requests, branches, machines, session ends) with the read credential; comments, reports and
+  session summaries reached the supervisor only as untrusted text, and nothing it wrote can
+  choose a chat, a person, a link, a repository or another run.
+- **What it did by itself:** stored the look, and possibly moved the run ahead in the queue
+  (`move_ahead`, `done`). `pta workflows requeue RUN --ahead|--back` (MCP `workflow_run_requeue`,
+  local) moves a run waiting for a slot ahead, or back to its place by creation.
+- **Carry out a proposal:** `pta workflows act RUN LOOK ACTION [--note TEXT | --note-file PATH]
+  [--chat ID] [--mention NAME…] --confirmed` (MCP `workflow_supervision_act`, needs
+  confirmation: show the user the action and its exact draft first). `restart` restarts with the
+  drafted note when no `note` is given (it reaches the coding runs as the supervisor's text),
+  with the person's edited `note`, or without any note when `note` is empty; `resume`, `cancel` and `pause_project` run those operations;
+  `post_summary` posts the drafted summary to the chat the person chose (`teams_chats`), once,
+  never retried; `create_work_item` returns the draft for Create request
+  (`implementation_request_start`, with its own confirmation and the type's work item guide).
+  Each runs once, even when confirmed twice at once (`executed`, `refused` or `uncertain`; one
+  the operation refused before acting stays `proposed`; one a stopped host left `attempting`
+  becomes `uncertain`); an action of a run that moved on since the look is `expired`. The
+  confirmation of a post names its chat and every mention. `pta workflows dismiss RUN LOOK ACTION` (MCP
+  `workflow_supervision_dismiss`) sets one aside.
+
+It never changes code, merges, deploys, writes to Azure DevOps or posts to Teams by itself.
 
 ### Automatic starts and the Implement choice
 

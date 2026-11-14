@@ -92,6 +92,10 @@ struct Machine {
     /// (`session_names_support`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     session_names: bool,
+    /// Whether its last poll said it runs the workflow supervisor's looks (`workflow_direct`
+    /// with `task: "supervise"` and its own session bound).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    workflow_supervise: bool,
 }
 impl Machine {
     /// Trusted and seen in its last polls (a worker polls every two seconds).
@@ -590,6 +594,10 @@ pub(super) struct MachineFacts {
     pub inspect: bool,
     /// It runs the workflow director (`workflow_direct`).
     pub direct: bool,
+    /// It runs the workflow supervisor's looks (`workflow_supervise_support`).
+    pub supervise: bool,
+    /// When it was last seen (Unix seconds); now for this installation.
+    pub seen: i64,
 }
 /// The machine `id` of this account, or none when it is unknown, revoked or another account's.
 pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<MachineFacts>> {
@@ -604,6 +612,8 @@ pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<M
             roots: own_roots,
             inspect: true,
             direct: true,
+            supervise: true,
+            seen: now(),
         }));
     }
     Ok(data
@@ -617,7 +627,24 @@ pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<M
             roots: m.roots.clone(),
             inspect: m.checkout_inspect,
             direct: m.workflow_direct,
+            supervise: m.workflow_supervise,
+            seen: m.seen,
         }))
+}
+/// The account's other machines whose last poll did not say they run the workflow supervisor
+/// (`workflow_supervise_support`), by name: a version that predates it, which refuses the
+/// account's map once the supervisor's settings are not their defaults.
+pub(in crate::app) async fn machines_before_supervisor(host: &Arc<Host>) -> Result<Vec<String>> {
+    let version = management::version(host)?;
+    let data = host.state.implementation.registry.lock().await;
+    Ok(data
+        .machines
+        .iter()
+        .filter(|m| {
+            !m.revoked && m.id != data.id && m.account_version == version && !m.workflow_supervise
+        })
+        .map(|m| m.name.clone())
+        .collect())
 }
 /// The account's trusted machines whose host runs `until` or an older release, or reports no
 /// version (hosts older than the reports), as `name (version)`.
@@ -1003,6 +1030,23 @@ pub(super) fn test_directories(host: &Host, id: &str) -> Vec<PathBuf> {
     let run = host.state.implementation.db.get(id).unwrap().unwrap();
     run.launch.request.directories
 }
+/// A machine of the account that polled once, saying whether it runs the workflow supervisor
+/// (tests).
+#[cfg(test)]
+pub(in crate::app) async fn test_worker(host: &Arc<Host>, name: &str, supervise: bool) -> String {
+    let worker = uuid::Uuid::new_v4().to_string();
+    let registration = fleet::register(host, &json!({"id":worker,"name":name,"os":"macos"}))
+        .await
+        .unwrap();
+    let token = registration["token"].as_str().unwrap().to_owned();
+    fleet::protocol(
+        host,
+        &json!({"id":worker,"token":token,"action":"poll","workflow_supervise_support":supervise}),
+    )
+    .await
+    .unwrap();
+    worker
+}
 /// End an in-flight run in `state` as its machine would record it (tests).
 #[cfg(all(test, unix))]
 pub(super) fn test_finish(host: &Host, id: &str, state: &str, output: &str) {
@@ -1374,6 +1418,7 @@ fn recorded_name(record: &Value) -> crate::llm::implementation::SessionName {
         Some("request") => SessionName::request(record["kind"].as_str().unwrap_or_default()),
         Some("classification") => DirectTask::Classify.session_name(item),
         Some("summary") => DirectTask::Summarize.session_name(item),
+        Some("supervision") => DirectTask::Supervise.session_name(item),
         _ => SessionName::default(),
     }
 }
@@ -1540,6 +1585,53 @@ pub(super) async fn mark_session(value: &mut Value, own: &str) {
 }
 /// Implementation run `id`'s session as this host knows it (`mark_session`): its machine,
 /// `session_alive` and `handed_to_user`; none without a record of the run.
+/// The bounded summaries of the native sessions of these implementation runs (the workflow
+/// supervisor's look at a run): read through the same machine channel and scrubbing as the
+/// agent sessions source, whether or not that source is enabled, so a `#private` session is
+/// never read and an offline machine is not asked. The flag says some session was not found
+/// while a machine could not be read.
+pub(in crate::app) async fn run_session_summaries(
+    host: &Arc<Host>,
+    runs: Vec<String>,
+) -> Result<(Vec<Value>, bool)> {
+    let state = &host.state.implementation;
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for id in runs {
+        if let Some(session) = state
+            .db
+            .summary(&id)
+            .ok()
+            .flatten()
+            .and_then(|s| s["session_id"].as_str().map(str::to_owned))
+        {
+            wanted.push((id, session));
+        }
+    }
+    if wanted.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    let listing = tokio::time::timeout(
+        Duration::from_secs(crate::sessions::READ_SECONDS),
+        sessions::gather(host, crate::sessions::MAX_LIMIT),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("The agent sessions did not answer in time."))??;
+    let found: Vec<Value> = wanted
+        .iter()
+        .filter_map(|(run, session)| {
+            listing
+                .sessions
+                .iter()
+                .find(|s| &s.session_id == session)
+                .map(|s| {
+                    json!({"implementation_run": run, "updated_at": s.updated_at, "asked": s.asked,
+                        "latest": s.latest, "concluded": s.concluded, "open": s.open})
+                })
+        })
+        .collect();
+    let missing = found.len() < wanted.len() && !listing.unavailable.is_empty();
+    Ok((found, missing))
+}
 pub(in crate::app) async fn session_life(host: &Arc<Host>, id: &str) -> Option<Value> {
     let state = &host.state.implementation;
     let mut summary = state.db.summary(id).ok()??;
@@ -1756,6 +1848,22 @@ fn validate_child(child: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_reconnected_session_keeps_the_name_of_its_purpose_and_item() {
+        let name = |record: Value| recorded_name(&record).as_str().to_owned();
+        for (purpose, expected) in [
+            ("classification", "Teams Assistant - director 41"),
+            ("summary", "Teams Assistant - summary 41"),
+            ("supervision", "Teams Assistant - supervision 41"),
+        ] {
+            assert_eq!(name(json!({"purpose":purpose,"item":{"id":41}})), expected);
+        }
+        assert_eq!(
+            name(json!({"purpose":"request","kind":"bug","item":null})),
+            "Teams Assistant - new bug"
+        );
+        assert_eq!(name(json!({"purpose":"other"})), "Teams Assistant");
+    }
     #[test]
     fn a_permission_prompt_never_ends_a_run_in_needs_attention() {
         let prompt = vec!["Bash: git push".to_owned()];
@@ -2154,6 +2262,7 @@ mod tests {
                     instructions: "Choose.",
                     input: "{}".into(),
                     item: &item,
+                    seconds: None,
                 },
             )
             .await
@@ -2180,6 +2289,41 @@ mod tests {
             json!({"id":worker,"token":token,"action":"poll","workflow_direct_support":true});
         fleet::protocol(&host, &poll).await.unwrap();
         assert!(machine_facts(&host, &worker).await.unwrap().unwrap().direct);
+        // A worker that runs the director but not the supervisor is never asked for a look.
+        assert!(
+            !machine_facts(&host, &worker)
+                .await
+                .unwrap()
+                .unwrap()
+                .supervise
+        );
+        let look = |host: Arc<Host>,
+                    director: crate::workflows::director::Director,
+                    item: crate::tools::todo::Item| async move {
+            director::ask(
+                &host,
+                director::Ask {
+                    machine: &director.machine,
+                    director: &director,
+                    task: crate::llm::implementation::DirectTask::Supervise,
+                    instructions: "Look.",
+                    input: "{}".into(),
+                    item: &item,
+                    seconds: Some(180),
+                },
+            )
+            .await
+        };
+        let refused = look(host.clone(), director.clone(), item.clone())
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            refused
+                .to_string()
+                .contains("Update the workflow supervisor's machine"),
+            "{refused}"
+        );
         // The call is not reachable from the worker protocol's coordinator side.
         assert!(
             fleet::protocol(
@@ -2206,6 +2350,9 @@ mod tests {
         assert_eq!(command["args"]["instructions"], "Choose.");
         // A worker that does not say it names sessions gets no item: it would refuse the field.
         assert!(command["args"].get("item").is_none());
+        // A classification carries neither the supervisor's task nor its bound, so an older
+        // worker still reads it.
+        assert!(command["args"].get("task").is_none() && command["args"].get("seconds").is_none());
         // In flight, the session is in Agent history as generating, on the worker.
         let generating = host.state.implementation.db.requests(None).unwrap();
         assert!(
@@ -2241,6 +2388,66 @@ mod tests {
             recorded["item"]["url"],
             "https://dev.azure.com/example/Payments/_workitems/edit/41"
         );
+        // Once it says it runs the supervisor, a look is asked of it with its task and bound.
+        let mut supervising = poll.clone();
+        supervising["workflow_supervise_support"] = json!(true);
+        fleet::protocol(&host, &supervising).await.unwrap();
+        assert!(
+            machine_facts(&host, &worker)
+                .await
+                .unwrap()
+                .unwrap()
+                .supervise
+        );
+        let looking = tokio::spawn(look(host.clone(), director.clone(), item.clone()));
+        let command = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let reply = fleet::protocol(&host, &supervising).await.unwrap();
+                if !reply["command"].is_null() {
+                    break reply["command"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(command["args"]["task"], "supervise");
+        assert_eq!(command["args"]["seconds"], 180);
+        // Without `session_names_support` it still gets the look, without the item.
+        assert!(command["args"].get("item").is_none());
+        let mut answered = supervising.clone();
+        answered["results"] =
+            json!([{"id":command["id"],"result":{"ok":false,"failure":{"cause":"timeout"}}}]);
+        fleet::protocol(&host, &answered).await.unwrap();
+        assert!(looking.await.unwrap().is_err());
+        let recorded = host.state.implementation.db.history().unwrap();
+        assert!(
+            recorded
+                .iter()
+                .any(|r| r["purpose"] == "supervision" && r["state"] == "failed")
+        );
+        // A worker that also names sessions gets the item's ID with the look.
+        supervising["session_names_support"] = json!(true);
+        fleet::protocol(&host, &supervising).await.unwrap();
+        let looking = tokio::spawn(look(host.clone(), director.clone(), item.clone()));
+        let command = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let reply = fleet::protocol(&host, &supervising).await.unwrap();
+                if !reply["command"].is_null() {
+                    break reply["command"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(command["args"]["task"], "supervise");
+        assert_eq!(command["args"]["item"], 41);
+        let mut answered = supervising.clone();
+        answered["results"] =
+            json!([{"id":command["id"],"result":{"ok":false,"failure":{"cause":"timeout"}}}]);
+        fleet::protocol(&host, &answered).await.unwrap();
+        assert!(looking.await.unwrap().is_err());
         // A session ID that is not one is dropped, and the answer is kept.
         let mut poll = poll.clone();
         poll["session_names_support"] = json!(true);

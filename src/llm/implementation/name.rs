@@ -127,6 +127,14 @@ mod tests {
             SessionName::purpose("director", Some(42)).as_str(),
             "Teams Assistant - director 42"
         );
+        use super::super::DirectTask;
+        for (task, name) in [
+            (DirectTask::Classify, "Teams Assistant - director 42"),
+            (DirectTask::Summarize, "Teams Assistant - summary 42"),
+            (DirectTask::Supervise, "Teams Assistant - supervision 42"),
+        ] {
+            assert_eq!(task.session_name(Some(42)).as_str(), name);
+        }
         assert_eq!(
             SessionName::purpose("director", None).as_str(),
             "Teams Assistant - director"

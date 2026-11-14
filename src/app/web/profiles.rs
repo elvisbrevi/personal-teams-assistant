@@ -508,6 +508,11 @@ pub(super) const PORTAL_METHODS: &[&str] = &[
     "workflow_runs_unpause",
     "workflow_summary",
     "workflow_summary_send",
+    "workflow_supervise",
+    "workflow_supervision",
+    "workflow_supervision_act",
+    "workflow_supervision_dismiss",
+    "workflow_run_requeue",
     // Read-only: the account's own chats, for choosing a workflow notification's chat.
     "teams_chats",
     "list_azure_hus",

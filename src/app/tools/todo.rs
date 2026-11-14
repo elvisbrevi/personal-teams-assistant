@@ -426,6 +426,38 @@ pub(in crate::app) async fn pull_requests(
     .await
 }
 
+/// Whether a reported branch exists in a workflow repository now, read with the enabled Azure
+/// source's read credential (the workflow supervisor; never cached, nothing written).
+pub(in crate::app) async fn branch_exists(
+    state: &DesktopState,
+    source: Option<&str>,
+    organization: &str,
+    project: &str,
+    repository: &str,
+    branch: &str,
+) -> Result<bool, String> {
+    project_read(
+        state,
+        source,
+        "reading a workflow's branches",
+        "branches",
+        60,
+        |azure, _cache| async move {
+            crate::ado::workflow::branch_exists(
+                &azure.client,
+                &azure.read_key,
+                &azure.catalog,
+                organization,
+                project,
+                repository,
+                branch,
+            )
+            .await
+        },
+    )
+    .await
+}
+
 /// Whether an item read fresh is assigned to the enabled Azure source's user.
 pub(in crate::app) fn assigned(
     state: &DesktopState,

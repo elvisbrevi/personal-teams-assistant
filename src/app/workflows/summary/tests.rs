@@ -1379,3 +1379,23 @@ async fn the_cli_send_path_runs_end_to_end_against_the_host() {
         .is_err()
     );
 }
+
+#[test]
+fn removing_a_piece_never_rebuilds_a_mention_a_url_or_a_tag() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let run = record(&host, "machine");
+    for input in [
+        "@[[Ana]] lo revisa",
+        "Ver http:<i></i>//evil.example/x hoy",
+        "Abre <<b>a href=x>esto</a>",
+        "@[[Ana]] http:<i></i>//evil.example/x <<b>a href=x>esto</a>",
+    ] {
+        let text = compose(input, &run, crate::config::Language::Es);
+        let body = text.split("**Enlaces**").next().unwrap();
+        assert!(!body.contains("@["), "{text}");
+        assert!(!body.contains("evil.example"), "{text}");
+        assert!(!body.contains('<'), "{text}");
+        assert!(!text.contains("evil.example"), "{text}");
+    }
+}

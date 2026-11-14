@@ -38,6 +38,9 @@ pub(in crate::app) struct Ask<'a> {
     pub input: String,
     /// The classified item, read fresh: its verified link goes in the record.
     pub item: &'a crate::tools::todo::Item,
+    /// The session's own bound, when it is not the director's (`SESSION_SECONDS`): the
+    /// supervisor's `session_seconds`.
+    pub seconds: Option<u64>,
 }
 /// The recorded session and what it returned.
 pub(in crate::app) struct Answer {
@@ -68,6 +71,18 @@ struct Call {
     /// coordinator's call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     item: Option<u64>,
+    /// The session's bound when it is not `SESSION_SECONDS` (a supervisor's look); left out
+    /// otherwise, and sent only to a worker that advertises `workflow_supervise_support`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seconds: Option<u64>,
+}
+
+/// The longest session a call may ask for (the supervisor's `session_seconds` bound).
+const MAX_SESSION_SECONDS: u64 = 600;
+/// How long the coordinator waits for another machine's answer to a session bounded to
+/// `seconds`: the probe, the session and the polls, with ten seconds of margin.
+pub(in crate::app) fn wait_seconds(seconds: u64) -> u64 {
+    PROBE_SECONDS + seconds + POLL_SECONDS + 10
 }
 
 fn valid_session(session: &str) -> Result<()> {
@@ -96,6 +111,11 @@ async fn session(
         call.instructions.chars().count() <= INSTRUCTIONS && call.input.len() <= INPUT,
         "The workflow director's input is too long."
     );
+    let seconds = call.seconds.unwrap_or(SESSION_SECONDS);
+    ensure!(
+        (1..=MAX_SESSION_SECONDS).contains(&seconds),
+        "Invalid session bound."
+    );
     crate::llm::implementation::validate_recent(
         &call.provider,
         &call.model,
@@ -111,7 +131,7 @@ async fn session(
         .tempdir_in(&parent)?;
     security::private_dir(directory.path())?;
     match tokio::time::timeout(
-        Duration::from_secs(SESSION_SECONDS),
+        Duration::from_secs(seconds),
         crate::llm::implementation::direct(
             call.task,
             (&call.provider, &call.model, &call.effort),
@@ -204,6 +224,7 @@ pub(in crate::app) async fn ask(host: &Arc<Host>, ask: Ask<'_>) -> Result<Answer
     let purpose = match ask.task {
         crate::llm::implementation::DirectTask::Classify => "classification",
         crate::llm::implementation::DirectTask::Summarize => "summary",
+        crate::llm::implementation::DirectTask::Supervise => "supervision",
     };
     let named = local
         || state
@@ -224,6 +245,7 @@ pub(in crate::app) async fn ask(host: &Arc<Host>, ask: Ask<'_>) -> Result<Answer
         instructions: ask.instructions.to_owned(),
         input: ask.input,
         item: named.then_some(item.id),
+        seconds: ask.seconds,
     };
     let result: Result<(Direction, Option<String>, Option<String>)> = if local {
         let observer = |session: Option<&str>| {

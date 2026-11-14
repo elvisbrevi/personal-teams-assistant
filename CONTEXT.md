@@ -193,6 +193,10 @@ _Avoid_: step, plugin
 The model-backed selector and summarizer of a project's items: it chooses which enabled workflow fits an item, or none, and writes progress summaries; code checks its choice and it decides nothing else. A project's director is its own when Settings › Workflows sets one, otherwise the machine and agent its workflows share, otherwise the account's general director. Distinct from the coordinator, which stays the user's main installation.
 _Avoid_: coordinator, orchestrator, dispatcher
 
+**Workflow supervisor**:
+The model-backed agent on the coordinator that looks after the account's workflow runs: on events (a run stopped, waited too long, lost its machine or disagrees with its session) or on request, it reads what the runs' agents did, checks their final reports against facts code read, drafts handover notes, work items and summaries, and proposes actions the user confirms. By itself it changes no code and writes nothing outside the run's record, except moving the run it looks at ahead in the queue. Distinct from the workflow director, which only chooses a workflow and summarizes.
+_Avoid_: orchestrator, monitor, watchdog
+
 **Workflow run**:
 One execution of a workflow for one work item, kept on the coordinator, advancing through stages (planning, the plan-review gate, child creation, coding, pull requests, blocks, done) by the existing implementation operations, never past the user's review of the plan. An item has at most one active run; a run that stops (needs attention, interrupted, failed) waits for the user to resume it, and a resume never repeats a write or a started coding run. A restart ends a run and starts a new one of the same workflow for the same item, which records the run it continues; a pause holds every run, or one project's, so nothing new starts until it ends.
 _Avoid_: implementation run (one of its parts), job
