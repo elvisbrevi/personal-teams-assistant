@@ -73,6 +73,10 @@ function upgradeButton(machine, newest) {
     try {
       const result = await invoke('machine_upgrade', { machine: machine.id });
       const name = machine.name;
+      if (result?.waiting_for_archive) {
+        done(t('{machine} waits for the archive of version {version}; it is prepared and installed by itself when the archive appears.', { machine: name, version: result.target }));
+        return;
+      }
       done({
         current: t('{machine} already runs the newest release.', { machine: name }),
         staging: t('Preparing the update on {machine}; it installs itself when ready and restarts.', { machine: name }),

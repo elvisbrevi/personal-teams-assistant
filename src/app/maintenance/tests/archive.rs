@@ -265,7 +265,7 @@ async fn short_server(version: &str, body: Vec<u8>, announced: u64) -> String {
 }
 
 #[tokio::test]
-async fn a_digest_size_or_missing_archive_failure_leaves_nothing_staged() {
+async fn a_digest_size_or_missing_archive_leaves_nothing_staged() {
     let _serial = SERIAL.lock().await;
     let good = archive_of("0.9.14", "0.9.14");
     let name = archive_name("0.9.14");
@@ -290,6 +290,7 @@ async fn a_digest_size_or_missing_archive_failure_leaves_nothing_staged() {
     )
     .await;
     let empty = MockServer::start().await;
+    // A missing archive or release is not a failure: the request waits for it (and is cancelled).
     let cases: Vec<(&str, String, &str)> = vec![
         (
             "digest mismatch",
@@ -297,8 +298,8 @@ async fn a_digest_size_or_missing_archive_failure_leaves_nothing_staged() {
             "does not match the SHA-256",
         ),
         ("digest of another file", other.uri(), "names another file"),
-        ("missing archive", missing.uri(), "has no file"),
-        ("missing release", empty.uri(), "has no file"),
+        ("missing archive", missing.uri(), ""),
+        ("missing release", empty.uri(), ""),
         (
             "truncated download",
             short_server("0.9.14", good.clone(), good.len() as u64).await,
@@ -324,9 +325,19 @@ async fn a_digest_size_or_missing_archive_failure_leaves_nothing_staged() {
         .await;
         assert!(started.ok, "{case}: {:?}", started.message);
         let done = settled(&f).await;
-        assert_eq!(done["state"], "failed", "{case}: {done}");
-        let error = done["stage"]["error"].as_str().unwrap_or_default();
-        assert!(error.contains(expected), "{case}: {error}");
+        if expected.is_empty() {
+            assert_eq!(done["state"], "waiting", "{case}: {done}");
+            assert_eq!(done["waiting_for_archive"]["version"], "0.9.14", "{case}");
+            assert!(
+                call(&f.host, Local, "crate_update_cancel", json!({}))
+                    .await
+                    .ok
+            );
+        } else {
+            assert_eq!(done["state"], "failed", "{case}: {done}");
+            let error = done["stage"]["error"].as_str().unwrap_or_default();
+            assert!(error.contains(expected), "{case}: {error}");
+        }
         assert_eq!(done["can_apply"], false, "{case}");
         assert!(
             staged_entries(&f).is_empty(),
@@ -588,7 +599,10 @@ async fn unattended_updating_prepares_and_installs_and_never_retries_a_release_t
     entry.intent.assistant = true;
     entry.intent.subscriptions = 1;
     core::apply::write(&dir, &entry).unwrap();
-    let fake = Fake::new(&f);
+    let fake = Fake {
+        new_unhealthy: true,
+        ..Fake::new(&f)
+    };
     assert!(matches!(
         apply::drive(&dir, &fake, tune()).await,
         Outcome::RolledBack
@@ -825,5 +839,320 @@ async fn the_fleet_report_carries_only_versions_and_fixed_states() {
         !report
             .to_string()
             .contains(&f.install.display().to_string())
+    );
+}
+
+/// A release of `version` whose archive answers 404 to its first `late` requests (or always, with
+/// `None`), as a release looks while its archive is being built; its `.sha256` is there throughout.
+async fn late_release(version: &str, late: Option<u64>) -> MockServer {
+    let archive = archive_of(version, version);
+    let name = archive_name(version);
+    let server = MockServer::start().await;
+    let missing = Mock::given(method("GET"))
+        .and(path(asset(version, &name)))
+        .respond_with(ResponseTemplate::new(404))
+        .with_priority(1);
+    match late {
+        Some(times) => missing.up_to_n_times(times).mount(&server).await,
+        None => missing.mount(&server).await,
+    }
+    Mock::given(method("GET"))
+        .and(path(asset(version, &name)))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(archive.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(asset(version, &format!("{name}.sha256"))))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(format!("{}  {name}\n", hex(&archive))),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn archive_requests(server: &MockServer, version: &str) -> usize {
+    let wanted = asset(version, &archive_name(version));
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == wanted)
+        .count()
+}
+
+/// Waits until the status leaves `state`.
+async fn left(f: &Fixture, state: &str) -> Value {
+    for _ in 0..200 {
+        let status = call(&f.host, Local, "crate_update_status", json!({})).await;
+        if status.data["state"] != state {
+            return status.data;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the state stayed {state}");
+}
+
+/// The 2026-11 finding: `pta update --machine NAME` minutes after a release failed on Windows
+/// because the release job had not attached that target's archive yet.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_update_asked_before_its_archive_is_attached_waits_and_then_installs_itself() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.13", false), line("0.9.14", false)]).await;
+    let releases = late_release("0.9.14", Some(2)).await;
+    let mut f = fixture(&server);
+    archived(&mut f, Some(source(&releases.uri())));
+    let dir = directory(&f.host);
+    let before = bins(&f);
+    // Asked from another device: the reply is `staging`, which requesters of every version read as
+    // «prepared and installed by itself», and says what it waits for.
+    let reply = remote_latest(&f.host).await.unwrap();
+    assert_eq!(reply["outcome"], "staging", "{reply}");
+    assert_eq!(reply["target"], "0.9.14");
+    assert_eq!(reply["waiting_for_archive"]["version"], "0.9.14");
+    assert_eq!(reply["waiting_for_archive"]["install"], true);
+    let status = call(&f.host, Local, "crate_update_status", json!({}))
+        .await
+        .data;
+    assert_eq!(status["state"], "waiting", "{status}");
+    assert!(
+        status["waiting_for_archive"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Waiting for the archive of 0.9.14"),
+        "{status}"
+    );
+    // Published, but not available to this computer until its archive is attached.
+    assert_eq!(status["available"], Value::Null);
+    assert_eq!(status["archive_missing"]["version"], "0.9.14");
+    assert_eq!(status["can_stage"], false);
+    // The coordinator sees one of the states it already knows.
+    assert_eq!(
+        crate::app::maintenance::report(&f.host),
+        json!({"state":"staging","pending":"0.9.14","failed":null,"unattended":false})
+    );
+    // The archive appears at the second look: prepared and installed by the same request.
+    let mut state = Value::Null;
+    for _ in 0..400 {
+        state = call(&f.host, Local, "crate_update_status", json!({}))
+            .await
+            .data["state"]
+            .clone();
+        if state == "applying" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(state, "applying");
+    // Two looks that found nothing, the look that found it, staging's own check and the download.
+    assert_eq!(archive_requests(&releases, "0.9.14").await, 5);
+    let journal = core::apply::read(&dir).unwrap();
+    assert_eq!(journal.to, "0.9.14");
+    assert!(!journal.intent.unattended);
+    assert_eq!(bins(&f), before, "nothing installed before the restart");
+    assert!(matches!(
+        apply::drive(&dir, &Fake::new(&f), tune()).await,
+        Outcome::Committed
+    ));
+    assert!(installed(&f, core::CRATE).contains("personal-teams-assistant 0.9.14"));
+    let written: Value =
+        serde_json::from_str(&fs::read_to_string(f.install.join(core::ARCHIVE_RECORD)).unwrap())
+            .unwrap();
+    assert_eq!(written["version"], "0.9.14");
+    assert_eq!(written["sha256"], hex(&archive_of("0.9.14", "0.9.14")));
+    let after = call(&f.host, Local, "crate_update_status", json!({}))
+        .await
+        .data;
+    assert_eq!(after["waiting_for_archive"], Value::Null);
+    assert_eq!(after["apply"]["state"], "success");
+    let events = events(&f);
+    assert_eq!(
+        events,
+        ["update_requested", "update_waiting"],
+        "no failure on the way"
+    );
+}
+
+#[tokio::test]
+async fn an_archive_that_never_appears_ends_the_wait_with_its_text_and_installs_nothing() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let releases = late_release("0.9.14", None).await;
+    let mut f = fixture(&server);
+    archived(&mut f, Some(source(&releases.uri())));
+    renew(&mut f, |env| env.archive_wait = 1);
+    let dir = directory(&f.host);
+    let before = bins(&f);
+    let first = call(&f.host, Local, "crate_update_latest", json!({})).await;
+    assert_eq!(first.data["outcome"], "staging", "{:?}", first.message);
+    // Asking again joins the same wait and its bound.
+    let again = call(&f.host, Local, "crate_update_latest", json!({})).await;
+    assert_eq!(again.data["outcome"], "staging");
+    assert_eq!(
+        again.data["waiting_for_archive"]["until"],
+        first.data["waiting_for_archive"]["until"]
+    );
+    let done = left(&f, "waiting").await;
+    assert_eq!(done["state"], "failed", "{done}");
+    let error = done["stage"]["error"].as_str().unwrap();
+    assert!(
+        error.starts_with(&format!(
+            "The archive of version 0.9.14 for this computer ({TARGET}) did not appear in its release within 30 minutes"
+        )),
+        "{error}"
+    );
+    assert!(
+        error.contains(
+            "https://github.com/elvisbrevi/personal-teams-assistant/releases/tag/v0.9.14"
+        ),
+        "{error}"
+    );
+    assert_eq!(done["waiting_for_archive"], Value::Null);
+    assert_eq!(done["installed"], "0.9.13");
+    assert_eq!(bins(&f), before);
+    assert!(core::apply::read(&dir).is_none());
+    assert!(staged_entries(&f).is_empty());
+    assert_eq!(
+        events(&f),
+        ["update_requested", "update_waiting", "update_stage"]
+    );
+    // Ended for good: nothing looks at the release on its behalf any more.
+    let looked = archive_requests(&releases, "0.9.14").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(archive_requests(&releases, "0.9.14").await, looked);
+
+    // A wait a restart interrupted past its bound ends the same way at its first look.
+    save(&dir, |saved| {
+        saved.pending = Some(Pending {
+            version: "0.9.14".into(),
+            since: now() - 3600,
+            until: now() - 1,
+            install: true,
+            by: "remote".into(),
+        });
+        saved.stage = None;
+    })
+    .unwrap();
+    assert!(!look_for_archive(&f.host, &f.env).await);
+    let status = call(&f.host, Local, "crate_update_status", json!({}))
+        .await
+        .data;
+    assert_eq!(status["state"], "failed", "{status}");
+    assert!(core::apply::read(&dir).is_none());
+}
+
+#[tokio::test]
+async fn unattended_updating_waits_for_a_missing_archive_without_recording_a_failure() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let releases = late_release("0.9.14", Some(2)).await;
+    let mut f = fixture(&server);
+    archived(&mut f, Some(source(&releases.uri())));
+    // The waiting task of an explicit preparation does not look during this test.
+    renew(&mut f, |env| env.archive_poll = Duration::from_secs(600));
+    let dir = directory(&f.host);
+    enable(&dir);
+    let checked = call(&f.host, Local, "crate_update_check", json!({})).await;
+    assert!(checked.ok, "{:?}", checked.message);
+    assert_eq!(checked.data["available"], Value::Null);
+    assert_eq!(checked.data["archive_missing"]["version"], "0.9.14");
+    assert_eq!(crate::app::maintenance::report(&f.host)["state"], "current");
+    assert_eq!(unattended(&f.host, &f.env).await, Pass::Waiting);
+    assert_eq!(unattended(&f.host, &f.env).await, Pass::Waiting);
+    assert!(events(&f).is_empty(), "{:?}", events(&f));
+    assert!(load(&dir).stage.is_none());
+
+    // Prepared on purpose before the archive is attached: it waits, and cancelling withdraws it.
+    let staged = call(
+        &f.host,
+        Window,
+        "crate_update_stage",
+        json!({"version":"0.9.14"}),
+    )
+    .await;
+    assert!(staged.ok, "{:?}", staged.message);
+    assert_eq!(staged.data["state"], "waiting");
+    assert_eq!(staged.data["waiting_for_archive"]["install"], false);
+    assert_eq!(unattended(&f.host, &f.env).await, Pass::Waiting);
+    let cancelled = call(&f.host, Local, "crate_update_cancel", json!({})).await;
+    assert!(cancelled.ok);
+    assert_eq!(cancelled.data["state"], "idle");
+    assert_eq!(events(&f), ["update_waiting", "update_wait_cancelled"]);
+
+    // Once attached, the next look offers it and unattended updating prepares it.
+    let checked = call(&f.host, Local, "crate_update_check", json!({})).await;
+    assert_eq!(checked.data["available"], "0.9.14", "{}", checked.data);
+    assert_eq!(checked.data["archive_missing"], Value::Null);
+    assert_eq!(unattended(&f.host, &f.env).await, Pass::Staging);
+    #[cfg(unix)]
+    assert_eq!(settled(&f).await["state"], "staged");
+}
+
+#[tokio::test]
+async fn a_cargo_installation_never_asks_the_release_host() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let releases = late_release("0.9.14", None).await;
+    let mut f = fixture(&server);
+    renew(&mut f, |env| env.release = Some(source(&releases.uri())));
+    let checked = call(&f.host, Local, "crate_update_check", json!({})).await;
+    assert!(checked.ok, "{:?}", checked.message);
+    assert_eq!(checked.data["available"], "0.9.14");
+    assert_eq!(checked.data["archive_missing"], Value::Null);
+    assert_eq!(checked.data["can_stage"], true);
+    assert!(
+        releases
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn the_release_probe_downloads_nothing_and_reads_a_redirect_as_attached() {
+    let version = Version(0, 9, 14);
+    let name = archive_name("0.9.14");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(asset("0.9.14", &format!("{name}.sha256"))))
+        .respond_with(ResponseTemplate::new(200).set_body_string("digest"))
+        .mount(&server)
+        .await;
+    // The release host's own redirect to the download: not followed, even to another host.
+    Mock::given(method("GET"))
+        .and(path(asset("0.9.14", &name)))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("location", "http://localhost:1/elsewhere"),
+        )
+        .mount(&server)
+        .await;
+    let attached = source(&server.uri());
+    assert!(
+        release::published(&attached, &version, TARGET)
+            .await
+            .unwrap()
+    );
+    let empty = MockServer::start().await;
+    assert!(
+        !release::published(&source(&empty.uri()), &version, TARGET)
+            .await
+            .unwrap()
+    );
+    let broken = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&broken)
+        .await;
+    let error = release::published(&source(&broken.uri()), &version, TARGET)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("status 500"), "{error}");
+    assert!(
+        release::published(&attached, &version, "bad target/..")
+            .await
+            .is_err()
     );
 }

@@ -18,7 +18,7 @@ async function loadUpdates() {
 /** A host message of several sentences, each translated on its own. */
 const sentences = text => text.split(/(?<=\.) /).map(tx).join(' ');
 
-const UPDATE_STATES = { idle: 'Up to date', staging: 'Preparing', staged: 'Prepared', failed: 'Failed', deferred: 'Waiting for work to finish', applying: 'Installing' };
+const UPDATE_STATES = { idle: 'Up to date', staging: 'Preparing', staged: 'Prepared', failed: 'Failed', deferred: 'Waiting for work to finish', waiting: 'Waiting for the release archive', applying: 'Installing' };
 const APPLY_PROGRESS = {
   applying: 'Installing version {version}: replacing the application and pta…',
   restarting: 'Restarting the application…',
@@ -53,7 +53,10 @@ function renderUpdates() {
   $('#update-diagnostic').textContent = diagnostic ? sentences(diagnostic) : '';
   const stage = u.stage;
   const building = u.state === 'staging';
-  $('#update-progress').hidden = !(building || u.state === 'staged' || u.state === 'deferred' || working);
+  // Published, but this computer's archive is not attached to the release yet.
+  const waiting = u.state === 'waiting' ? u.waiting_for_archive : null;
+  const late = !managed && !waiting && !working && !building && u.state !== 'failed' ? u.archive_missing : null;
+  $('#update-progress').hidden = !(building || u.state === 'staged' || u.state === 'deferred' || working || waiting || late);
   if (working) {
     $('#update-progress').textContent = t(APPLY_PROGRESS[apply.state], { version: apply.to });
   } else if (building) {
@@ -69,6 +72,12 @@ function renderUpdates() {
         : t('Building version {version} ({n} packages compiled)…', { version: stage?.version ?? '', n: crates });
   } else if (u.state === 'staged' || u.state === 'deferred') {
     $('#update-progress').textContent = t('Version {version} is built and verified. It is not installed yet: the installed version keeps running.', { version: u.staged.version });
+  } else if (waiting) {
+    $('#update-progress').textContent = waiting.install
+      ? t('Waiting for the archive of {version}: the release is published, but its archive for this computer is not attached yet. It is prepared and installed by itself when it appears, for up to 30 minutes.', { version: waiting.version })
+      : t('Waiting for the archive of {version}: the release is published, but its archive for this computer is not attached yet. It is prepared when it appears, for up to 30 minutes.', { version: waiting.version });
+  } else if (late) {
+    $('#update-progress').textContent = t('Version {version} is published, but its archive for this computer is not attached to the release yet. Preparing it now waits for the archive.', { version: late.version });
   }
   const deferred = u.state === 'deferred' ? u.deferred : null;
   $('#update-deferred').hidden = !deferred;
@@ -102,7 +111,7 @@ function renderUpdates() {
   const canApply = Boolean(u.can_apply) && !deferred;
   $('#update-apply').hidden = !canApply;
   $('#update-apply').textContent = updateInstallArmed ? t('Tap again to install and restart') : t('Install update');
-  $('#update-cancel').hidden = !deferred;
+  $('#update-cancel').hidden = !deferred && !waiting;
   $('#update-dismiss').hidden = !offered || u.dismissed;
   const notice = offered && !u.dismissed && !working && (u.can_stage || canApply) && !outcome?.error;
   $('#update-offer').hidden = !notice;
@@ -140,8 +149,9 @@ function renderUnattended(u, managed) {
 }
 
 async function stageUpdate() {
-  if (!updates?.available) return;
-  await invoke('crate_update_stage', { version: updates.available });
+  const version = updates?.available ?? updates?.archive_missing?.version;
+  if (!version) return;
+  await invoke('crate_update_stage', { version });
   await loadUpdates();
 }
 async function dismissUpdate() {
@@ -190,6 +200,6 @@ $('#update-unattended-toggle').onchange = event => {
 $('#update-offer-dismiss').onclick = e => updating(e, dismissUpdate);
 setTimeout(loadUpdates, 1500);
 setInterval(() => { if (current) loadUpdates(); }, 5 * 60_000);
-setInterval(() => { if (['staging', 'applying', 'deferred'].includes(updates?.state)) loadUpdates(); }, 3_000);
+setInterval(() => { if (['staging', 'waiting', 'applying', 'deferred'].includes(updates?.state)) loadUpdates(); }, 3_000);
 
 export { sentences, loadUpdates };

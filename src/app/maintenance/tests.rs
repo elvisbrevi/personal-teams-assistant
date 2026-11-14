@@ -141,6 +141,8 @@ fn fixture(registry: &MockServer) -> Fixture {
         manual: true,
         release: None,
         keychain: Some(false),
+        archive_poll: Duration::from_millis(50),
+        archive_wait: ARCHIVE_WAIT,
     };
     *TEST.lock().unwrap() = Some(env.clone());
     Fixture {
@@ -909,6 +911,12 @@ impl Fake {
     fn on_disk(&self) -> String {
         fs::read_to_string(self.install.join("bin").join(core::exe_name(core::CRATE))).unwrap()
     }
+    /// Whether the new version is on disk: the fixture's bytes, or the pair of a downloaded release
+    /// archive (scripts that report their version).
+    fn new_on_disk(&self) -> bool {
+        let on_disk = self.on_disk();
+        on_disk.starts_with(NEW) || on_disk.contains("personal-teams-assistant 0.9.14")
+    }
 }
 
 impl Platform for Fake {
@@ -924,7 +932,7 @@ impl Platform for Fake {
         let on_disk = self.on_disk();
         self.log(&format!("start {} {}", on_disk, launch.join(",")));
         ensure!(!self.nothing_starts, "cannot start");
-        let new = on_disk.starts_with(NEW);
+        let new = self.new_on_disk();
         ensure!(
             !(new && self.new_never_starts),
             "The application could not be started."
@@ -946,7 +954,7 @@ impl Platform for Fake {
     }
     async fn start_assistant(&self) -> Result<()> {
         self.log("start_assistant");
-        let new = self.on_disk().starts_with(NEW);
+        let new = self.new_on_disk();
         ensure!(
             !(new && self.assistant_fails),
             "the assistant did not start"

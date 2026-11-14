@@ -224,16 +224,22 @@
   // The host's journal of an installation in progress or finished; null before any.
   let updateApply = null;
   let updateUnattended = false;
+  // A new release whose archive for this computer is not attached to it yet (archive installations).
+  let updateArchiveLate = false;
   const updateView = () => {
     if (sharedAccount) return { managed: 'server', running: '0.9.13', can_stage: false, message: 'Updates for this server are applied by its operator; there is nothing to install from here.' };
     const failed = updateState === 'failed';
+    const late = updateArchiveLate && ['idle', 'waiting'].includes(updateState);
     return {
-      managed: 'local', state: updateState, running: '0.9.13', installed: '0.9.13', available: '0.9.14', restart_required: false,
+      managed: 'local', state: updateState, running: '0.9.13', installed: '0.9.13', available: late ? null : '0.9.14', restart_required: false,
       checked_at: 1760000000, check_error: null, dismissed: updateDismissed, install: { supported: true, features: ['gui'], no_default_features: false, target: null },
-      can_stage: !['staging', 'applying'].includes(updateState),
+      can_stage: !['staging', 'applying', 'waiting'].includes(updateState),
+      archive_missing: late ? { version: '0.9.14', since: 1760000000 } : null,
+      waiting_for_archive: updateState === 'waiting' ? { version: '0.9.14', since: 1760000000, until: 1760001800, install: false,
+        message: 'Waiting for the archive of 0.9.14: the release is published, but its archive for this computer is not attached yet. The update goes ahead by itself when it appears, for up to 30 minutes.' } : null,
       can_apply: ['staged', 'deferred'].includes(updateState), apply_unsupported: null, apply: structuredClone(updateApply),
       deferred: updateState === 'deferred' ? { version: '0.9.14', since: 1, reasons: ['A Teams message is being answered or sent.', 'A migration is running.'] } : null,
-      stage: updateState === 'idle' ? null : { version: '0.9.14', state: updateState, phase: 'building', started_at: 1, finished_at: null, progress: { crates: 12, current: 'tokio' },
+      stage: ['idle', 'waiting'].includes(updateState) ? null : { version: '0.9.14', state: updateState, phase: 'building', started_at: 1, finished_at: null, progress: { crates: 12, current: 'tokio' },
         error: failed ? 'Cargo could not build this release. Install a C compiler and linker (for example `build-essential` on Debian and Ubuntu, or Xcode\'s command line tools on macOS) and try again.' : null,
         tail: failed ? ['error: linker `cc` not found'] : [] },
       staged: ['staged', 'deferred'].includes(updateState) ? { version: '0.9.14', staged_at: 2, features: ['gui'], no_default_features: false, target: null, binaries: ['personal-teams-assistant', 'pta'] } : null,
@@ -637,7 +643,8 @@
     machine_upgrade: args => {
       window.__ptaMachineUpgrade = structuredClone(args);
       window.__ptaMachineUpgraded = true;
-      return { outcome: 'staging', target: '0.11.6' };
+      // A machine installed by the install command waits for the new release's archive.
+      return { outcome: 'staging', target: '0.11.6', ...(window.__ptaMachineUpgradeWaits ? { waiting_for_archive: { version: '0.11.6' } } : {}) };
     },
     machine_teams: args => { if (window.__ptaTeamsMachineError) throw new Error('Machine selection failed.'); teamsMachine = args.machine; window.__ptaTeamsMachine = args.machine; return { handover_pending: true }; },
     implementation_request_catalog: args => ({ write_ready: args.provider === 'azure' ? azureCli().authenticated : githubCli().authenticated, azure_cli: args.provider === 'azure' ? azureCli() : null, github_cli: args.provider === 'github' ? githubCli() : null, targets: requestTargets(args), recent: requestTargets(args).slice(0, 3).reverse(), providers: providers.providers.filter(p => p.transport === 'cli' && p.available) }),
@@ -829,7 +836,7 @@
     crate_update_check: () => structuredClone(updateView()),
     crate_update_stage: args => {
       window.__ptaUpdateCalls.push({ method: 'stage', ...args });
-      updateState = 'staging';
+      updateState = updateArchiveLate ? 'waiting' : 'staging';
       return structuredClone(updateView());
     },
     crate_update_apply: args => {
@@ -841,7 +848,7 @@
     },
     crate_update_cancel: () => {
       window.__ptaUpdateCalls.push({ method: 'cancel' });
-      updateState = 'staged';
+      updateState = updateState === 'waiting' ? 'idle' : 'staged';
       return structuredClone(updateView());
     },
     crate_update_unattended: args => {
@@ -1128,6 +1135,7 @@
   // `apply` is the journal's description; the top-level state is the host's.
   window.__ptaUpdateSet = (state, apply) => { updateState = state; updateApply = apply ? { from: '0.9.13', to: '0.9.14', started_at: 1, finished_at: 2, error: null, data_restored: false, notes: [], ...apply } : null; };
   window.__ptaUpdateFail = () => { updateState = 'failed'; updateApply = null; };
+  window.__ptaUpdateArchiveLate = late => { updateArchiveLate = late; };
   window.__ptaVariableCreates = [];
   window.__ptaConsumerCalls = [];
   window.__ptaDeliveryCalls = [];
