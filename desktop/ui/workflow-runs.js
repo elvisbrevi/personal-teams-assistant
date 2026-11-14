@@ -143,10 +143,15 @@ function runLinkFor(item) {
   return button;
 }
 
+/** A run in a stage that takes one of the `concurrency` slots, without one: its place in the line (1 is next). */
+function slotBadge(run) {
+  return run.waiting_for_slot ? badge(t('Waiting for a slot, position {n}', { n: run.queue_position }), 'muted') : null;
+}
+
 function runRow(run) {
   const row = el('button', { type: 'button', class: `resource run-row ${WAITING.includes(run.state) ? 'waits' : ''}`, 'data-run': run.id, 'data-state': run.state },
     el('div', { class: 'resource-head' }, badge(runStateLabel(run.state), tone(run.state)), el('strong', { class: 'title', textContent: `#${run.item.id} · ${run.item.title}` }), el('span', { class: 'grow' }),
-      WAITING.includes(run.state) ? badge(t('Waits for you'), 'warn') : null),
+      slotBadge(run), WAITING.includes(run.state) ? badge(t('Waits for you'), 'warn') : null),
     el('p', { class: 'resource-facts' }, el('span', { textContent: run.attention ? tx(run.attention).slice(0, 160) : tx(run.item.kind) }),
       el('small', { textContent: [workflowName(run.workflow), tn(run.children ?? 0, '1 child', '{n} children'), t('Updated {time}', { time: when(run.updated_at) })].join(' · ') })));
   row.onclick = () => openWorkflowRun(run.id, row);
@@ -240,7 +245,7 @@ function renderRunDetail(run, sessions) {
     return open;
   };
   const head = el('div', { class: 'run-head' },
-    badge(runStateLabel(run.state), tone(run.state)), badge(workflowName(run.workflow), 'muted'), el('span', { class: 'grow' }), link(t('Open the work item'), run.item.url));
+    badge(runStateLabel(run.state), tone(run.state)), slotBadge(run), badge(workflowName(run.workflow), 'muted'), el('span', { class: 'grow' }), link(t('Open the work item'), run.item.url));
   const facts = el('dl', { class: 'todo-fields' },
     ...[[t('Type'), tx(run.item.kind)], [t('Project'), run.item.project], [t('Started at'), when(run.created_at)], [t('Last change'), when(run.updated_at)],
       ...(run.finished_at ? [[t('Finished at'), when(run.finished_at)]] : []),

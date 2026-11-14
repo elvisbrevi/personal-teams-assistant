@@ -111,16 +111,14 @@ impl State {
                 | State::Blocks
         )
     }
-    /// The stages that take one of the `concurrency` slots: those where an agent works or the
-    /// run is about to act. Waiting for the user's review or for pull requests takes none.
+    /// The stages that take one of the `concurrency` slots: those where a coding or planning
+    /// agent works or the run is about to act. Waiting for the user's review or for pull
+    /// requests takes none, and neither does classifying (a short read-only director session,
+    /// bounded on its own by the engine).
     pub(in crate::app) fn takes_slot(self) -> bool {
         matches!(
             self,
-            State::Classifying
-                | State::Planning
-                | State::CreatingChildren
-                | State::Coding
-                | State::Blocks
+            State::Planning | State::CreatingChildren | State::Coding | State::Blocks
         )
     }
 }
@@ -301,8 +299,7 @@ pub(in crate::app) struct Run {
     /// `ledger_parent`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<String>,
-    /// While classifying: the director could not be reached; it is asked again from then on,
-    /// without a slot meanwhile.
+    /// While classifying: the director could not be reached; it is asked again from then on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_at: Option<i64>,
     /// How many times in a row the director could not be reached (the wait doubles).
@@ -388,6 +385,11 @@ impl Run {
     /// Move to the next stage (or to `done`), closing the current one with `outcome`.
     pub(in crate::app) fn advance(&mut self, next: State, now: i64, outcome: &str) {
         self.close(now, outcome);
+        // A slot is kept only from one stage that takes it to the next; any other run waits in
+        // the line for one, in its place by creation.
+        if !(self.state.takes_slot() && next.takes_slot()) {
+            self.admitted = false;
+        }
         self.state = next;
         self.stopped_in = None;
         self.attention = None;
@@ -401,9 +403,6 @@ impl Run {
                 finished_at: None,
                 outcome: None,
             });
-        }
-        if !next.takes_slot() {
-            self.admitted = false;
         }
         if next == State::Done {
             self.timeline.push(Stage {
@@ -451,6 +450,10 @@ impl Run {
             _ => None,
         }
     }
+    /// It waits in the line for a slot: in a stage that takes one, without one.
+    pub(in crate::app) fn waits_for_slot(&self) -> bool {
+        self.state.takes_slot() && !self.admitted
+    }
     /// The run as the operations show it: the whole record, with the stage it is in.
     pub(in crate::app) fn view(&self) -> Value {
         let mut value = serde_json::to_value(self).unwrap_or_default();
@@ -479,6 +482,43 @@ impl Run {
             "finished_at": self.finished_at,
         })
     }
+}
+
+/// The line for the `concurrency` slots, from `runs` oldest first (`Store::list` reversed):
+/// every run waiting for a slot, in creation order, and in its place a classifying run that is
+/// not waiting out a retry, which will need one once classified. A run that gave a slot back
+/// keeps its place, so a run created later never passes it.
+pub(in crate::app) fn line(runs: &[Run], now: i64) -> Vec<&Run> {
+    runs.iter()
+        .filter(|r| {
+            r.waits_for_slot()
+                || (r.state == State::Classifying && r.retry_at.is_none_or(|at| at <= now))
+        })
+        .collect()
+}
+
+/// Whether run `id` takes a slot now: fewer runs are ahead of it in the line than slots are
+/// free.
+pub(in crate::app) fn may_take_slot(runs: &[Run], id: &str, concurrency: usize, now: i64) -> bool {
+    let taken = runs
+        .iter()
+        .filter(|r| r.admitted && r.state.takes_slot() && r.id != id)
+        .count();
+    let free = concurrency.saturating_sub(taken);
+    line(runs, now)
+        .iter()
+        .position(|r| r.id == id)
+        .is_some_and(|ahead| ahead < free)
+}
+
+/// The place of each run waiting for a slot (1 is next), by run ID.
+pub(in crate::app) fn positions(runs: &[Run], now: i64) -> HashMap<String, usize> {
+    line(runs, now)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, r)| r.waits_for_slot())
+        .map(|(at, r)| (r.id.clone(), at + 1))
+        .collect()
 }
 
 fn is_zero(value: &u32) -> bool {
