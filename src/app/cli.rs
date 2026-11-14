@@ -521,7 +521,12 @@ Knowledge
                            comments and history, its pull requests and branches; the supervisor's
                            assessment, report checks (not_verified marks what code could not confirm),
                            drafts and proposed actions are stored on the run. One look at a time.
+  workflows supervise --audit [--since TIME]
+                           An audit of the runs created since the last audit (or TIME, RFC 3339):
+                           each run's item, state, pull requests and unverified claims, the merged
+                           branches that still exist, and the findings left only in comments.
   workflows supervision RUN              The supervisor's looks at the run, and any queued or running.
+  workflows audits [ID|latest]           The supervisor's audits, or one of them.
   workflows act RUN LOOK ACTION [--note TEXT | --note-file PATH] [--chat ID] [--mention NAME…] --confirmed
                            Carries out one action a look proposed (its id, a1…, or name), once, through
                            the operation that does it: restart (with the drafted note, or yours),
@@ -1513,8 +1518,19 @@ async fn workflows_command(args: &[String]) -> Result<Reply> {
                 Err(reply) => return Ok(reply),
             }
         }
+        (Some("supervise"), _) if args.iter().any(|a| a == "--audit") => {
+            let mut body = json!({"audit":true});
+            if let Some(since) = option(args, "--since") {
+                body["since"] = json!(since);
+            }
+            ("workflow_supervise", body)
+        }
         (Some("supervise"), _) => ("workflow_supervise", json!({"run":id(2)?})),
         (Some("supervision"), _) => ("workflow_supervision", json!({"run":id(2)?})),
+        (Some("audits"), _) => match words.get(2) {
+            Some(id) => ("workflow_supervision", json!({"audit":id})),
+            None => ("workflow_supervision", json!({"audits":true})),
+        },
         (Some("act"), _) => {
             let mut body = json!({"run":id(2)?,"look":id(3)?,"action":id(4)?});
             match (option(args, "--note"), option(args, "--note-file")) {
@@ -2352,7 +2368,8 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | "--forget-service-token"
             | "--director"
             | "--ahead"
-            | "--back" => {}
+            | "--back"
+            | "--audit" => {}
             "--destination" | "--name" | "--existing" | "--to" | "--target" | "--label"
             | "--token-expires" | "--keep" | "--machine" | "--since" | "--until" | "--before"
             | "--from" | "--chat" | "--query" | "--wiki" | "--author" | "--project"
@@ -2681,6 +2698,8 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
                 _
             ]
             | ["workflows", "act" | "dismiss", _, _, _]
+            | ["workflows", "audits"]
+            | ["workflows", "audits", _]
             | ["workflows", "show" | "remove" | "enable" | "disable", _]
             | ["workflows", "blocks", "list" | "save"]
             | ["workflows", "blocks", "remove", _]
@@ -2690,6 +2709,9 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | ["index", "status" | "refresh"]
             | ["index", "refresh", _]
     );
+    // An audit is asked without a run, a look with one.
+    let valid = valid
+        || (p.as_slice() == ["workflows", "supervise"] && args.iter().any(|a| a == "--audit"));
     ensure!(valid, "unknown command or invalid argument count");
     for (flag, allowed) in [
         ("--offline", p[0] == "doctor"),
@@ -2929,7 +2951,8 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             "--since",
             p.as_slice().starts_with(&["teams", "messages"])
                 || p.as_slice().starts_with(&["teams", "search"])
-                || p.as_slice() == ["audit", "list"],
+                || p.as_slice() == ["audit", "list"]
+                || p.as_slice() == ["workflows", "supervise"],
         ),
         (
             "--until",
@@ -2990,6 +3013,7 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             "--ahead",
             matches!(p.as_slice(), ["workflows", "requeue", _]),
         ),
+        ("--audit", p.as_slice() == ["workflows", "supervise"]),
         (
             "--back",
             matches!(p.as_slice(), ["workflows", "requeue", _]),
@@ -4598,6 +4622,9 @@ mod wiki_tests {
             &["workflows", "unpause", "--sessions", "finish"],
             &["workflows", "supervise"],
             &["workflows", "supervise", "r", "--note", "x"],
+            &["workflows", "supervise", "r", "--audit"],
+            &["workflows", "audits", "a", "b"],
+            &["workflows", "runs", "--audit"],
             &["workflows", "act", "r", "look"],
             &["workflows", "dismiss", "r", "look", "a1", "--confirmed"],
             &["workflows", "requeue", "r", "--confirmed"],
@@ -4631,6 +4658,16 @@ mod wiki_tests {
                 "n.md",
             ],
             &["workflows", "dismiss", "r", "look", "a2"],
+            &["workflows", "supervise", "--audit"],
+            &[
+                "workflows",
+                "supervise",
+                "--audit",
+                "--since",
+                "2026-11-10T00:00:00Z",
+            ],
+            &["workflows", "audits"],
+            &["workflows", "audits", "latest"],
             &["workflows", "requeue", "r", "--ahead"],
             &["workflows", "requeue", "r", "--back"],
         ] {

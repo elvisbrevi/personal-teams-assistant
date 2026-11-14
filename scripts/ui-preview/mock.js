@@ -570,7 +570,7 @@
         return { workflow: structuredClone(workflow), saved: true, warnings: [] };
       }
       const workflow = structuredClone(args.workflow);
-      if (workflow.allow?.length && !args.confirmed) throw new Error(`[invalid_input] Confirm with the user, then save with confirmed: true. Save workflow ${workflow.id}?`);
+      if ((workflow.allow?.length || workflow.preapprove?.length) && !args.confirmed) throw new Error(`[invalid_input] Confirm with the user, then save with confirmed: true. Save workflow ${workflow.id}?`);
       for (const [id, dir] of Object.entries(workflow.checkouts)) {
         const name = workflow.repositories.find(r => r.id.toLowerCase() === id)?.name;
         if (dir.includes('documentation')) throw new Error(`The origin of ${dir} (${org}/${workflow.project}/_git/handbook) names another repository than ${name}.`);

@@ -75,6 +75,9 @@ struct RestartArgs {
     /// The note is the workflow supervisor's draft, unedited (never from the arguments).
     #[serde(skip)]
     drafted: bool,
+    /// The supervisor restarts it as the workflow pre-approved (never from the arguments).
+    #[serde(skip)]
+    preapproved: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -622,6 +625,7 @@ async fn restart(host: &Arc<Host>, args: RestartArgs, azure: &Azure) -> Result<V
     let mut next = Run::new(item, now);
     next.continues = Some(run.id.clone());
     next.handover_drafted = args.drafted && note.is_some();
+    next.preapproved_restart = args.preapproved;
     next.handover = note;
     next.classification = Some(json!({"workflow":workflow.id,"outcome":"restarted"}));
     engine::assign(&mut next, workflow, &map.workflow_blocks, now, "restarted");
@@ -653,6 +657,7 @@ pub(super) async fn restart_drafted(
     host: &Arc<Host>,
     run: &str,
     note: &str,
+    preapproved: bool,
     azure: &Azure,
 ) -> Result<Value, String> {
     let args = RestartArgs {
@@ -660,6 +665,7 @@ pub(super) async fn restart_drafted(
         note: Some(note.to_owned()),
         confirmed: true,
         drafted: true,
+        preapproved,
     };
     restart(host, args, azure).await
 }

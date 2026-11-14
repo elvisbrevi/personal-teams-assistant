@@ -116,6 +116,65 @@ pub fn describe_allow(allow: &[Allow]) -> String {
     )
 }
 
+/// An action the workflow supervisor may carry out for a workflow's runs without asking.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Preapproved {
+    /// Restart a run whose coding session was cut, with the supervisor's drafted handover.
+    RestartAfterCut,
+    /// Post the supervisor's drafted summary of a stopped run to the chat named here.
+    PostSummary,
+}
+impl Preapproved {
+    pub const ALL: [Preapproved; 2] = [Preapproved::RestartAfterCut, Preapproved::PostSummary];
+    pub fn word(self) -> &'static str {
+        match self {
+            Preapproved::RestartAfterCut => "restart_after_cut",
+            Preapproved::PostSummary => "post_summary",
+        }
+    }
+}
+
+/// One pre-approved action, as the person confirmed it when saving the workflow: a post names
+/// its chat and mentions; the model never chooses them.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Preapproval {
+    pub action: Preapproved,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<Chat>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<String>,
+}
+
+/// What a workflow's `preapprove` lets the supervisor do without asking, as a person confirms
+/// it; empty when it pre-approves nothing.
+pub fn describe_preapprove(preapprove: &[Preapproval]) -> String {
+    let effects: Vec<String> = preapprove
+        .iter()
+        .map(|p| match p.action {
+            Preapproved::RestartAfterCut => "restart a run whose coding session was cut (the stream ended, a line was over the limit, the time limit, a host restart or an offline machine) with its drafted handover note, once and never for a run it restarted itself".to_owned(),
+            Preapproved::PostSummary => format!(
+                "post its drafted summary of a stopped run, as you, to the Teams chat {} ({}), mentioning {}, once per look",
+                p.chat.as_ref().map(|c| c.name.as_str()).unwrap_or("?"),
+                p.chat.as_ref().map(|c| c.id.as_str()).unwrap_or("?"),
+                if p.mentions.is_empty() {
+                    "nobody".to_owned()
+                } else {
+                    p.mentions.join(", ")
+                }
+            ),
+        })
+        .collect();
+    if effects.is_empty() {
+        return String::new();
+    }
+    format!(
+        "the workflow supervisor may, without asking, {}",
+        effects.join("; and ")
+    )
+}
+
 /// A saved recipe for implementing items of one Azure DevOps project.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -150,6 +209,10 @@ pub struct Workflow {
     /// saving a workflow that allows anything needs the user's confirmation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<Allow>,
+    /// What the workflow supervisor may do for its runs without asking (none by default);
+    /// saving a workflow that pre-approves anything needs the user's confirmation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preapprove: Vec<Preapproval>,
     /// When it last changed (Unix seconds); set by the host when it is saved.
     #[serde(default)]
     pub updated_at: i64,
@@ -494,6 +557,47 @@ pub fn validate_workflow(workflow: &Workflow) -> Result<()> {
         workflow.allow.iter().collect::<BTreeSet<_>>().len() == workflow.allow.len(),
         "Workflow {id} lists each allowed action once (work_items, teams, merge, deploy)."
     );
+    ensure!(
+        workflow
+            .preapprove
+            .iter()
+            .map(|p| p.action)
+            .collect::<BTreeSet<_>>()
+            .len()
+            == workflow.preapprove.len(),
+        "Workflow {id} pre-approves each action once (restart_after_cut, post_summary)."
+    );
+    for entry in &workflow.preapprove {
+        match entry.action {
+            Preapproved::RestartAfterCut => ensure!(
+                entry.chat.is_none() && entry.mentions.is_empty(),
+                "Workflow {id}'s restart_after_cut takes no chat or mentions."
+            ),
+            Preapproved::PostSummary => {
+                let chat = entry.chat.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Workflow {id}'s post_summary needs its chat (ID and name), as pta teams chats lists it."
+                    )
+                })?;
+                ensure!(
+                    crate::adapters::teams::canonical_resource(&format!(
+                        "chats/{}/messages/0",
+                        chat.id
+                    ))
+                    .is_ok()
+                        && line(&chat.name, 200),
+                    "Workflow {id}'s post_summary needs a chat ID as pta teams chats lists it and the chat's name (at most 200 characters)."
+                );
+                ensure!(
+                    entry.mentions.len() <= MAX_MENTIONS
+                        && entry.mentions.iter().all(|m| mention_name(m))
+                        && entry.mentions.iter().collect::<BTreeSet<_>>().len()
+                            == entry.mentions.len(),
+                    "Workflow {id}'s post_summary mentions at most {MAX_MENTIONS} different members by display name (at most {MAX_MENTION} characters each, without a closing bracket)."
+                );
+            }
+        }
+    }
     ensure!(workflow.updated_at >= 0, "Invalid date in workflow {id}.");
     Ok(())
 }
@@ -1086,6 +1190,71 @@ pub(crate) mod tests {
         let back = crate::knowledge::KnowledgeMap::parse(&text).unwrap();
         assert_eq!(toml::to_string(&back).unwrap(), text);
         assert_eq!(back.workflows, map.workflows);
+    }
+
+    #[test]
+    fn preapprove_is_left_out_while_empty_and_a_post_names_its_chat() {
+        let mut w = workflow("payments");
+        // A map without it loads, and one is written without it while it is empty.
+        assert!(!toml::to_string(&w).unwrap().contains("preapprove"));
+        let text = toml::to_string(&w).unwrap();
+        assert_eq!(
+            toml::from_str::<Workflow>(&text).unwrap().preapprove,
+            vec![]
+        );
+        let chat = Chat {
+            id: "19:team@thread.v2".into(),
+            name: "Equipo".into(),
+        };
+        w.preapprove = vec![
+            Preapproval {
+                action: Preapproved::RestartAfterCut,
+                chat: None,
+                mentions: vec![],
+            },
+            Preapproval {
+                action: Preapproved::PostSummary,
+                chat: Some(chat.clone()),
+                mentions: vec!["Ana Pérez".into()],
+            },
+        ];
+        assert!(validate_workflow(&w).is_ok());
+        let text = toml::to_string(&w).unwrap();
+        assert_eq!(toml::from_str::<Workflow>(&text).unwrap(), w);
+        let described = describe_preapprove(&w.preapprove);
+        assert!(
+            described.contains("restart a run whose coding session was cut"),
+            "{described}"
+        );
+        assert!(
+            described.contains("Equipo") && described.contains("mentioning Ana Pérez"),
+            "{described}"
+        );
+        assert_eq!(describe_preapprove(&[]), "");
+        // Each once; a post needs its chat; a restart takes none; mentions are names.
+        let mut twice = w.clone();
+        twice.preapprove.push(w.preapprove[0].clone());
+        assert!(validate_workflow(&twice).is_err());
+        let mut chatless = w.clone();
+        chatless.preapprove[1].chat = None;
+        assert!(
+            validate_workflow(&chatless)
+                .unwrap_err()
+                .to_string()
+                .contains("needs its chat")
+        );
+        let mut restart_with_chat = w.clone();
+        restart_with_chat.preapprove[0].chat = Some(chat);
+        assert!(validate_workflow(&restart_with_chat).is_err());
+        let mut bracket = w.clone();
+        bracket.preapprove[1].mentions = vec!["Ana]".into()];
+        assert!(validate_workflow(&bracket).is_err());
+        let unknown = serde_json::from_value::<Workflow>(serde_json::json!({
+            "id": "w", "name": "W", "organization": "https://dev.azure.com/example",
+            "project": "P", "machine": MACHINE, "agent": {"provider": "codex", "model": "m", "effort": "low"},
+            "preapprove": [{"action": "merge"}]
+        }));
+        assert!(unknown.is_err());
     }
 
     #[test]

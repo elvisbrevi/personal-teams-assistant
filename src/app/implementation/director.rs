@@ -219,6 +219,7 @@ pub(in crate::app) async fn ask(host: &Arc<Host>, ask: Ask<'_>) -> Result<Answer
         crate::llm::implementation::DirectTask::Classify => "classification",
         crate::llm::implementation::DirectTask::Summarize => "summary",
         crate::llm::implementation::DirectTask::Supervise => "supervision",
+        crate::llm::implementation::DirectTask::Audit => "audit",
     };
     let record = json!({"id":id,"machine":ask.machine,"purpose":purpose,"project":item.project,"kind":item.kind,"provider":director.provider,"model":director.model,"effort":director.effort,"state":"generating","created_at":now_text(),"started_at":null,"finished_at":null,"session_id":null,"item":item,"output":"","permission_mode":crate::llm::implementation::permission_mode(&director.provider, true)});
     state.db.request_insert(&record)?;

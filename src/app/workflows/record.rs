@@ -391,6 +391,10 @@ pub(in crate::app) struct Run {
     /// get it as the supervisor's untrusted text, not as the person's note.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handover_drafted: bool,
+    /// The workflow supervisor restarted the run this one continues, as its workflow
+    /// pre-approved: a pre-approved restart is never made of this run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preapproved_restart: bool,
     /// The workflow supervisor's looks at this run (`supervisor::Look`), oldest first, at most
     /// `supervisor::MAX_LOOKS`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -444,6 +448,7 @@ impl Run {
             restarted_as: None,
             handover: None,
             handover_drafted: false,
+            preapproved_restart: false,
             supervision: Vec::new(),
             ahead_since: None,
             created_at: now,

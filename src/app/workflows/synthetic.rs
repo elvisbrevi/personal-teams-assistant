@@ -132,7 +132,7 @@ impl Catalog {
         if let Some(detail) = self.items.lock().unwrap().get_mut(&id) {
             detail.comments.push(crate::tools::todo::Comment {
                 author: author.into(),
-                created_at: Some("2026-11-10T10:00:00Z".into()),
+                created_at: Some(chrono::Utc::now().to_rfc3339()),
                 modified_at: None,
                 text: text.into(),
                 format: "markdown".into(),

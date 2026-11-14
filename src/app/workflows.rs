@@ -145,6 +145,7 @@ fn require_coordinator(state: &DesktopState) -> Result<(), String> {
 fn shown(workflow: &Workflow) -> Value {
     let mut value = serde_json::to_value(workflow).unwrap_or_default();
     value["allow"] = json!(workflow.allow);
+    value["preapprove"] = json!(workflow.preapprove);
     value
 }
 
@@ -191,6 +192,25 @@ fn fits(workflow: &Workflow, blocks: &[Block]) -> Result<(), String> {
 }
 
 /// What a workflow larger than older hosts accept means for the account's other computers.
+/// A workflow that pre-approves anything is refused by a host from before the supervisor
+/// (`deny_unknown_fields`): the save names the machines of the account that report one.
+async fn older_supervisors(host: &Arc<Host>, workflow: &Workflow) -> Option<String> {
+    if workflow.preapprove.is_empty() {
+        return None;
+    }
+    let older = implementation::machines_before_supervisor(host)
+        .await
+        .unwrap_or_default();
+    (!older.is_empty()).then(|| {
+        format!(
+            "Workflow {} pre-approves actions of the workflow supervisor, which {} cannot read: until updated, {} the account's configuration while this workflow is in it.",
+            workflow.id,
+            older.join(", "),
+            if older.len() == 1 { "it refuses" } else { "they refuse" }
+        )
+    })
+}
+
 async fn older_hosts(host: &Arc<Host>, workflow: &Workflow) -> Option<String> {
     let characters = workflow.instructions.chars().count();
     if characters <= core::OLDER_MAX_INSTRUCTIONS
@@ -223,12 +243,22 @@ async fn older_hosts(host: &Arc<Host>, workflow: &Workflow) -> Option<String> {
 /// rules allow is saved; none when it allows nothing.
 pub(super) fn describe_workflow(workflow: &Workflow) -> Option<String> {
     let lifted = core::describe_allow(&workflow.allow);
-    (!lifted.is_empty()).then(|| {
-        format!(
-            "Save workflow {}? In every run it starts (also those that start by themselves), {lifted}, when its instructions ask for it. Its planning run, and every run without this workflow, keep every prohibition.",
-            workflow.id
-        )
-    })
+    let preapproved = core::describe_preapprove(&workflow.preapprove);
+    if lifted.is_empty() && preapproved.is_empty() {
+        return None;
+    }
+    let mut text = format!("Save workflow {}?", workflow.id);
+    if !lifted.is_empty() {
+        text.push_str(&format!(
+            " In every run it starts (also those that start by themselves), {lifted}, when its instructions ask for it. Its planning run, and every run without this workflow, keep every prohibition."
+        ));
+    }
+    if !preapproved.is_empty() {
+        text.push_str(&format!(
+            " For its runs, {preapproved}; code checks every condition first, and anything else the supervisor proposes waits for you."
+        ));
+    }
+    Some(text)
 }
 
 /// What a person confirms before a block that acts is saved.
@@ -439,6 +469,7 @@ async fn save(host: &Arc<Host>, args: SaveArgs) -> Result<Value, String> {
             // Refuses checkouts keyed twice by one repository, then keys them in lowercase.
             core::validate_workflow(&workflow).map_err(invalid)?;
             workflow.allow.sort();
+            workflow.preapprove.sort_by_key(|p| p.action);
             // Lifting a fixed rule of its coding agents is the user's decision, confirmed with
             // what it lets them do.
             if let Some(question) = describe_workflow(&workflow)
@@ -458,6 +489,12 @@ async fn save(host: &Arc<Host>, args: SaveArgs) -> Result<Value, String> {
             core::validate(&candidate.workflows, &candidate.workflow_blocks).map_err(invalid)?;
             fits(&workflow, &candidate.workflow_blocks)?;
             let mut warnings = verify(host, &mut workflow).await?;
+            // A pre-approved post goes only to a chat the user belongs to.
+            for entry in &workflow.preapprove {
+                if let Some(chat) = &entry.chat {
+                    warnings.extend(verify_chat(state, &chat.id).await?);
+                }
+            }
             let saved = workflow.clone();
             // Again with the directories as the machine spells them and the blocks as they are now.
             let used = change(host, |map| {
@@ -468,6 +505,7 @@ async fn save(host: &Arc<Host>, args: SaveArgs) -> Result<Value, String> {
             })
             .await?;
             warnings.extend(older_hosts(host, &saved).await);
+            warnings.extend(older_supervisors(host, &saved).await);
             Ok(json!({"workflow":shown(&saved),"saved":true,"usage":used,"warnings":warnings}))
         }
         _ => Err(invalid(
