@@ -1,2 +1,9 @@
 # Synthetic destination fingerprint in the GUI preview mock (not a credential); the value was replaced later.
 b57533a7ad4256ed8e09318d57cb2eff89891c45:scripts/ui-preview/mock.js:generic-api-key:473
+# Synthetic secrets in the tests of the agent sessions reader: they assert that such lines never
+# reach a summary. The lines carry `gitleaks:allow` now; these are their earlier commits.
+afd10f95bb2e008471b2df32f2e7b505764bffb6:src/sessions/tests.rs:curl-auth-user:860
+7bf6fd774ef8670d15d88b14b92a568faf4ef46b:src/sessions/tests.rs:generic-api-key:518
+25d08ba2aa8a12507b96c7cd0bc88eb35d3bc580:tests/agent_sessions.rs:generic-api-key:30
+25d08ba2aa8a12507b96c7cd0bc88eb35d3bc580:src/sessions/tests.rs:generic-api-key:198
+25d08ba2aa8a12507b96c7cd0bc88eb35d3bc580:src/sessions/tests.rs:generic-api-key:200

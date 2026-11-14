@@ -195,9 +195,9 @@ fn the_most_recent_sessions_across_the_three_clis_come_newest_first() {
 fn secrets_never_reach_a_summary_or_its_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let roots = roots(dir.path());
-    let token = "tok_9fK2pQ7xL4mN8vR3sT6wY1zA5bC0dE2gH7jK";
+    let token = "tok_9fK2pQ7xL4mN8vR3sT6wY1zA5bC0dE2gH7jK"; // gitleaks:allow
     let connection =
-        "Server=tcp:db.example.test,1433;Database=pay;User Id=app;Password=Synthetic-Pass-123;";
+        "Server=tcp:db.example.test,1433;Database=pay;User Id=app;Password=Synthetic-Pass-123;"; // gitleaks:allow
     let key = format!(
         "-----BEGIN {} KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\nsyntheticline\n-----END {} KEY-----",
         "PRIVATE", "PRIVATE"
@@ -515,7 +515,7 @@ fn secrets_in_every_shape_never_reach_a_summary() {
     let kept = scrubber.scrub(&text);
     assert_eq!(kept, "Before. After.");
     let open = scrubber.pending(
-        "Rotated most of them.\nexport API_KEY=sk-live-abc.def123 is still not yet rotated\nThe deploy is still pending.",
+        "Rotated most of them.\nexport API_KEY=sk-live-abc.def123 is still not yet rotated\nThe deploy is still pending.", // gitleaks:allow
     );
     assert_eq!(open, "The deploy is still pending");
     // Ordinary words are kept.
@@ -857,7 +857,7 @@ fn secret_values_in_common_shapes_are_dropped() {
         "pass: Hunter2",
         "key: AbCd1234",
         "mysql -u root -pHunter2",
-        "curl -u admin:Hunter2 https://x",
+        "curl -u admin:Hunter2 https://x", // gitleaks:allow
     ] {
         let kept = scrubber.scrub(&format!("Before.\n{text}\nAfter."));
         assert_eq!(kept, "Before. After.", "{text}");

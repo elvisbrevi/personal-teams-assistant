@@ -27,7 +27,7 @@ use std::{
 
 const TOKEN: &str = "tok_9fK2pQ7xL4mN8vR3sT6wY1zA5bC0dE2gH7jK";
 const CONNECTION: &str =
-    "Server=tcp:db.example.test,1433;Database=pay;User Id=app;Password=Synthetic-Pass-123;";
+    "Server=tcp:db.example.test,1433;Database=pay;User Id=app;Password=Synthetic-Pass-123;"; // gitleaks:allow
 
 /// Synthetic Claude Code and Codex sessions, written once for every test of this binary, read
 /// as this computer's and joined by an offline machine.
