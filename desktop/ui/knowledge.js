@@ -164,8 +164,8 @@ function renderResources() {
       const shown = el('div', { class: 'list session-preview', 'aria-live': 'polite' });
       const preview = el('button', { type: 'button', class: 'secondary small', textContent: t('Show what it reads') });
       preview.onclick = () => busy(preview, async () => renderSessionPreview(shown, await invoke('implementation_recent_sessions', { limit: resource.tool.sessions ?? 10 })));
-      actions.unshift(preview);
-      edit.insertBefore(el('label', {}, t('Sessions to read'), el('small', { textContent: t('Newest first across Claude Code, Codex and OpenCode, at most 50.') }), count), edit.lastElementChild);
+      edit.querySelector('.actions').prepend(preview);
+      edit.insertBefore(el('label', {}, t('Sessions to read'), el('small', { textContent: t('Newest first across Claude Code, Codex and OpenCode, at most 50. A session whose requests contain #private is never read.') }), count), edit.lastElementChild);
       edit.append(shown);
     }
     if (resource.kind === 'urls' || Array.isArray(resource.tool?.page_urls)) {

@@ -520,7 +520,7 @@ fn newest(
             }
         }
     }
-    found.sort_by(|a, b| b.1.cmp(&a.1));
+    found.sort_by_key(|f| std::cmp::Reverse(f.1));
     found.truncate(count);
     Ok(found)
 }
@@ -607,7 +607,10 @@ fn claude(root: &Path, limit: usize, scrubber: &Scrubber) -> Result<Vec<Summary>
             {
                 parsed.cwd = cwd.into();
             }
-            if let Some(id) = line["sessionId"].as_str() {
+            // The file is named after the session; a resumed one may carry older IDs inside.
+            if let Some(id) = line["sessionId"].as_str()
+                && parsed.id.is_empty()
+            {
                 parsed.id = id.into();
             }
             let user = match line["type"].as_str() {
@@ -756,7 +759,7 @@ fn opencode(root: &Path, limit: usize, scrubber: &Scrubber) -> Result<Vec<Summar
             .filter_map(|e| read(&e.path()))
             .collect();
         entries.sort_by_key(|m| m["time"]["created"].as_i64().unwrap_or_default());
-        for message in entries {
+        for message in first_and_last(entries) {
             let Some(message_id) = message["id"].as_str().filter(|i| !i.contains(['/', '\\']))
             else {
                 continue;
@@ -790,6 +793,15 @@ fn opencode(root: &Path, limit: usize, scrubber: &Scrubber) -> Result<Vec<Summar
         }
     }
     Ok(sessions)
+}
+/// The messages a summary reads: the first ones (the request) and the latest ones.
+fn first_and_last<T>(mut messages: Vec<T>) -> Vec<T> {
+    const FIRST: usize = 10;
+    const LAST: usize = 60;
+    if messages.len() > FIRST + LAST {
+        messages.drain(FIRST..messages.len() - LAST);
+    }
+    messages
 }
 /// The text parts of an OpenCode message the user or the model wrote (not synthetic ones).
 fn opencode_text(parts: &[Value]) -> String {
@@ -859,7 +871,7 @@ fn opencode_database(path: &Path, limit: usize, scrubber: &Scrubber) -> Result<V
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        for (message_id, at, data) in found {
+        for (message_id, at, data) in first_and_last(found) {
             let data: Value = serde_json::from_str(&data).unwrap_or_default();
             let mut statement =
                 db.prepare("SELECT data FROM part WHERE message_id = ?1 ORDER BY id LIMIT 500")?;

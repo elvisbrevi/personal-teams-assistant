@@ -2775,7 +2775,7 @@ const UI_CATALOG = { es: {
   "The {n} most recent sessions of your coding agents, on every machine of your account": "Las {n} sesiones más recientes de tus agentes de código, en cada máquina de tu cuenta",
   "Show what it reads": "Ver lo que lee",
   "Sessions to read": "Sesiones que lee",
-  "Newest first across Claude Code, Codex and OpenCode, at most 50.": "Las más recientes primero, entre Claude Code, Codex y OpenCode; como máximo 50.",
+  "Newest first across Claude Code, Codex and OpenCode, at most 50. A session whose requests contain #private is never read.": "Las más recientes primero, entre Claude Code, Codex y OpenCode; como máximo 50. Nunca se lee una sesión cuyos pedidos contengan #private.",
   "offline": "sin conexión",
   "needs an update": "necesita actualizarse",
   "did not answer": "no respondió",

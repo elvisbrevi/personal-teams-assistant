@@ -396,7 +396,7 @@ impl Pipeline {
             // No question covers it; the user's working sessions may already be on it.
             let context = self.history(&message, &mut audit, &mut history).await;
             sessions_answer = self
-                .from_agent_sessions(
+                .answer_from_sessions(
                     resource,
                     &message,
                     &current,
@@ -2317,7 +2317,7 @@ impl Pipeline {
     /// alone. `None` leaves the message as it was: no such source, no session read, or none
     /// about it. The tail of `run` checks and sends it like any other answer.
     #[allow(clippy::too_many_arguments)]
-    async fn from_agent_sessions(
+    async fn answer_from_sessions(
         &self,
         resource: &str,
         message: &crate::adapters::teams::IncomingMessage,
