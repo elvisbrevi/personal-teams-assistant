@@ -626,7 +626,9 @@ pub(crate) async fn execute(
     .await
 }
 
-struct ProcessTree(u32);
+/// Ends a process and everything it started when dropped: its process group on Unix (the
+/// process must have been started in a group of its own), its tree on Windows.
+pub(crate) struct ProcessTree(pub(crate) u32);
 impl Drop for ProcessTree {
     fn drop(&mut self) {
         #[cfg(unix)]

@@ -244,7 +244,7 @@ fn list(host: &Host, link: &Link, launchers: bool) -> std::result::Result<Value,
                         "variable": found.map(|v| json!({"name":v.name,"version":v.version}))})
                 })
                 .collect();
-            views.push(super::launcher_view(&launcher, variables));
+            views.push(super::launcher_view(&launcher, variables, &state.running));
         }
         result["launchers"] = json!(views);
     }
@@ -353,12 +353,13 @@ pub(super) async fn run(
             let _edit = state.edit.lock().unwrap_or_else(|e| e.into_inner());
             super::approve(&state.launchers_of(host, link), &a)
         }
+        "variable_launcher_stop" => {
+            let a: LauncherArgs = parse(args)?;
+            Ok(json!({"launcher":a.id,"stopped":state.running.stop(&a.id)}))
+        }
         _ => {
             let a: LauncherArgs = parse(args)?;
-            let _busy = state
-                .busy
-                .try_lock()
-                .map_err(|_| vault::Error::Conflict("A launcher is already running.".into()))?;
+            let slot = super::claim(&host.state, &a.id)?;
             let launcher = state.launchers_of(host, link).get(&a.id)?;
             rules::ensure_approved(&launcher)?;
             if let Some(unknown) = a
@@ -391,7 +392,7 @@ pub(super) async fn run(
                 );
                 values.push((env.clone(), value));
             }
-            let result = rules::run(&launcher, values).await?;
+            let result = rules::run(&launcher, values, &slot).await?;
             Ok(json!({
                 "launcher":launcher.id,
                 "operation":"run",

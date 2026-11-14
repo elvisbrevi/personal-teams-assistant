@@ -30,6 +30,7 @@ fn a_remote_agent_is_refused_what_only_a_person_or_the_owners_computer_may_do() 
         "launcher_define",
         "launcher_run",
         "launcher_remove",
+        "launcher_stop",
         // Updates.
         "update_check",
         "update_stage",
@@ -76,6 +77,7 @@ fn a_remote_agent_is_refused_what_only_a_person_or_the_owners_computer_may_do() 
         "variable_launcher_approve",
         "variable_launcher_define",
         "variable_launcher_run",
+        "variable_launcher_stop",
         "variable_delivery_approve",
         "variable_key_backup",
         "variable_key_restore",

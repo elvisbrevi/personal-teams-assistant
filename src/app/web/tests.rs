@@ -3083,6 +3083,7 @@ async fn consumer_bindings_are_private_per_account_and_shared_accounts_run_no_pr
             "variable_launcher_define",
             "variable_launcher_remove",
             "variable_launcher_run",
+            "variable_launcher_stop",
             "variable_launcher_approve",
         ] {
             for transport in [Browser, Local, Machine] {

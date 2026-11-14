@@ -1,5 +1,5 @@
 // Settings › Variables: stored variables, their consumers and deliveries.
-import { t, tn, tx } from './i18n.js';
+import { t, tn, tx, uiLocale } from './i18n.js';
 import { invoke } from './control.js';
 import { $, badge, el, icon, rowText } from './dom.js';
 import { current, tab } from './state.js';
@@ -182,7 +182,22 @@ function consumerRow(consumer) {
     consumerNote[id] ? el('p', { class: 'hint variable-note', role: 'status', textContent: consumerNote[id] }) : null);
 }
 
-/** `here`: the launcher can also be removed from this client (the machine itself, not the portal). */
+/** A launcher's time limit, which its approval covers. */
+function launcherLimit(seconds) {
+  return seconds >= 60 && seconds % 60 === 0
+    ? tn(seconds / 60, 'Time limit: {n} minute', 'Time limit: {n} minutes')
+    : tn(seconds, 'Time limit: {n} second', 'Time limit: {n} seconds');
+}
+
+/** While a launcher runs: when it started and when its time limit stops it (times only, never its output). */
+function launcherRunning(running) {
+  const time = seconds => new Date(seconds * 1000).toLocaleTimeString(uiLocale(), { timeStyle: 'short' });
+  return running.stops_at == null
+    ? t('Starting (asked at {start}).', { start: time(running.started_at) })
+    : t('Running since {start}; its time limit stops it at {end}.', { start: time(running.started_at), end: time(running.stops_at) });
+}
+
+/** `here`: the launcher can also be removed or stopped from this client (the machine itself, not the portal). */
 function launcherRow(launcher, here) {
   const title = el('span', { class: 'cred-name', textContent: launcher.id, translate: 'no' });
   const uses = launcher.variables.map(v => v.state === 'ok'
@@ -194,13 +209,24 @@ function launcherRow(launcher, here) {
     await loadConsumers();
     done(t('Launcher {name} removed.', { name: launcher.id }));
   });
-  const status = launcher.approved ? badge(t('Approved'), 'ok') : badge(t('Waiting for your approval'), 'warn');
+  const status = launcher.running ? badge(t('Running'), 'info')
+    : launcher.approved ? badge(t('Approved'), 'ok') : badge(t('Waiting for your approval'), 'warn');
   const actions = here ? [remove] : [];
+  if (launcher.running && here) {
+    // Ends the program and everything it started; only on the machine that runs it.
+    const stop = el('button', { type: 'button', class: 'secondary', textContent: t('Stop'), 'aria-label': t('Stop launcher {name}', { name: launcher.id }) });
+    stop.onclick = () => busy(stop, async () => {
+      const reply = await invoke('variable_launcher_stop', { id: launcher.id });
+      await loadConsumers();
+      done(reply.stopped ? t('Launcher {name} stopped.', { name: launcher.id }) : t('Launcher {name} had already ended.', { name: launcher.id }));
+    });
+    actions.unshift(stop);
+  }
   if (!launcher.approved) {
-    // Only a person at this window or the owner's portal approves; the digest names the definition shown here.
+    // Only a person at this window or the owner's portal approves; the digest and the limit name the definition shown here.
     const approve = el('button', { type: 'button', textContent: t('Approve'), 'aria-label': t('Approve launcher {name}', { name: launcher.id }) });
     approve.onclick = () => busy(approve, async () => {
-      await invoke('variable_launcher_approve', { id: launcher.id, digest: launcher.digest });
+      await invoke('variable_launcher_approve', { id: launcher.id, digest: launcher.digest, timeout_seconds: launcher.timeout_seconds });
       await loadConsumers();
       done(t('Launcher {name} approved.', { name: launcher.id }));
     });
@@ -212,6 +238,8 @@ function launcherRow(launcher, here) {
     el('p', { class: 'hint variable-note', textContent: command, translate: 'no' }),
     el('p', { class: 'hint variable-note', textContent: launcher.directory, translate: 'no' }),
     el('p', { class: 'hint variable-note', textContent: uses, translate: 'no' }),
+    el('p', { class: 'hint variable-note', textContent: launcherLimit(launcher.timeout_seconds) }),
+    launcher.running ? el('p', { class: 'hint variable-note', role: 'status', textContent: launcherRunning(launcher.running) }) : null,
     el('div', { class: 'variable-actions' }, actions));
 }
 

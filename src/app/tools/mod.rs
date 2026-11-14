@@ -744,11 +744,11 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "launcher_define",
         title: "Propose a local launcher",
-        description: "Propose one local program to receive named variables as environment variables of that one process. It runs nothing until the owner approves it (launcher_approve, this computer's application or the owner's own portal, Settings > Credentials > Variables); consumer_list shows `approved`. Only on the owner's trusted machine, with a working directory inside the machine's allowed roots. Give the absolute program path, fixed arguments (never values), and an object mapping environment names to variable IDs. Protected runtime and application settings (PATH, LD_*, PTA_*, state keys...) are refused. The program's digest is recorded and a changed program does not run. Needs the user's confirmation, who should see the program, arguments and variable names.",
+        description: "Propose one local program to receive named variables as environment variables of that one process. It runs nothing until the owner approves it (launcher_approve, this computer's application or the owner's own portal, Settings > Credentials > Variables); consumer_list shows `approved`. Only on the owner's trusted machine, with a working directory inside the machine's allowed roots. Give the absolute program path, fixed arguments (never values), and an object mapping environment names to variable IDs. Protected runtime and application settings (PATH, LD_*, PTA_*, state keys...) are refused. The program's digest is recorded and a changed program does not run. Needs the user's confirmation, who should see the program, arguments, variable names and time limit.",
         effect: Effect::External,
         schema: || {
             object(
-                json!({"id":string("Launcher name: lowercase letters, digits, - and _."),"description":string("What the launcher does, 1 to 500 characters."),"program":string("Absolute path of the executable."),"args":strings("Fixed arguments (up to 32). Never put a secret here."),"directory":string("Absolute working directory inside the machine's allowed roots."),"env":{"type":"object","additionalProperties":{"type":"string"},"description":"Environment name to variable ID, one to eight entries."},"timeout_seconds":{"type":"integer","minimum":1,"maximum":600},"confirmed":confirmed()}),
+                json!({"id":string("Launcher name: lowercase letters, digits, - and _."),"description":string("What the launcher does, 1 to 500 characters."),"program":string("Absolute path of the executable."),"args":strings("Fixed arguments (up to 32). Never put a secret here."),"directory":string("Absolute working directory inside the machine's allowed roots."),"env":{"type":"object","additionalProperties":{"type":"string"},"description":"Environment name to variable ID, one to eight entries."},"timeout_seconds":{"type":"integer","minimum":1,"maximum":crate::consumers::MAX_TIMEOUT,"description":"Time limit in seconds (default 60, at most 3600): the launcher and everything it started are stopped then. It is part of what the owner approves."},"confirmed":confirmed()}),
                 &["id", "description", "program", "directory", "env"],
             )
         },
@@ -756,11 +756,11 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "launcher_approve",
         title: "Approve a local launcher",
-        description: "The owner approves a proposed launcher on this machine, so launcher_run can start it. Show the user the program, its digest, arguments, directory and variable names from consumer_list first, and pass that exact digest: a definition that changed since is refused. Only on the owner's trusted machine. Needs the user's confirmation of that exact launcher.",
+        description: "The owner approves a proposed launcher on this machine, so launcher_run can start it. Show the user the program, its digest, arguments, directory, variable names and time limit from consumer_list first, and pass that exact digest and limit: a definition that changed since is refused. Only on the owner's trusted machine. Needs the user's confirmation of that exact launcher.",
         effect: Effect::External,
         schema: || {
             object(
-                json!({"id":string("Launcher name from consumer_list."),"digest":string("The program's SHA-256 that consumer_list showed and the user reviewed."),"confirmed":confirmed()}),
+                json!({"id":string("Launcher name from consumer_list."),"digest":string("The program's SHA-256 that consumer_list showed and the user reviewed."),"timeout_seconds":{"type":"integer","minimum":1,"description":"The time limit that consumer_list showed and the user reviewed."},"confirmed":confirmed()}),
                 &["id", "digest"],
             )
         },
@@ -778,9 +778,21 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "launcher_stop",
+        title: "Stop a running launcher",
+        description: "Stop a launcher that is running on this machine (consumer_list shows `running` with when it started and when its limit stops it): its program and everything it started are ended, and its run ends as stopped. Only on the owner's trusted machine.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"id":string("Launcher name from consumer_list.")}),
+                &["id"],
+            )
+        },
+    },
+    Tool {
         name: "launcher_run",
         title: "Run a local launcher",
-        description: "Run an approved launcher: its program receives only the variables it names, resolved now under live account authority. Returns status, exit code, duration and the variable references used; the program's output is not captured and never returned. Fails before starting if a variable was deleted, differs from a version you pin or the coordinator cannot be reached or no longer accepts this installation. Needs the user's confirmation.",
+        description: "Run an approved launcher and wait for it to end: its program receives only the variables it names, resolved now under live account authority. Launchers with different names run side by side (up to 3 at a time); a launcher that is already running answers a conflict. Its time limit, or launcher_stop, ends it and everything it started. Returns status (succeeded, failed, timed_out, stopped or not_started), exit code, duration and the variable references used; the program's output is not captured and never returned. Fails before starting if a variable was deleted, differs from a version you pin or the coordinator cannot be reached or no longer accepts this installation. Needs the user's confirmation.",
         effect: Effect::External,
         schema: || {
             object(
@@ -2199,6 +2211,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         }
         "consumer_unbind" => ipc("variable_consumer_unbind", args.clone()).await,
         "launcher_remove" => ipc("variable_launcher_remove", args.clone()).await,
+        "launcher_stop" => ipc("variable_launcher_stop", args.clone()).await,
         "delivery_list" => ipc("variable_delivery_list", args.clone()).await,
         "delivery_remove" => ipc("variable_delivery_remove", args.clone()).await,
         "delivery_define" | "variable_deliver" => {
@@ -2841,12 +2854,14 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             args["consumer"]
         ),
         "launcher_define" => format!(
-            "Allow program {} with arguments {} in {} to receive the variables {} as environment variables?",
-            args["program"], args["args"], args["directory"], args["env"]
+            "Allow program {} with arguments {} in {} to receive the variables {} as environment variables, for at most {} seconds per run?",
+            args["program"], args["args"], args["directory"], args["env"],
+            args["timeout_seconds"].as_u64().unwrap_or(crate::consumers::DEFAULT_TIMEOUT)
         ),
         "launcher_approve" => format!(
-            "Approve launcher {} (program SHA-256 {}), so its program can receive the variables it names whenever it runs?",
-            args["id"], args["digest"]
+            "Approve launcher {} (program SHA-256 {}, time limit {}), so its program can receive the variables it names whenever it runs?",
+            args["id"], args["digest"],
+            args["timeout_seconds"].as_u64().map_or("as listed".into(), |limit| format!("{limit} seconds"))
         ),
         "launcher_run" => format!(
             "Run launcher {} now, giving its program the variables it names?",

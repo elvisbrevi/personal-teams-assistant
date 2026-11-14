@@ -24,8 +24,8 @@ pub(super) struct State {
     bindings: connected::Bindings,
     /// Values resolved online for the operation about to run (memory only, short-lived).
     staged: std::sync::Mutex<BTreeMap<String, connected::Staged>>,
-    /// One launcher runs at a time.
-    busy: Arc<tokio::sync::Mutex<()>>,
+    /// The launchers running now: each name once, at most `rules::MAX_RUNNING` together.
+    running: rules::Running,
     /// Serializes read-modify-write of the launcher list.
     edit: std::sync::Mutex<()>,
     /// Where a built-in consumer's check is sent; tests point it at a local double.
@@ -39,7 +39,7 @@ impl State {
             launchers: rules::Launchers::new(profile),
             bindings: connected::Bindings::new(profile),
             staged: std::sync::Mutex::new(BTreeMap::new()),
-            busy: Arc::new(tokio::sync::Mutex::new(())),
+            running: rules::Running::default(),
             edit: std::sync::Mutex::new(()),
             #[cfg(test)]
             origin: std::sync::Mutex::new(None),
@@ -92,13 +92,21 @@ pub(super) struct ApproveArgs {
     pub id: String,
     /// The program digest the user was shown.
     pub digest: String,
+    /// The time limit the user was shown; a definition with another one is not approved.
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
 }
 
 pub(super) fn approve(
     launchers: &rules::Launchers,
     a: &ApproveArgs,
 ) -> std::result::Result<Value, vault::Error> {
-    let launcher = launchers.approve(&a.id, &a.digest, chrono::Utc::now().timestamp())?;
+    let launcher = launchers.approve(
+        &a.id,
+        &a.digest,
+        a.timeout_seconds,
+        chrono::Utc::now().timestamp(),
+    )?;
     Ok(json!({"launcher":launcher.id,"approved_at":launcher.approved_at}))
 }
 
@@ -130,20 +138,30 @@ pub(in crate::app) enum BlockLaunch {
     Ran(rules::RunResult),
 }
 
-/// The right to run a launcher now: one launcher runs at a time on this computer.
-pub(in crate::app) type LauncherSlot = tokio::sync::OwnedMutexGuard<()>;
+/// The right to run one launcher now: the same launcher never runs twice at once on this
+/// computer, and at most `rules::MAX_RUNNING` run together.
+pub(in crate::app) type LauncherSlot = rules::Slot;
 
-/// Take the right to run a launcher when no other launcher is running, without waiting.
-pub(in crate::app) fn try_launcher_slot(state: &DesktopState) -> Option<LauncherSlot> {
-    state.variables.consumers.busy.clone().try_lock_owned().ok()
+/// Take the right to run launcher `id` when it is not running and fewer than the bound are,
+/// without waiting.
+pub(in crate::app) fn try_launcher_slot(state: &DesktopState, id: &str) -> Option<LauncherSlot> {
+    claim(state, id).ok()
+}
+
+fn claim(state: &DesktopState, id: &str) -> std::result::Result<LauncherSlot, vault::Error> {
+    state
+        .variables
+        .consumers
+        .running
+        .claim(id, chrono::Utc::now().timestamp())
 }
 
 /// Run a launcher block of a workflow run: the coordinator's launcher `id`, only while it is
 /// still approved with the program digest the block stored. It takes the same path as
 /// `variable_launcher_run` (the program and its digest checked again, the directory inside the
 /// allowed roots, every variable resolved at the moment of use, the vetted minimal environment,
-/// one launcher at a time, the launcher's timeout) and refuses any caller but the engine's own
-/// authority; the program's output is never captured. The caller holds the launcher slot
+/// each launcher once at a time, the launcher's timeout) and refuses any caller but the engine's
+/// own authority; the program's output is never captured. The caller holds the launcher's slot
 /// (`try_launcher_slot`) before it records an attempt, so a lost race is a wait, never an outcome.
 pub(in crate::app) async fn run_for_block(
     host: &Host,
@@ -187,10 +205,10 @@ pub(in crate::app) async fn run_for_block(
     }
 }
 
-/// A launcher running now, as a test needs it.
+/// Launcher `id` running now, as a test needs it.
 #[cfg(all(test, unix))]
-pub(in crate::app) fn busy_guard(state: &DesktopState) -> LauncherSlot {
-    try_launcher_slot(state).unwrap()
+pub(in crate::app) fn busy_guard(state: &DesktopState, id: &str) -> LauncherSlot {
+    try_launcher_slot(state, id).unwrap()
 }
 
 /// A launcher placed in this installation's list as a test needs it, approved or not.
@@ -199,8 +217,14 @@ pub(in crate::app) fn add_test_launcher(state: &DesktopState, launcher: rules::L
     state.variables.consumers.launchers.add(launcher).unwrap();
 }
 
-/// What a person reviews before approving a launcher; the digest identifies that definition.
-pub(super) fn launcher_view(launcher: &rules::Launcher, variables: Vec<Value>) -> Value {
+/// What a person reviews before approving a launcher (the digest and the time limit identify
+/// that definition), and, while it runs, when it started and when its limit ends it: never its
+/// environment or output.
+pub(super) fn launcher_view(
+    launcher: &rules::Launcher,
+    variables: Vec<Value>,
+    running: &rules::Running,
+) -> Value {
     json!({
         "id":launcher.id,
         "description":launcher.description,
@@ -211,6 +235,7 @@ pub(super) fn launcher_view(launcher: &rules::Launcher, variables: Vec<Value>) -
         "timeout_seconds":launcher.timeout_seconds,
         "approved":launcher.approved_at.is_some(),
         "variables":variables,
+        "running":running.view(&launcher.id, chrono::Utc::now().timestamp()),
     })
 }
 
@@ -293,7 +318,10 @@ async fn run(
                 ));
             }
         }
-        "variable_launcher_define" | "variable_launcher_remove" | "variable_launcher_run" => {
+        "variable_launcher_define"
+        | "variable_launcher_remove"
+        | "variable_launcher_run"
+        | "variable_launcher_stop" => {
             // Generic process execution: only the owner of this installation, on this machine.
             if !invocation.scope.owner {
                 return Err(vault::Error::Conflict(authority::EXECUTION_DENIED.into()));
@@ -391,6 +419,12 @@ async fn run(
             audit_result(&store, "launcher_approve", None, &result);
             result
         }
+        "variable_launcher_stop" => {
+            let a: LauncherArgs = parse(args)?;
+            let stopped = state.consumers.running.stop(&a.id);
+            store.audit("launcher_stop", None, audit_word(stopped));
+            Ok(json!({"launcher":a.id,"stopped":stopped}))
+        }
         _ => {
             let a: LauncherArgs = parse(args)?;
             let result = launch(host, &store, a).await;
@@ -472,7 +506,11 @@ fn list(
                 let (state, variable) = store.reference(entry)?;
                 variables.push(json!({"env":env,"id":entry,"state":state,"variable":variable}));
             }
-            views.push(launcher_view(&launcher, variables));
+            views.push(launcher_view(
+                &launcher,
+                variables,
+                &host.state.variables.consumers.running,
+            ));
         }
         result["launchers"] = json!(views);
     }
@@ -571,14 +609,7 @@ async fn launch(
     store: &Store,
     a: LauncherArgs,
 ) -> std::result::Result<Value, vault::Error> {
-    let slot = host
-        .state
-        .variables
-        .consumers
-        .busy
-        .clone()
-        .try_lock_owned()
-        .map_err(|_| vault::Error::Conflict("A launcher is already running.".into()))?;
+    let slot = claim(&host.state, &a.id)?;
     let (launcher, used, result) = start(host, store, a, slot).await?;
     Ok(json!({
         "launcher":launcher.id,
@@ -595,7 +626,7 @@ async fn start(
     host: &Host,
     store: &Store,
     a: LauncherArgs,
-    _slot: LauncherSlot,
+    slot: LauncherSlot,
 ) -> std::result::Result<(rules::Launcher, Vec<Value>, rules::RunResult), vault::Error> {
     let consumers = &host.state.variables.consumers;
     let launcher = consumers.launchers.get(&a.id)?;
@@ -628,7 +659,7 @@ async fn start(
         );
         values.push((env.clone(), value));
     }
-    let result = rules::run(&launcher, values).await?;
+    let result = rules::run(&launcher, values, &slot).await?;
     Ok((launcher, used, result))
 }
 

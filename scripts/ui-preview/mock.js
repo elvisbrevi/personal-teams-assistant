@@ -250,7 +250,7 @@
     target: { kind: 'http', method: 'PUT', headers: { 'X-Blog-Editor': '1' }, body: { value: '{{value}}' }, confirm_field: '/last4',
       auth: { header: 'Authorization', prefix: 'Bearer ', variable: { id: 'aaaaaaaa-0000-4000-8000-000000000001', state: 'ok', name: 'DEPLOY_ENDPOINT', version: 1 } } },
     variables: [{ id: 'aaaaaaaa-0000-4000-8000-000000000001', state: 'ok', name: 'DEPLOY_ENDPOINT', version: 1 }], digest: 'e'.repeat(64), approved: false, created_at: 1, approved_at: null }];
-  const launchers = [{ id: 'release-tool', description: 'Publishes the release <b>not markup</b>', program: '/usr/local/bin/release', args: ['--fixed'], directory: '/home/user/work', timeout_seconds: 60, digest: 'd'.repeat(64), approved: false,
+  const launchers = [{ id: 'release-tool', description: 'Publishes the release <b>not markup</b>', program: '/usr/local/bin/release', args: ['--fixed'], directory: '/home/user/work', timeout_seconds: 60, digest: 'd'.repeat(64), approved: false, running: null,
     variables: [{ env: 'RELEASE_URL', id: 'aaaaaaaa-0000-4000-8000-000000000001', state: 'ok', variable: { name: 'DEPLOY_ENDPOINT', version: 1 } }] }];
   const bindingView = () => {
     if (!consumerBinding) return null;
@@ -1105,7 +1105,7 @@
     variable_launcher_approve: args => {
       window.__ptaConsumerCalls.push({ method: 'approve', ...args });
       const launcher = launchers.find(l => l.id === args.id);
-      if (!launcher || launcher.digest !== args.digest) throw new Error('This launcher changed since it was shown. Review it again before approving.');
+      if (!launcher || launcher.digest !== args.digest || (args.timeout_seconds != null && launcher.timeout_seconds !== args.timeout_seconds)) throw new Error('This launcher changed since it was shown. Review it again before approving.');
       launcher.approved = true;
       return { launcher: args.id, approved_at: 1 };
     },
@@ -1122,11 +1122,19 @@
       return { destination: args.destination, url: destinations[0].url, variable: { id: args.variable, name: 'DEPLOY_ENDPOINT', version: 1 }, result: { status: 'ok', http_status: 200, confirmed_by_destination: true } };
     },
     variable_delivery_remove: args => { window.__ptaDeliveryCalls.push({ method: 'remove', ...args }); destinations.splice(0); return { destination: args.id, removed: true }; },
+    variable_launcher_stop: args => {
+      window.__ptaConsumerCalls.push({ method: 'stop', ...args });
+      const launcher = launchers.find(l => l.id === args.id);
+      const stopped = Boolean(launcher?.running);
+      if (launcher) launcher.running = null;
+      return { launcher: args.id, stopped };
+    },
     variable_launcher_remove: args => { window.__ptaConsumerCalls.push({ method: 'remove', ...args }); launchers.splice(0); return { launcher: args.id, removed: true }; },
     set_credential: args => { snapshot.credentials[args.name] = 'system'; return {}; },
     delete_credential: args => { snapshot.credentials[args.name] = 'missing'; return {}; },
   };
   Object.assign(handlers, workflowHandlers);
+  window.__ptaSetLauncherRunning = running => { launchers[0].running = running; };
   window.__ptaSetMicrosoftSetup = (graph, error = null) => { Object.assign(snapshot.config.graph, graph); snapshot.teams_identity_error = error; };
   window.__ptaChangeProfile = change => change(snapshot);
   window.__ptaCalls = [];
