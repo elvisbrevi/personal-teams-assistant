@@ -787,3 +787,203 @@ fn opencode_files_are_private_by_a_mark_beyond_the_messages_summarized() {
     assert!(listing.sessions.is_empty());
     assert!(listing.unavailable.is_empty());
 }
+
+#[test]
+fn a_mark_that_starts_a_line_is_seen_where_the_file_is_not_parsed() {
+    let dir = tempfile::tempdir().unwrap();
+    // A request whose mark starts its second line, in a file over 2.5 MB …
+    let mut lines = vec![user("newline", "First request")];
+    let filler = "x".repeat(200_000);
+    for _ in 0..8 {
+        lines.push(agent("newline", &filler));
+    }
+    lines.push(user("newline", "Fix it\n#private"));
+    for _ in 0..8 {
+        lines.push(agent("newline", &filler));
+    }
+    claude_lines(dir.path(), "newline", &lines);
+    // … and in a line too long to parse.
+    claude_lines(
+        dir.path(),
+        "newline-long",
+        &[
+            user("newline-long", "First"),
+            user(
+                "newline-long",
+                &format!("{}\n#private", "y".repeat(300_000)),
+            ),
+            agent("newline-long", "Done"),
+        ],
+    );
+    assert!(local(&claude_only(dir.path()), 10, "m").sessions.is_empty());
+    // An OpenCode file-store request beyond the messages summarized.
+    let root = dir.path().join("opencode");
+    let storage = root.join("storage");
+    let info = storage.join("session/p/ses_nl.json");
+    std::fs::create_dir_all(info.parent().unwrap()).unwrap();
+    std::fs::write(&info, json!({"id":"ses_nl","directory":"/w/q","time":{"created":1_793_000_000_000i64,"updated":1_793_000_600_000i64}}).to_string()).unwrap();
+    for n in 0..100i64 {
+        let message = format!("msg_{n:05}");
+        let messages = storage.join("message/ses_nl");
+        std::fs::create_dir_all(&messages).unwrap();
+        std::fs::write(messages.join(format!("{message}.json")), json!({"id":message,"role":if n % 2 == 0 {"user"} else {"assistant"},"time":{"created":1_793_000_000_000i64 + n}}).to_string()).unwrap();
+        let parts = storage.join(format!("part/{message}"));
+        std::fs::create_dir_all(&parts).unwrap();
+        let text = if n == 40 { "Fix it\n#private" } else { "text" };
+        std::fs::write(
+            parts.join("prt_1.json"),
+            json!({"id":"prt_1","type":"text","text":text}).to_string(),
+        )
+        .unwrap();
+    }
+    let listing = local(
+        &Roots {
+            opencode: Some(root),
+            ..Default::default()
+        },
+        10,
+        "m",
+    );
+    assert!(listing.sessions.is_empty() && listing.unavailable.is_empty());
+}
+
+#[test]
+fn secret_values_in_common_shapes_are_dropped() {
+    let scrubber = Scrubber::new();
+    for text in [
+        "**Password:**\nHunter2!",
+        "The password is:\nHunter2!",
+        "PGPASSWORD=Hunter2 psql",
+        "pass: Hunter2",
+        "key: AbCd1234",
+        "mysql -u root -pHunter2",
+        "curl -u admin:Hunter2 https://x",
+    ] {
+        let kept = scrubber.scrub(&format!("Before.\n{text}\nAfter."));
+        assert_eq!(kept, "Before. After.", "{text}");
+    }
+}
+
+#[test]
+fn absolute_paths_are_found_wherever_they_start_and_prose_is_kept() {
+    let scrubber = Scrubber::new();
+    for (text, kept) in [
+        (
+            "see **/home/name/project/file.rs** now",
+            "see **file.rs** now",
+        ),
+        ("open “/home/name/x” now", "open “x” now"),
+        ("error at/home/name/x", "error atx"),
+        ("cc -I/home/name/include main.c", "cc -Iinclude main.c"),
+        ("PATH=/home/name/bin:/home/name/.cargo/bin", "PATH=bin:bin"),
+        (
+            "updated /home/u/a.rs and src/b.rs",
+            "updated a.rs and src/b.rs",
+        ),
+        (
+            "edit /work/repo/main.rs and src/llm/agent.rs",
+            "edit main.rs and src/llm/agent.rs",
+        ),
+        (
+            "open \"/srv/Big Project/My Notes.md\" later",
+            "open \"My Notes.md\" later",
+        ),
+        (
+            "see https://example.com/home/x/y",
+            "see https://example.com/home/x/y",
+        ),
+    ] {
+        assert_eq!(scrubber.scrub(text), kept, "{text}");
+    }
+}
+
+#[test]
+fn fences_in_quotes_inline_fences_and_nested_injected_tags() {
+    let scrubber = Scrubber::new();
+    assert_eq!(
+        scrubber.scrub("Quoted:\n> ```\n> let code = 1;\n> ```\nDone."),
+        "Quoted: Done."
+    );
+    assert_eq!(
+        scrubber.scrub("```js``` is inline\nStill prose."),
+        "```js``` is inline Still prose."
+    );
+    assert_eq!(
+        scrubber.scrub(
+            "<system-reminder>a <system-reminder>b</system-reminder> TAIL</system-reminder>Real"
+        ),
+        "Real"
+    );
+}
+
+#[test]
+fn opencode_marks_hide_behind_no_other_part_and_an_unreadable_part_fails_its_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("opencode");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut db = rusqlite::Connection::open(root.join("opencode.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE session(id TEXT, parent_id TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER);
+         CREATE TABLE message(id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+         CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, data TEXT);
+         INSERT INTO session VALUES('ses_hidden', NULL, '/w/h', 1793000000000, 1793000600000);",
+    )
+    .unwrap();
+    let tx = db.transaction().unwrap();
+    // 250 agent and tool parts that mention the mark, then the user's own.
+    for n in 0..250 {
+        tx.execute(
+            "INSERT INTO message VALUES(?1, 'ses_hidden', ?2, '{\"role\":\"assistant\"}')",
+            rusqlite::params![format!("a{n:04}"), 1_793_000_000_000i64 + n],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO part VALUES(?1, ?2, 'ses_hidden', ?3)",
+            rusqlite::params![
+                format!("pa{n:04}"),
+                format!("a{n:04}"),
+                json!({"type":"tool","state":{"output":"write #private to hide"}}).to_string()
+            ],
+        )
+        .unwrap();
+    }
+    tx.execute(
+        "INSERT INTO message VALUES('u1', 'ses_hidden', 1793000500000, '{\"role\":\"user\"}')",
+        [],
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO part VALUES('pu1', 'u1', 'ses_hidden', ?1)",
+        [json!({"type":"text","text":"Fix it\n#private"}).to_string()],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let listing = local(
+        &Roots {
+            opencode: Some(root),
+            ..Default::default()
+        },
+        10,
+        "m",
+    );
+    assert!(listing.sessions.is_empty() && listing.unavailable.is_empty());
+    // A file-store part that cannot be read fails its session.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("opencode");
+    opencode_session(&root, "ses_broken", 1, "Ask", "Answer");
+    std::fs::write(
+        root.join("storage/part/msg_ses_broken_1/prt_1.json"),
+        "not json",
+    )
+    .unwrap();
+    let listing = local(
+        &Roots {
+            opencode: Some(root),
+            ..Default::default()
+        },
+        10,
+        "m",
+    );
+    assert!(listing.sessions.is_empty());
+    assert_eq!(listing.unavailable[0].reason, "unreadable");
+}

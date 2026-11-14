@@ -399,8 +399,10 @@ Knowledge
                            the verified notes: {\"kind\":\"notes\",...} (optional \"contexts\" keeps only theirs);
                            recent agent sessions: {\"kind\":\"tool\",\"tool\":{\"type\":\"agent_sessions\",\"sessions\":10}}.
   sources sessions [--limit N]  What an agent sessions source reads now: the newest Claude Code, Codex and
-                           OpenCode sessions of the account's machines (default 10, at most 50), summarized
-                           without secrets, file contents or paths; offline machines are listed as unavailable.
+                           OpenCode sessions of the account's machines (default 10, at most 50), summarized;
+                           fixed rules drop lines that look like secrets, code and directory names, which is
+                           not a guarantee: authorize the source only for audiences you would trust with what
+                           your sessions discuss. Offline machines are listed as unavailable.
   contexts list | contexts show ID | contexts add | contexts edit ID | contexts remove ID
                            Subjects such as «cobros»: JSON on stdin with id, name, description, keywords,
                            sources (IDs) and instructions. A request naming one reads its sources.

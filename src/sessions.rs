@@ -323,6 +323,9 @@ pub struct Scrubber {
     redactor: crate::security::Redactor,
     secret: Vec<regex::Regex>,
     opaque: regex::Regex,
+    url: regex::Regex,
+    quoted_path: regex::Regex,
+    home_path: regex::Regex,
     path: regex::Regex,
     pending: regex::Regex,
     /// A key that leaves its value for the next line: `Password:`, `"secret" =`.
@@ -340,11 +343,17 @@ impl Scrubber {
             r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@",
             // A key whose name says it is secret, quoted or not, before its value:
             // `DB_PASSWORD=…`, `"db_password": …`, `secret: …`, `AccountKey=…`, `apiKey:`.
-            r#"(?i)(?:^|[^a-z0-9])(?:[a-z0-9]+[_.-])*(?:password|passwd|passphrase|pwd|secret|token|api_?key|apikey|accountkey|account_key|access_?key|private_?key|sharedaccesskey|sharedaccesssignature|client_?secret|auth|authorization|credentials?|sas|signature|connection_?string|contraseña|contrasena|clave|credencial(?:es)?)(?:[_.-][a-z0-9]+)*["']?\s*[:=]"#,
+            // `PGPASSWORD=…` too: the secret word may end a longer name.
+            r#"(?i)(?:password|passwd|passphrase|pwd|secret|token|api_?key|apikey|accountkey|account_key|access_?key|private_?key|sharedaccesskey|sharedaccesssignature|client_?secret|auth|authorization|credentials?|sas|signature|connection_?string|contraseña|contrasena|clave|credencial(?:es)?)(?:[_.-][a-z0-9]+)*["']?\s*[:=]"#,
+            // Short key names: `pass: …`, `key: …`.
+            r#"(?i)(?:^|[^a-z0-9])(?:pass|key)["']?\s*[:=]"#,
             // Connection strings.
             r"(?i)\b(?:server|data source|host|endpoint)\s*=[^;\n]*;",
             // Flags that take one: `--password X`, `-p:…`, `--api-key X`.
             r"(?i)(?:^|\s)--?(?:password|passwd|pass|pwd|token|secret|api-?key|key|auth|client-secret|access-key|sas)\b",
+            // A password glued to its flag (`mysql -pHunter2`) or a user with one (`curl -u a:b`).
+            r"(?:^|\s)-p[^\s-]\S*",
+            r"(?i)(?:^|\s)(?:-u|--user)[\s=]+\S+:\S+",
             // Prose about one, in English or Spanish: `the password is …`, `la clave: …`.
             r"(?i)\b(?:passwords?|passwd|passphrases?|contraseñas?|contrasenas?|claves?|secrets?|secretos?|tokens?|credentials?|credenciales?|api ?keys?|private ?keys?|llaves? privadas?|access ?keys?)\b",
             r"-----(?:BEGIN|END)[A-Z ]*-----",
@@ -358,15 +367,28 @@ impl Scrubber {
                 .expect("built-in redaction patterns"),
             secret,
             opaque: regex::Regex::new(r"[A-Za-z0-9+/_=\-]{32,}").expect("valid opaque pattern"),
-            // An absolute path wherever it starts (a line, a space, punctuation, `cwd:`,
-            // `file://`), its directories possibly with spaces; never a URL's own path, which
-            // follows `//`. Only its last component is kept.
+            // Paths are rewritten outside URLs only, so a URL's own path stays whole.
+            url: regex::Regex::new(r#"(?i)\b(?:https?|ftps?|wss?|ssh|git|svn|s3|gs)://[^\s"'<>]*"#)
+                .expect("valid URL pattern"),
+            // A quoted absolute path, spaces and all.
+            quoted_path: regex::Regex::new(
+                r#"(?P<open>["'`“‘])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|/)[^"'`“”‘’\n]*)(?P<close>["'`”’])"#,
+            )
+            .expect("valid quoted path pattern"),
+            // A path from a drive, a share, a home or a usual system root, wherever it starts
+            // (`at/home/…`, `-I/home/…`, `**/home/…**`); a directory name holds a space only
+            // before a capitalized word (`First Last`, `Application Support`).
+            home_path: regex::Regex::new(
+                r#"(?:(?P<pre>^|[^A-Za-z0-9])[A-Za-z]:[\\/]|\\\\[^\s\\/]+[\\/]|~[\\/]|/(?:home|Users|root|var|opt|srv|tmp|etc|mnt|media|private|Volumes|usr|Library|workspaces?|data|run|nix|snap|app|code)[\\/])(?:[^\s\\/"'`“”‘’<>|:*?]+(?: [A-Z][^\s\\/"'`“”‘’<>|:*?]*)*[\\/])*(?P<last>[^\s\\/"'`“”‘’<>|:*?]*)"#,
+            )
+            .expect("valid home path pattern"),
+            // Any other absolute path, where a word does not run into it (not `src/a/b`).
             path: regex::Regex::new(
-                r#"(?P<pre>^|[\s"'`(\[{=<>@,;|]|[^/\s]:|file://)(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|/)(?:[^\s\\/"'`<>|:*?]+(?: [^\s\\/"'`<>|:*?]+)*[\\/])+(?P<last>[^\s\\/"'`<>|:*?]*)"#,
+                r#"(?P<pre>^|[^A-Za-z0-9_.\-/\\~])/(?:[^\s\\/"'`“”‘’<>|:*?]+(?: [A-Z][^\s\\/"'`“”‘’<>|:*?]*)*[\\/])+(?P<last>[^\s\\/"'`“”‘’<>|:*?]*)"#,
             )
             .expect("valid path pattern"),
             bare_key: regex::Regex::new(
-                r#"(?i)(?:password|passwd|passphrase|pwd|secret|token|key|auth|authorization|credentials?|sas|signature|string|contraseña|contrasena|clave|credencial(?:es)?)["']?\s*[:=]\s*["']?\s*$"#,
+                r#"(?i)\b(?:password|passwd|passphrase|pwd|pass|secret|token|key|auth|authorization|credentials?|sas|signature|string|contraseña|contrasena|clave|credencial(?:es)?|is|are|was|es|son|era)\b["'*_`\s]*[:=][\s"'*_`]*$"#,
             )
             .expect("valid key pattern"),
             pending: regex::Regex::new(
@@ -391,7 +413,8 @@ impl Scrubber {
         let mut in_key = false;
         let mut value_next = false;
         for line in text.lines() {
-            let trimmed = line.trim_start();
+            // A fence may sit in a blockquote (`> ```).
+            let trimmed = line.trim_start_matches(|c: char| c.is_whitespace() || c == '>');
             let run = |c: char| trimmed.chars().take_while(|&x| x == c).count();
             if let Some((c, n)) = fence {
                 if run(c) >= n && trimmed.trim_start_matches(c).trim().is_empty() {
@@ -399,7 +422,10 @@ impl Scrubber {
                 }
                 continue;
             }
-            if let Some(c) = ['`', '~'].into_iter().find(|&c| run(c) >= 3) {
+            // ```` ```js``` ```` closes on its own line: inline code, not a block.
+            if let Some(c) = ['`', '~'].into_iter().find(|&c| run(c) >= 3)
+                && !trimmed[run(c) * c.len_utf8()..].contains(&c.to_string().repeat(run(c)))
+            {
                 fence = Some((c, run(c)));
                 continue;
             }
@@ -418,13 +444,39 @@ impl Scrubber {
                 value_next = secret && self.bare_key.is_match(line);
                 continue;
             }
-            let line = self.path.replace_all(line, "${pre}${last}");
+            let line = self.without_paths(line);
             let line = line.trim().trim_start_matches(['#', '>', '-', '*']).trim();
             if !line.is_empty() {
                 kept.push(line.to_owned());
             }
         }
         kept
+    }
+    /// The line with every absolute path outside a URL reduced to its last component.
+    fn without_paths(&self, line: &str) -> String {
+        let last = |path: &str| {
+            path.trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let rewrite = |text: &str| -> String {
+            let text = self.quoted_path.replace_all(text, |c: &regex::Captures| {
+                format!("{}{}{}", &c["open"], last(&c["path"]), &c["close"])
+            });
+            let text = self.home_path.replace_all(&text, "${pre}${last}");
+            self.path.replace_all(&text, "${pre}${last}").into_owned()
+        };
+        let mut out = String::new();
+        let mut at = 0;
+        for url in self.url.find_iter(line) {
+            out.push_str(&rewrite(&line[at..url.start()]));
+            out.push_str(url.as_str());
+            at = url.end();
+        }
+        out.push_str(&rewrite(&line[at..]));
+        out
     }
     /// The text as one bounded line of what `lines` keeps.
     pub fn scrub(&self, text: &str) -> String {
@@ -471,10 +523,28 @@ fn without_injected(text: &str) -> String {
             rest = after;
             continue;
         }
-        let close = format!("</{name}>");
-        rest = match after.find(&close) {
-            Some(end) => &after[end + close.len()..],
-            None => "",
+        // Closed by its own name, counting the same tag nested inside it.
+        let (open, close) = (format!("<{name}>"), format!("</{name}>"));
+        let mut depth = 1;
+        let mut at = name_len;
+        rest = loop {
+            let next_open = after[at..].find(&open).map(|i| i + at);
+            let Some(next_close) = after[at..].find(&close).map(|i| i + at) else {
+                break "";
+            };
+            match next_open {
+                Some(o) if o < next_close => {
+                    depth += 1;
+                    at = o + open.len();
+                }
+                _ => {
+                    depth -= 1;
+                    at = next_close + close.len();
+                    if depth == 0 {
+                        break &after[at..];
+                    }
+                }
+            }
         };
         out.push(' ');
     }
@@ -497,23 +567,26 @@ fn bounded(text: &str, max: usize) -> String {
 /// Whether `text` carries the private mark as a token of its own (`#private`, `#private!`,
 /// `"#private"`, `**#private**`), not as part of a longer word.
 pub fn marked_private(text: &str) -> bool {
-    mark_in(text.as_bytes(), true)
-}
-/// The mark in raw bytes; at the end of the slice the next byte is unknown and counts as a
-/// boundary when `end_is_boundary`.
-fn mark_in(bytes: &[u8], end_is_boundary: bool) -> bool {
+    let bytes = text.as_bytes();
     let mark = PRIVATE_MARK.as_bytes();
     let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     bytes.windows(mark.len()).enumerate().any(|(i, w)| {
         w.eq_ignore_ascii_case(mark)
             && (i == 0 || !word(bytes[i - 1]))
-            && match bytes.get(i + mark.len()) {
-                Some(&next) => !word(next) && next != b'-',
-                None => end_is_boundary,
-            }
+            && bytes
+                .get(i + mark.len())
+                .is_none_or(|&next| !word(next) && next != b'-')
     })
 }
-/// Whether the mark appears anywhere in the file, read in bounded chunks.
+/// Whether raw bytes contain the mark's text at all, whatever surrounds it: in JSON the byte
+/// before a mark that starts a line is the `n` of `\n`, so whether it is a word of its own is
+/// decided on the decoded text (`marked_private`).
+fn raw_mark(bytes: &[u8]) -> bool {
+    bytes
+        .windows(PRIVATE_MARK.len())
+        .any(|w| w.eq_ignore_ascii_case(PRIVATE_MARK.as_bytes()))
+}
+/// Whether the mark's text appears anywhere in the file, read in bounded chunks.
 fn file_has_mark(path: &Path) -> Result<bool> {
     let mut file = std::fs::File::open(path)?;
     let mut window: Vec<u8> = Vec::new();
@@ -521,14 +594,14 @@ fn file_has_mark(path: &Path) -> Result<bool> {
     loop {
         let n = file.read(&mut chunk)?;
         window.extend_from_slice(&chunk[..n]);
-        if mark_in(&window, n == 0) {
+        if raw_mark(&window) {
             return Ok(true);
         }
         if n == 0 {
             return Ok(false);
         }
-        // Keep enough to see a mark that crosses chunks, and the byte before it.
-        let keep = window.len().min(PRIVATE_MARK.len() + 1);
+        // Keep enough to see a mark that crosses chunks.
+        let keep = window.len().min(PRIVATE_MARK.len() - 1);
         window.drain(..window.len() - keep);
     }
 }
@@ -553,7 +626,7 @@ fn jsonl_private(path: &Path, request: &dyn Fn(&Value) -> Option<String>) -> Res
             }
             continue;
         }
-        if mark_in(&line, true)
+        if raw_mark(&line)
             && let Ok(value) = serde_json::from_slice::<Value>(&line)
             && request(&value).is_some_and(|text| marked_private(&text))
         {
@@ -561,23 +634,24 @@ fn jsonl_private(path: &Path, request: &dyn Fn(&Value) -> Option<String>) -> Res
         }
     }
 }
-/// Reads the rest of a long line in chunks, looking for the mark.
+/// Reads the rest of a long line in chunks, looking for the mark's text (a line too long to
+/// decode that contains it counts as marked).
 fn long_line_has_mark(reader: &mut dyn BufRead, head: &[u8]) -> Result<bool> {
-    let mut found = mark_in(head, false);
-    let mut carry = head[head.len().saturating_sub(PRIVATE_MARK.len() + 1)..].to_vec();
+    let mut found = raw_mark(head);
+    let mut carry = head[head.len().saturating_sub(PRIVATE_MARK.len())..].to_vec();
     loop {
         let buffer = reader.fill_buf()?;
         if buffer.is_empty() {
-            return Ok(found || mark_in(&carry, true));
+            return Ok(found);
         }
         let (chunk, end) = match buffer.iter().position(|&b| b == b'\n') {
             Some(i) => (&buffer[..i], true),
             None => (buffer, false),
         };
         carry.extend_from_slice(chunk);
-        found |= mark_in(&carry, end);
+        found |= raw_mark(&carry);
         let used = chunk.len() + usize::from(end);
-        carry.drain(..carry.len().saturating_sub(PRIVATE_MARK.len() + 1));
+        carry.drain(..carry.len().saturating_sub(PRIVATE_MARK.len()));
         reader.consume(used);
         if end {
             return Ok(found);
@@ -1052,10 +1126,12 @@ fn opencode_file_session(
             .into_iter()
             .take(200)
         {
-            // A large part is a tool's output, never text worth a summary.
-            if let Ok(part) = read_json(&part) {
-                parts.push(part);
+            // A large part is a tool's output, never text worth a summary; any other part that
+            // cannot be read makes the session unreadable.
+            if std::fs::metadata(&part)?.len() > LINE_BYTES as u64 {
+                continue;
             }
+            parts.push(read_json(&part)?);
         }
         read.push(Message {
             user: message["role"] == "user",
@@ -1152,21 +1228,23 @@ fn opencode_row(
     scrubber: &Scrubber,
 ) -> Result<Option<Summary>> {
     // Every request of the user, wherever it is, may mark the session private.
+    // Only the user's text parts that contain the mark's text; one too long to decode counts.
     let mut statement = db.prepare(
-        "SELECT p.data, m.data FROM part p JOIN message m ON m.id = p.message_id \
-         WHERE m.session_id = ?1 AND p.data LIKE '%#private%' LIMIT 200",
+        "SELECT CASE WHEN length(p.data) <= ?2 THEN p.data END FROM part p \
+         JOIN message m ON m.id = p.message_id \
+         WHERE m.session_id = ?1 AND json_extract(m.data, '$.role') = 'user' \
+         AND json_extract(p.data, '$.type') = 'text' AND instr(lower(p.data), '#private') > 0",
     )?;
     let marked = statement
-        .query_map([&id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        .query_map(rusqlite::params![&id, LINE_BYTES as i64], |row| {
+            row.get::<_, Option<String>>(0)
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    for (part, message) in marked {
-        let message: Value = serde_json::from_str(&message)?;
-        if message["role"] == "user"
-            && serde_json::from_str::<Value>(&part)
-                .map_or(true, |p| marked_private(&opencode_text(&[p])))
-        {
+    for part in marked {
+        let Some(part) = part else {
+            return Ok(None);
+        };
+        if marked_private(&opencode_text(&[serde_json::from_str(&part)?])) {
             return Ok(None);
         }
     }

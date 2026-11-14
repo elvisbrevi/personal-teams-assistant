@@ -144,7 +144,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "implementation_recent_sessions",
         title: "Recent agent sessions",
-        description: "What an agent sessions source reads now: the most recent Claude Code, Codex and OpenCode sessions on the account's machines, newest first, each a bounded summary (when, machine, project, what was asked, what the agent concluded, what is open) without secrets, file contents, command output or paths, plus the sessions PTA started with their work items. Machines that are offline, too old or did not answer are listed in unavailable, never as having no sessions.",
+        description: "What an agent sessions source reads now: the most recent Claude Code, Codex and OpenCode sessions on the account's machines, newest first, each a bounded summary (when, machine, project, what was asked, what the agent concluded, what is open), never tool calls or their output; fixed rules drop lines that look like secrets, code and directory names, which is not a guarantee, so the source belongs only to audiences the user trusts with what their sessions discuss. Plus the sessions PTA started with their work items. Machines that are offline, too old or did not answer are listed in unavailable, never as having no sessions.",
         effect: Effect::Read,
         schema: || {
             object(

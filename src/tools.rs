@@ -76,8 +76,9 @@ pub enum ToolSpec {
     /// `activity-registration.db`; no credential or network.
     ActivityRecord {},
     /// The user's most recent coding-agent sessions (Claude Code, Codex, OpenCode) on the
-    /// account's machines, as bounded summaries without secrets, file contents or paths
-    /// (`crate::sessions`), plus the sessions PTA started with their work items.
+    /// account's machines, as bounded summaries from which fixed rules drop lines that look like
+    /// secrets, code and directory names (`crate::sessions`; not a guarantee), plus the sessions
+    /// PTA started with their work items.
     AgentSessions {
         /// How many sessions, newest first across the agents (1–50).
         #[serde(default = "default_sessions")]
