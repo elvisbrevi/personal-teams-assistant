@@ -600,12 +600,14 @@ impl DirectTask {
     }
     /// The session's name: `Teams Assistant - director 42` for a classification of item 42,
     /// `Teams Assistant - summary 42` for a summary of its run and `Teams Assistant -
-    /// supervision 42` for a supervisor's look at it.
+    /// supervision 42` for a supervisor's look at it; `Teams Assistant - audit` for an audit.
     pub(crate) fn session_name(self, item: Option<u64>) -> SessionName {
         let purpose = match self {
             Self::Classify => "director",
             Self::Summarize => "summary",
             Self::Supervise => "supervision",
+            // An audit is about a batch of runs, never one item.
+            Self::Audit => return SessionName::purpose("audit", None),
         };
         SessionName::purpose(purpose, item)
     }
